@@ -1,0 +1,20 @@
+               TAP DENSITY REPORT               
+
+Product: ee | Batch: fggg
+Date: 2026-04-22T17:28:33
+Company: ttyio
+
+productName: ee
+batchNumber: fggg
+status: completed
+completedSteps: 2
+stepCount: 2
+initialWeightG: 78
+operatorName: qq
+employeeId: qq
+usp: Custom
+testStartTime: 2026-04-22T17:28:33
+testEndTime: 2026-04-22T17:29:18
+durationSeconds: 45
+createdAt: 2026-04-22T17:28:33
+completedAt: 2026-04-22T17:29:18

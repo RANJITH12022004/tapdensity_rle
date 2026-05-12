@@ -1,0 +1,20 @@
+                          TAP DENSITY REPORT                          
+
+Product: rr
+Batch: yyy
+Date: 2026-04-22T13:09:00
+Company: ttyio
+
+productName: rr
+batchNumber: yyy
+status: aborted
+completedSteps: 1
+stepCount: 3
+initialWeightG: 55
+operatorName: qq
+employeeId: qq
+testStartTime: 2026-04-22T13:09:00
+testEndTime: 2026-04-22T13:13:19
+createdAt: 2026-04-22T13:09:00
+completedAt: 2026-04-22T13:13:19
+

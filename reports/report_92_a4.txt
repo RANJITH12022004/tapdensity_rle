@@ -1,0 +1,20 @@
+                          TAP DENSITY REPORT                          
+
+Product: gg | Batch: kkk
+Date: 2026-04-22T15:47:11
+Company: ttyio
+
+productName: gg
+batchNumber: kkk
+status: aborted
+completedSteps: 1
+stepCount: 4
+initialWeightG: 33
+operatorName: qq
+employeeId: qq
+usp: USP 2
+testStartTime: 2026-04-22T15:47:11
+testEndTime: 2026-04-22T15:48:19
+createdAt: 2026-04-22T15:47:11
+completedAt: 2026-04-22T15:48:19
+

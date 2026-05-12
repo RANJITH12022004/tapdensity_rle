@@ -1,0 +1,502 @@
+[
+  {
+    "failedAttempts": 3,
+    "id": 1,
+    "name": "11",
+    "password": "11",
+    "role": "QA",
+    "status": "active",
+    "username": "11",
+    "biometricEnabled": true,
+    "fingerprintTemplateId": null,
+    "biometricEnrolledAt": null,
+    "biometricEnrollmentStatus": "not_enrolled",
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    }
+  },
+  {
+    "failedAttempts": 0,
+    "id": 3,
+    "name": "tt",
+    "password": "tt",
+    "role": "Supervisor",
+    "status": "active",
+    "username": "tt"
+  },
+  {
+    "failedAttempts": 0,
+    "id": 4,
+    "name": "qq",
+    "password": "qq",
+    "role": "Admin",
+    "status": "active",
+    "username": "qq",
+    "biometricEnabled": true,
+    "fingerprintTemplateId": null,
+    "biometricEnrolledAt": null,
+    "biometricEnrollmentStatus": "not_enrolled",
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    },
+    "createdAt": "2026-04-21T04:09:38.787938Z",
+    "passwordLastChangedAt": "2026-04-21T04:09:38.787938Z"
+  },
+  {
+    "failedAttempts": 0,
+    "id": 7,
+    "name": "qq",
+    "password": "qq",
+    "role": "Admin",
+    "status": "active",
+    "username": "qq"
+  },
+  {
+    "name": "ghg",
+    "username": "11",
+    "password": "11",
+    "role": "Admin",
+    "id": 8,
+    "status": "active",
+    "failedAttempts": 0
+  },
+  {
+    "failedAttempts": 0,
+    "id": 9,
+    "name": "rr",
+    "password": "Ajay@9346",
+    "role": "Admin",
+    "status": "active",
+    "username": "rr"
+  },
+  {
+    "failedAttempts": 0,
+    "id": 10,
+    "name": "AJAY",
+    "password": "Ajay@9346",
+    "role": "QA",
+    "status": "disabled",
+    "username": "AJAY223312"
+  },
+  {
+    "name": "qwer",
+    "username": "qwer",
+    "password": "Ajay@9346",
+    "role": "User",
+    "id": 11,
+    "status": "active",
+    "failedAttempts": 0
+  },
+  {
+    "failedAttempts": 3,
+    "id": 12,
+    "name": "hh",
+    "password": "Hhhh@9346",
+    "role": "User",
+    "status": "active",
+    "username": "hh"
+  },
+  {
+    "failedAttempts": 0,
+    "id": 13,
+    "name": "hh",
+    "password": "Hhhh@1122",
+    "role": "Supervisor",
+    "status": "active",
+    "username": "hh2"
+  },
+  {
+    "failedAttempts": 0,
+    "id": 14,
+    "name": "ajay",
+    "password": "Ajay@9346",
+    "role": "QA",
+    "status": "active",
+    "username": "ajay"
+  },
+  {
+    "name": "tyu",
+    "username": "tyu",
+    "password": "Ajay@9999",
+    "role": "Supervisor",
+    "id": 15,
+    "status": "active",
+    "failedAttempts": 0
+  },
+  {
+    "biometricEnabled": true,
+    "biometricEnrolledAt": 947119781,
+    "biometricEnrollmentStatus": "enrolled",
+    "failedAttempts": 0,
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    },
+    "fingerprintTemplateId": 1,
+    "id": 16,
+    "name": "Live Finger Member",
+    "password": "Tmp@947119766Aa!",
+    "permissionsVersion": 1,
+    "role": "operator",
+    "status": "disabled",
+    "username": "live_member_947119766"
+  },
+  {
+    "name": "Auto Link Member",
+    "username": "auto_link_947119925",
+    "password": "Tmp@947119925Aa!",
+    "role": "operator",
+    "status": "active",
+    "biometricEnabled": true,
+    "id": 17,
+    "failedAttempts": 0,
+    "fingerprintTemplateId": null,
+    "biometricEnrolledAt": null,
+    "biometricEnrollmentStatus": "not_enrolled",
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    }
+  },
+  {
+    "name": "Auto Link Member",
+    "username": "auto_link_947120015",
+    "password": "Tmp@947120015Aa!",
+    "role": "operator",
+    "status": "active",
+    "biometricEnabled": true,
+    "id": 18,
+    "failedAttempts": 0,
+    "fingerprintTemplateId": null,
+    "biometricEnrolledAt": null,
+    "biometricEnrollmentStatus": "not_enrolled",
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    }
+  },
+  {
+    "name": "Qwerty@123456",
+    "username": "Qwerty@123456",
+    "password": "Qwerty@123456",
+    "role": "Admin",
+    "biometricEnabled": true,
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    },
+    "id": 19,
+    "status": "active",
+    "failedAttempts": 0,
+    "fingerprintTemplateId": 2,
+    "biometricEnrolledAt": 947121193,
+    "biometricEnrollmentStatus": "enrolled",
+    "createdAt": "2026-04-22T12:05:17.700216Z",
+    "passwordLastChangedAt": "2026-04-22T12:05:17.700216Z"
+  },
+  {
+    "name": "ajay",
+    "username": "ajay22",
+    "password": "Ajay@9346",
+    "role": "Admin",
+    "biometricEnabled": true,
+    "fingerprintTemplateId": null,
+    "biometricEnrollmentStatus": "pending",
+    "biometricEnrolledAt": null,
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [
+        "disable-recipes",
+        "edit-datetime",
+        "profile",
+        "quick-test",
+        "recipe-delete",
+        "recipe-edit",
+        "recipe-list",
+        "reports-delete",
+        "reports-view",
+        "settings",
+        "user-add",
+        "user-change-role",
+        "user-delete",
+        "user-enable",
+        "user-manage",
+        "user-unlock",
+        "validate-menu"
+      ],
+      "deny": []
+    },
+    "id": 20,
+    "status": "active",
+    "failedAttempts": 0
+  },
+  {
+    "name": "ajay",
+    "username": "ajay2233",
+    "password": "Ajay@9346",
+    "role": "Admin",
+    "biometricEnabled": true,
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    },
+    "id": 21,
+    "status": "active",
+    "failedAttempts": 0,
+    "fingerprintTemplateId": 4,
+    "biometricEnrolledAt": 947121430,
+    "biometricEnrollmentStatus": "enrolled"
+  },
+  {
+    "name": "ajay",
+    "username": "hello",
+    "password": "Ajay@9346",
+    "role": "Admin",
+    "biometricEnabled": true,
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    },
+    "id": 22,
+    "status": "active",
+    "failedAttempts": 0,
+    "fingerprintTemplateId": 6,
+    "biometricEnrolledAt": 947121509,
+    "biometricEnrollmentStatus": "enrolled"
+  },
+  {
+    "name": "fingerprint",
+    "username": "fingerprint",
+    "password": "Ajay@9346",
+    "role": "Admin",
+    "biometricEnabled": true,
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    },
+    "id": 23,
+    "status": "active",
+    "failedAttempts": 0,
+    "fingerprintTemplateId": null,
+    "biometricEnrolledAt": null,
+    "biometricEnrollmentStatus": "not_enrolled"
+  },
+  {
+    "name": "Flow Test Member",
+    "username": "flow_user_947132930",
+    "password": "Tmp@947132930Aa!",
+    "role": "operator",
+    "status": "active",
+    "biometricEnabled": true,
+    "biometricEnrollmentStatus": "pending",
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    },
+    "id": 24,
+    "failedAttempts": 0,
+    "fingerprintTemplateId": null,
+    "biometricEnrolledAt": null
+  },
+  {
+    "name": "Flow User",
+    "username": "flow_user_947135416",
+    "password": "Tmp@947135416Aa!",
+    "role": "User",
+    "biometricEnabled": true,
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    },
+    "id": 25,
+    "status": "active",
+    "failedAttempts": 0,
+    "fingerprintTemplateId": null,
+    "biometricEnrolledAt": null,
+    "biometricEnrollmentStatus": "not_enrolled"
+  },
+  {
+    "name": "Audit User",
+    "username": "audit_user_947141016",
+    "password": "Tmp@1234Aa",
+    "role": "User",
+    "biometricEnabled": false,
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    },
+    "id": 26,
+    "status": "active",
+    "failedAttempts": 0,
+    "fingerprintTemplateId": null,
+    "biometricEnrolledAt": null,
+    "biometricEnrollmentStatus": "not_enrolled"
+  },
+  {
+    "name": "aaa",
+    "username": "aaa",
+    "password": "Aaaa@1111",
+    "role": "Admin",
+    "biometricEnabled": true,
+    "fingerprintTemplateId": 3,
+    "biometricEnrollmentStatus": "enrolled",
+    "biometricEnrolledAt": 1776677543,
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [
+        "disable-recipes",
+        "edit-datetime",
+        "profile",
+        "quick-test",
+        "recipe-delete",
+        "recipe-edit",
+        "recipe-list",
+        "reports-delete",
+        "reports-view",
+        "settings",
+        "user-add",
+        "user-change-role",
+        "user-delete",
+        "user-enable",
+        "user-manage",
+        "user-unlock",
+        "validate-menu"
+      ],
+      "deny": []
+    },
+    "id": 27,
+    "status": "active",
+    "failedAttempts": 0
+  },
+  {
+    "name": "qwer",
+    "username": "qwerr",
+    "password": "Qwer@123456",
+    "role": "Admin",
+    "biometricEnabled": true,
+    "fingerprintTemplateId": 5,
+    "biometricEnrollmentStatus": "enrolled",
+    "biometricEnrolledAt": 1776684917,
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [
+        "disable-recipes",
+        "edit-datetime",
+        "profile",
+        "quick-test",
+        "recipe-delete",
+        "recipe-edit",
+        "recipe-list",
+        "reports-delete",
+        "reports-view",
+        "settings",
+        "user-add",
+        "user-change-role",
+        "user-delete",
+        "user-enable",
+        "user-manage",
+        "user-unlock",
+        "validate-menu"
+      ],
+      "deny": []
+    },
+    "id": 28,
+    "status": "active",
+    "failedAttempts": 0
+  },
+  {
+    "name": "mani",
+    "username": "mani",
+    "password": "Qwert@12345",
+    "role": "Admin",
+    "biometricEnabled": true,
+    "fingerprintTemplateId": 7,
+    "biometricEnrollmentStatus": "enrolled",
+    "biometricEnrolledAt": 1776859338,
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [
+        "disable-recipes",
+        "edit-datetime",
+        "profile",
+        "quick-test",
+        "recipe-delete",
+        "recipe-edit",
+        "recipe-list",
+        "reports-delete",
+        "reports-view",
+        "settings",
+        "user-add",
+        "user-change-role",
+        "user-delete",
+        "user-enable",
+        "user-manage",
+        "user-unlock",
+        "validate-menu"
+      ],
+      "deny": []
+    },
+    "id": 29,
+    "status": "active",
+    "failedAttempts": 0,
+    "createdAt": "2026-04-22T12:02:00.105229Z",
+    "passwordLastChangedAt": "2026-04-22T12:02:00.105229Z"
+  },
+  {
+    "name": "rahul",
+    "username": "rahul",
+    "password": "Rahul@2001",
+    "role": "User",
+    "biometricEnabled": true,
+    "fingerprintTemplateId": 8,
+    "biometricEnrollmentStatus": "enrolled",
+    "biometricEnrolledAt": 1777302778,
+    "permissionsVersion": 1,
+    "featureOverrides": {
+      "allow": [
+        "quick-test",
+        "reports-view",
+        "validate-menu"
+      ],
+      "deny": []
+    },
+    "id": 30,
+    "status": "active",
+    "failedAttempts": 0,
+    "createdAt": "2026-04-27T15:12:32.864313Z",
+    "passwordLastChangedAt": "2026-04-27T15:12:32.864313Z"
+  },
+  {
+    "name": "Smoke Test",
+    "username": "smoketest_zz",
+    "password": "GoodPass1!",
+    "role": "User",
+    "featureOverrides": {
+      "allow": [],
+      "deny": []
+    },
+    "id": 31,
+    "status": "disabled",
+    "failedAttempts": 0,
+    "createdAt": "2026-05-12T09:17:03.652373Z",
+    "passwordLastChangedAt": "2026-05-12T09:17:03.652373Z",
+    "biometricEnabled": true,
+    "fingerprintTemplateId": null,
+    "biometricEnrolledAt": null,
+    "biometricEnrollmentStatus": "not_enrolled",
+    "permissionsVersion": 1
+  }
+]

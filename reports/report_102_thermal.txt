@@ -1,0 +1,31 @@
+
+TAP DENSITY TEST REPORT
+
+Company: RAM
+Model No: THYY
+Serial No: THY
+Location: dd
+Instrument ID: qq
+Last Validation Date: 03-05-2026
+Next Validation Due: 03-08-2026
+
+Product: rr
+Batch: yy
+Report/Test Start: 05/05/2026 10:33:10
+Generated: 05/05/2026 11:56:10
+Test Duration: 4980 s
+Test Status: Aborted (2/3 steps)
+
+TEST DATA:
+Step 1: Vol=34 | dVol=-9 | Bulk=13.36 |
+Tap=9.824 | Result=--
+Step 2: Vol=44 | dVol=-10 | Bulk=13.36 |
+Tap=7.591 | Result=--
+
+Operated by: qq
+Employee ID: qq
+Approval Status: pending
+Approval Result: --
+Approved By: --
+Approved At: --
+Approval Remarks: 

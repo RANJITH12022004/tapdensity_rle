@@ -1,0 +1,17 @@
+                          TAP DENSITY REPORT                          
+
+Product: yi
+Batch: 22
+Date: 2026-04-04T04:29:20.222Z
+Company: ttyio
+
+productName: yi
+batchNumber: 22
+status: completed
+completedSteps: 3
+stepCount: 3
+initialWeightG: 44
+usp: USP 1
+createdAt: 2026-04-04T04:29:20.222Z
+completedAt: 2026-04-04T04:29:20.222Z
+

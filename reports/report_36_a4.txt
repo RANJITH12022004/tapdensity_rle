@@ -1,0 +1,18 @@
+                          TAP DENSITY REPORT                          
+
+Product: rryy
+Batch: tt
+Date: 2026-04-03T04:54:04.206Z
+Company: ttyio
+
+productName: rryy
+batchNumber: tt
+status: aborted
+completedSteps: 1
+stepCount: 3
+sampleVolumeMl: 100
+initialWeightG: 44
+usp: USP 1
+createdAt: 2026-04-03T04:54:04.206Z
+completedAt: 2026-04-03T04:54:04.208Z
+

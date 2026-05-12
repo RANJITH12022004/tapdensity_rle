@@ -1,0 +1,14 @@
+                          TAP DENSITY REPORT                          
+
+Product: sns
+Batch: 33
+Date: 2026-03-23T06:20:14.043Z
+Company: ttyio
+
+productName: sns
+batchNumber: 33
+completedSteps: 1
+stepCount: 3
+createdAt: 2026-03-23T06:20:14.043Z
+completedAt: 2026-03-23T06:20:14.043Z
+

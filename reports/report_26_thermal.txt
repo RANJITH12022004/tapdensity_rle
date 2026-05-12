@@ -1,0 +1,14 @@
+               TAP DENSITY REPORT               
+
+Product: eee
+Batch: rr
+Date: 2026-03-31T05:49:08.644Z
+Company: ttyio
+
+productName: eee
+batchNumber: rr
+completedSteps: 2
+stepCount: 5
+initialWeightG: 11
+createdAt: 2026-03-31T05:49:08.644Z
+completedAt: 2026-03-31T05:49:08.644Z

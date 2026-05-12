@@ -1,0 +1,15 @@
+               TAP DENSITY REPORT               
+
+Product: www
+Batch: ww
+Date: 2026-03-24T09:38:10.634Z
+Company: ttyio
+
+productName: www
+batchNumber: ww
+completedSteps: 2
+stepCount: 4
+sampleVolumeMl: 100
+usp: USP 1
+createdAt: 2026-03-24T09:38:10.634Z
+completedAt: 2026-03-24T09:38:10.634Z

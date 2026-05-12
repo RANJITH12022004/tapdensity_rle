@@ -1,0 +1,16 @@
+                          TAP DENSITY REPORT                          
+
+Product: aa
+Batch: aa
+Date: 2026-03-24T11:38:09.680Z
+Company: ttyio
+
+productName: aa
+batchNumber: aa
+completedSteps: 1
+stepCount: 3
+sampleVolumeMl: 50
+usp: USP 1
+createdAt: 2026-03-24T11:38:09.680Z
+completedAt: 2026-03-24T11:38:09.680Z
+

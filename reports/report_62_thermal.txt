@@ -1,0 +1,16 @@
+               TAP DENSITY REPORT               
+
+Product: qqqqq
+Batch: rr
+Date: 2026-04-06T05:08:02.295Z
+Company: ttyio
+
+productName: qqqqq
+batchNumber: rr
+status: completed
+completedSteps: 2
+stepCount: 2
+initialWeightG: 56
+usp: USP 2
+createdAt: 2026-04-06T05:08:02.295Z
+completedAt: 2026-04-06T05:08:02.295Z

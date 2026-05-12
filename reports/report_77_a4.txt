@@ -1,0 +1,17 @@
+                          TAP DENSITY REPORT                          
+
+Product: t
+Batch: hdhd
+Date: 2026-04-20T09:25:48.765Z
+Company: ttyio
+
+productName: t
+batchNumber: hdhd
+status: completed
+completedSteps: 1
+stepCount: 1
+initialWeightG: 11
+usp: USP 1
+createdAt: 2026-04-20T09:25:48.765Z
+completedAt: 2026-04-20T09:25:48.765Z
+

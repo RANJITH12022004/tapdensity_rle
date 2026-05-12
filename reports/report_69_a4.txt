@@ -1,0 +1,16 @@
+                          TAP DENSITY REPORT                          
+
+Product: hh
+Batch: rrt
+Date: 2026-04-07T12:05:42.411Z
+Company: ttyio
+
+productName: hh
+batchNumber: rrt
+status: completed
+completedSteps: 3
+stepCount: 3
+initialWeightG: 345
+createdAt: 2026-04-07T12:05:42.411Z
+completedAt: 2026-04-07T12:05:42.411Z
+

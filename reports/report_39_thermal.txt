@@ -1,0 +1,17 @@
+               TAP DENSITY REPORT               
+
+Product: 11
+Batch: 11
+Date: 2026-04-03T10:18:21.431Z
+Company: ttyio
+
+productName: 11
+batchNumber: 11
+status: aborted
+completedSteps: 1
+stepCount: 10
+sampleVolumeMl: 100
+initialWeightG: 11
+usp: USP 1
+createdAt: 2026-04-03T10:18:21.431Z
+completedAt: 2026-04-03T10:18:21.432Z

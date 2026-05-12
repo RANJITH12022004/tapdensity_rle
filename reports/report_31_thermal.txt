@@ -1,0 +1,14 @@
+               TAP DENSITY REPORT               
+
+Product: hh
+Batch: 12
+Date: 2026-04-01T05:40:45.486Z
+Company: ttyio
+
+productName: hh
+batchNumber: 12
+completedSteps: 3
+stepCount: 3
+initialWeightG: 22
+createdAt: 2026-04-01T05:40:45.486Z
+completedAt: 2026-04-01T05:40:45.486Z

@@ -1,0 +1,1871 @@
+[
+  {
+    "productName": "rr",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-03-25T05:43:11.726Z",
+    "lastUsed": "2026-03-25T05:43:11.726Z",
+    "id": 5
+  },
+  {
+    "productName": "rr",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 5,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-03-25T05:43:55.431Z",
+    "lastUsed": "2026-03-25T05:43:55.431Z",
+    "id": 6
+  },
+  {
+    "productName": "ww",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-03-26T05:45:44.775Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-03-26T05:45:44.775Z",
+    "id": 7
+  },
+  {
+    "productName": "dd",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-03-26T05:45:53.307Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-03-26T05:45:53.307Z",
+    "id": 8
+  },
+  {
+    "productName": "rr",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 37
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 37
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 37
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 37
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 37
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 37
+      }
+    ],
+    "stepCount": 6,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-03-26T06:04:45.512Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "Custom",
+    "uspMode": "CUSTOM",
+    "customTotalTaps": 222,
+    "lastUsed": "2026-03-26T06:04:45.512Z",
+    "id": 10
+  },
+  {
+    "productName": "ttt",
+    "steps": [
+      {
+        "speed": 250,
+        "dropHeight": 14,
+        "tapCount": 9
+      },
+      {
+        "speed": 250,
+        "dropHeight": 14,
+        "tapCount": 8
+      },
+      {
+        "speed": 250,
+        "dropHeight": 14,
+        "tapCount": 8
+      },
+      {
+        "speed": 250,
+        "dropHeight": 14,
+        "tapCount": 8
+      }
+    ],
+    "stepCount": 4,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-03-26T06:05:35.900Z",
+    "speed": 250,
+    "dropHeight": 14,
+    "usp": "Custom",
+    "uspMode": "CUSTOM",
+    "customTotalTaps": 33,
+    "lastUsed": "2026-03-26T06:05:35.900Z",
+    "id": 11
+  },
+  {
+    "productName": "rr",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 4,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-03-26T06:27:41.239Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-03-26T06:27:41.239Z",
+    "id": 12
+  },
+  {
+    "productName": "rr",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 74
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 74
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 74
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-03-31T04:53:58.531Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "Custom",
+    "uspMode": "CUSTOM",
+    "customTotalTaps": 222,
+    "lastUsed": "2026-03-31T04:53:58.531Z",
+    "recipeApprovalStatus": "approved",
+    "id": 15,
+    "recipeApprovedAt": "2026-03-31T05:19:16Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "cylinder": {
+      "volume": 100
+    },
+    "productName": "t",
+    "stepCount": 1,
+    "steps": [
+      {
+        "dropHeight": 14,
+        "speed": 300,
+        "tapCount": 10
+      }
+    ],
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "createdAt": "2026-04-03T05:34:47.733138Z",
+    "lastUsed": "2026-04-03T05:34:47.733138Z",
+    "recipeApprovalStatus": "approved",
+    "id": 18,
+    "recipeApprovedAt": "2026-04-03T05:34:47Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "cylinder": {
+      "volume": 100
+    },
+    "productName": "t2",
+    "stepCount": 1,
+    "steps": [
+      {
+        "dropHeight": 14,
+        "speed": 300,
+        "tapCount": 10
+      }
+    ],
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "createdAt": "2026-04-03T05:37:44.114547Z",
+    "lastUsed": "2026-04-03T05:37:44.114547Z",
+    "recipeApprovalStatus": "approved",
+    "id": 19,
+    "recipeApprovedAt": "2026-04-03T05:37:44Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "qqqqq",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 10,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-03T05:40:44.111Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-03T05:40:44.111Z",
+    "recipeApprovalStatus": "pending",
+    "id": 20
+  },
+  {
+    "productName": "ss",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-03T05:42:07.580Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-03T05:42:07.580Z",
+    "recipeApprovalStatus": "approved",
+    "id": 21,
+    "recipeApprovedAt": "2026-04-03T05:42:10Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "cylinder": {
+      "volume": 100
+    },
+    "productName": "scopeT",
+    "stepCount": 1,
+    "steps": [
+      {
+        "dropHeight": 14,
+        "speed": 300,
+        "tapCount": 10
+      }
+    ],
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "createdAt": "2026-04-03T05:52:07.439541Z",
+    "lastUsed": "2026-04-03T05:52:07.439541Z",
+    "recipeApprovalStatus": "pending",
+    "id": 22
+  },
+  {
+    "productName": "qq",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 10,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-03T06:00:05.344Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-03T06:00:05.344Z",
+    "recipeApprovalStatus": "approved",
+    "id": 23,
+    "recipeApprovedAt": "2026-04-03T06:00:19Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "rr",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 10,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-03T06:45:00.154Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-03T06:45:00.154Z",
+    "recipeApprovalStatus": "approved",
+    "id": 24,
+    "recipeApprovedAt": "2026-04-03T06:45:04Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "rr",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      }
+    ],
+    "stepCount": 2,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-03T08:51:53.234Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-03T08:51:53.234Z",
+    "recipeApprovalStatus": "approved",
+    "id": 25,
+    "recipeApprovedAt": "2026-04-03T08:51:58Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "rr",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 4,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-04-03T09:01:19.781Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-03T09:01:19.781Z",
+    "recipeApprovalStatus": "approved",
+    "id": 26,
+    "recipeApprovedAt": "2026-04-03T09:01:26Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "gg",
+    "steps": [
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 10
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 500
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 1250
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 4,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-04-03T09:35:58.420Z",
+    "speed": 250,
+    "dropHeight": 3,
+    "usp": "USP 2",
+    "uspMode": "USP2",
+    "lastUsed": "2026-04-03T09:35:58.420Z",
+    "recipeApprovalStatus": "approved",
+    "id": 27,
+    "recipeApprovedAt": "2026-04-03T09:36:15Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "tt",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      }
+    ],
+    "stepCount": 2,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-04-04T04:01:49.267Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-04T04:01:49.267Z",
+    "recipeApprovalStatus": "approved",
+    "id": 28,
+    "recipeApprovedAt": "2026-04-04T04:01:54Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovedByUsername": "11",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "ww",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-04-04T04:16:00.137Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-04T04:16:00.137Z",
+    "recipeApprovalStatus": "approved",
+    "id": 29,
+    "recipeApprovedAt": "2026-04-04T04:16:08Z",
+    "recipeApprovedBy": "qq (admin)",
+    "recipeApprovedByUsername": "qq",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "rr",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-04T04:20:17.005Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-04T04:20:17.005Z",
+    "recipeApprovalStatus": "pending",
+    "id": 30
+  },
+  {
+    "productName": "tt",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 5,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-04T04:21:18.698Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-04T04:21:18.698Z",
+    "recipeApprovalStatus": "approved",
+    "id": 31,
+    "recipeApprovedAt": "2026-04-04T04:21:23Z",
+    "recipeApprovedBy": "tt (qa)",
+    "recipeApprovedByUsername": "tt",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "tt",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 5,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-04T04:21:40.788Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-04T04:21:40.788Z",
+    "recipeApprovalStatus": "approved",
+    "id": 32,
+    "recipeApprovedAt": "2026-04-04T04:37:38Z",
+    "recipeApprovedBy": "qq (admin)",
+    "recipeApprovedByUsername": "qq",
+    "recipeApprovalRemarks": "ty"
+  },
+  {
+    "productName": "tt",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 4,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-04T04:22:27.196Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-04T04:22:27.196Z",
+    "recipeApprovalStatus": "approved",
+    "id": 33,
+    "recipeApprovedAt": "2026-04-04T04:37:26Z",
+    "recipeApprovedBy": "qq (admin)",
+    "recipeApprovedByUsername": "qq",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "yi",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-04T04:26:51.717Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-04T04:26:51.717Z",
+    "recipeApprovalStatus": "approved",
+    "id": 34,
+    "recipeApprovedAt": "2026-04-04T04:27:03Z",
+    "recipeApprovedBy": "qq (admin)",
+    "recipeApprovedByUsername": "qq",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "rty",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-04T04:42:39.752Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-04T04:42:39.752Z",
+    "recipeApprovalStatus": "approved",
+    "id": 35,
+    "recipeApprovedAt": "2026-04-04T04:42:43Z",
+    "recipeApprovedBy": "qq (admin)",
+    "recipeApprovedByUsername": "qq",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "qqqqq",
+    "steps": [
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 10
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 500
+      }
+    ],
+    "stepCount": 2,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-04T04:50:34.007Z",
+    "speed": 250,
+    "dropHeight": 3,
+    "usp": "USP 2",
+    "uspMode": "USP2",
+    "lastUsed": "2026-04-04T04:50:34.007Z",
+    "recipeApprovalStatus": "approved",
+    "id": 36,
+    "recipeApprovedAt": "2026-04-04T04:50:46Z",
+    "recipeApprovedBy": "qq (admin)",
+    "recipeApprovedByUsername": "qq",
+    "recipeApprovalRemarks": "qq"
+  },
+  {
+    "productName": "qqq",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-04-04T06:32:54.717Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-04T06:32:54.717Z",
+    "recipeApprovalStatus": "approved",
+    "id": 37,
+    "recipeApprovedAt": "2026-04-04T06:33:02Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovedByUsername": "11",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "tt",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 250
+    },
+    "createdAt": "2026-04-04T06:33:31.378Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-04T06:33:31.378Z",
+    "recipeApprovalStatus": "pending",
+    "id": 38
+  },
+  {
+    "productName": "hjj",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 2865
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 2865
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 2865
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 2865
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 2865
+      }
+    ],
+    "stepCount": 5,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-04T06:36:59.159Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "Custom",
+    "uspMode": "CUSTOM",
+    "customTotalTaps": 14325,
+    "lastUsed": "2026-04-04T06:36:59.159Z",
+    "recipeApprovalStatus": "pending",
+    "id": 39
+  },
+  {
+    "productName": "tty",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 5,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-04T06:50:09.993Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-04T06:50:09.993Z",
+    "recipeApprovalStatus": "pending",
+    "id": 40
+  },
+  {
+    "productName": "tyy",
+    "steps": [
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 10
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 500
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 1250
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 4,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-04-06T04:40:26.383Z",
+    "speed": 250,
+    "dropHeight": 3,
+    "usp": "USP 2",
+    "uspMode": "USP2",
+    "lastUsed": "2026-04-06T04:40:26.383Z",
+    "recipeApprovalStatus": "pending",
+    "id": 41
+  },
+  {
+    "productName": "ajayyyyy",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 4,
+    "cylinder": {
+      "volume": 50
+    },
+    "createdAt": "2026-04-06T04:40:38.256Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-06T04:40:38.256Z",
+    "recipeApprovalStatus": "pending",
+    "id": 42
+  },
+  {
+    "productName": "ttttyyhgffhgfhh",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 10,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-06T04:45:20.681Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-06T04:45:20.681Z",
+    "recipeApprovalStatus": "approved",
+    "recipeApprovedAt": "2026-04-06T04:45:20Z",
+    "recipeApprovedBy": "Factory (factory)",
+    "recipeApprovedByUsername": "rlerlt",
+    "recipeApprovalRemarks": "",
+    "id": 43
+  },
+  {
+    "productName": "rtt",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-07T09:09:21.214Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-07T09:09:21.214Z",
+    "recipeApprovalStatus": "approved",
+    "recipeApprovedAt": "2026-04-07T09:09:21Z",
+    "recipeApprovedBy": "Factory (factory)",
+    "recipeApprovedByUsername": "rlerlt",
+    "recipeApprovalRemarks": "",
+    "id": 44
+  },
+  {
+    "productName": "qwertyqwert",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-20T08:56:38.442Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "id": 45,
+    "lastUsed": "2026-04-20T08:56:38.442Z",
+    "recipeApprovalStatus": "pending"
+  },
+  {
+    "productName": "yt",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 10,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-07T12:06:23.961Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-07T12:06:23.961Z",
+    "recipeApprovalStatus": "approved",
+    "id": 46,
+    "recipeApprovedAt": "2026-04-07T12:06:35Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovedByUsername": "11",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "tyur",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 4,
+    "cylinder": {
+      "volume": 250
+    },
+    "createdAt": "2026-04-07T12:07:34.011Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-07T12:07:34.011Z",
+    "recipeApprovalStatus": "pending",
+    "id": 47
+  },
+  {
+    "productName": "Recipe 2026-04-21 06:45",
+    "steps": [
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 345
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 55
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 400
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 58
+      }
+    ],
+    "stepCount": 4,
+    "cylinder": {
+      "volume": 250
+    },
+    "createdAt": "2026-04-21T08:23:28.193Z",
+    "speed": 250,
+    "dropHeight": 3,
+    "usp": "Custom",
+    "uspMode": "CUSTOM",
+    "customTotalTaps": 858,
+    "id": 48,
+    "lastUsed": "2026-04-21T08:23:28.193Z",
+    "recipeApprovalStatus": "approved",
+    "recipeApprovedAt": "2026-04-21T08:23:35Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovedByUsername": "11",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "Recipe 2026-04-21 07:21",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 3,
+        "tapCount": 400
+      },
+      {
+        "speed": 300,
+        "dropHeight": 3,
+        "tapCount": 40
+      },
+      {
+        "speed": 300,
+        "dropHeight": 3,
+        "tapCount": 333
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-21T07:21:45.320Z",
+    "speed": 300,
+    "dropHeight": 3,
+    "usp": "Custom",
+    "uspMode": "CUSTOM",
+    "customTotalTaps": 773,
+    "lastUsed": "2026-04-21T07:21:45.320Z",
+    "recipeApprovalStatus": "approved",
+    "id": 49,
+    "recipeApprovedAt": "2026-04-21T07:22:10Z",
+    "recipeApprovedBy": "11 (qa)",
+    "recipeApprovedByUsername": "11",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "rge",
+    "steps": [
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 33
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 99
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 10
+      }
+    ],
+    "stepCount": 3,
+    "cylinder": {
+      "volume": 250
+    },
+    "createdAt": "2026-04-21T08:45:17.078Z",
+    "speed": 250,
+    "dropHeight": 3,
+    "usp": "Custom",
+    "uspMode": "CUSTOM",
+    "customTotalTaps": 142,
+    "lastUsed": "2026-04-21T08:45:17.078Z",
+    "recipeApprovalStatus": "pending",
+    "id": 50
+  },
+  {
+    "productName": "ee",
+    "steps": [
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 23
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 26
+      }
+    ],
+    "stepCount": 2,
+    "cylinder": {
+      "volume": 250
+    },
+    "createdAt": "2026-04-22T11:13:06.889Z",
+    "speed": 250,
+    "dropHeight": 3,
+    "usp": "Custom",
+    "uspMode": "CUSTOM",
+    "customTotalTaps": 49,
+    "lastUsed": "2026-04-22T11:13:06.889Z",
+    "recipeApprovalStatus": "approved",
+    "id": 51,
+    "recipeApprovedAt": "2026-04-22T16:43:23",
+    "recipeApprovedBy": "qq (admin)",
+    "recipeApprovedByUsername": "qq",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "uuuuuu",
+    "steps": [
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 10
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 500
+      }
+    ],
+    "stepCount": 2,
+    "cylinder": {
+      "volume": 250
+    },
+    "createdAt": "2026-04-22T11:45:02.076Z",
+    "speed": 250,
+    "dropHeight": 3,
+    "usp": "USP 2",
+    "uspMode": "USP2",
+    "lastUsed": "2026-04-22T11:45:02.076Z",
+    "recipeApprovalStatus": "pending",
+    "id": 52
+  },
+  {
+    "productName": "mallik2",
+    "steps": [
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 10
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 500
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 1250
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 1250
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 1250
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 1250
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 1250
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 1250
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 1250
+      },
+      {
+        "speed": 250,
+        "dropHeight": 3,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 10,
+    "cylinder": {
+      "volume": 250
+    },
+    "createdAt": "2026-04-24T05:31:09.608Z",
+    "speed": 250,
+    "dropHeight": 3,
+    "usp": "USP 2",
+    "uspMode": "USP2",
+    "id": 53,
+    "lastUsed": "2026-04-24T05:31:09.608Z",
+    "recipeApprovalStatus": "approved",
+    "recipeApprovedAt": "2026-04-24T11:01:09",
+    "recipeApprovedBy": "Factory1 (factory)",
+    "recipeApprovedByUsername": "rlerlt",
+    "recipeApprovalRemarks": ""
+  },
+  {
+    "productName": "mallik1",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 500
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      },
+      {
+        "speed": 300,
+        "dropHeight": 14,
+        "tapCount": 1250
+      }
+    ],
+    "stepCount": 10,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-04-24T05:31:30.708Z",
+    "speed": 300,
+    "dropHeight": 14,
+    "usp": "USP 1",
+    "uspMode": "USP1",
+    "lastUsed": "2026-04-24T05:31:30.708Z",
+    "recipeApprovalStatus": "approved",
+    "recipeApprovedAt": "2026-04-24T11:01:30",
+    "recipeApprovedBy": "Factory1 (factory)",
+    "recipeApprovedByUsername": "rlerlt",
+    "recipeApprovalRemarks": "",
+    "id": 54
+  },
+  {
+    "productName": "POWDER",
+    "steps": [
+      {
+        "speed": 300,
+        "dropHeight": 3,
+        "tapCount": 100
+      },
+      {
+        "speed": 300,
+        "dropHeight": 3,
+        "tapCount": 100
+      },
+      {
+        "speed": 300,
+        "dropHeight": 3,
+        "tapCount": 100
+      },
+      {
+        "speed": 300,
+        "dropHeight": 3,
+        "tapCount": 10
+      },
+      {
+        "speed": 300,
+        "dropHeight": 3,
+        "tapCount": 1
+      }
+    ],
+    "stepCount": 5,
+    "cylinder": {
+      "volume": 100
+    },
+    "createdAt": "2026-05-05T08:20:19.085Z",
+    "speed": 300,
+    "dropHeight": 3,
+    "usp": "Custom",
+    "uspMode": "CUSTOM",
+    "customTotalTaps": 311,
+    "id": 55,
+    "lastUsed": "2026-05-05T08:20:19.085Z",
+    "recipeApprovalStatus": "approved",
+    "recipeApprovedAt": "2026-05-05T13:50:26",
+    "recipeApprovedBy": "qq (admin)",
+    "recipeApprovedByUsername": "qq",
+    "recipeApprovalRemarks": ""
+  }
+]

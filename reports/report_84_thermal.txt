@@ -1,0 +1,18 @@
+               TAP DENSITY REPORT               
+
+Product: hh
+Batch: ggg
+Date: 2026-04-22T07:14:59.980Z
+Company: ttyio
+
+productName: hh
+batchNumber: ggg
+status: aborted
+completedSteps: 0
+stepCount: 4
+initialWeightG: 445
+operatorName: qq
+employeeId: qq
+usp: Custom
+createdAt: 2026-04-22T07:14:59.980Z
+completedAt: 2026-04-22T07:14:59.980Z

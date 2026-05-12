@@ -1,0 +1,19 @@
+               TAP DENSITY REPORT               
+
+Product: N/A | Batch: N/A
+Date: 2026-04-22T18:10:00
+Company: ttyio
+
+usp: USP 2
+tapsMin: 250
+dropHeight: 3
+expectedTapCount: 250
+expectedTolerance: 50
+expectedTapCountMin: 200
+expectedTapCountMax: 300
+actualTapCount: 249
+status: PASS
+operatorName: tester
+employeeId: tester
+createdAt: 2026-04-22T18:10:00
+completedAt: 2026-04-22T18:11:00
