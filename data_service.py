@@ -903,6 +903,60 @@ def clear_current_user():
             pass
 
 
+_SESSION_POWER_AUDIT_PENDING = "session_power_audit_pending.json"
+_APP_CLEAN_STOP_FLAG = "app_clean_stop.flag"
+
+
+def write_session_power_audit_pending(user: Dict[str, Any]):
+    """Mark an open logged-in session for unclean-shutdown detection on next process start."""
+    path = _get_storage_path(_SESSION_POWER_AUDIT_PENDING)
+    payload = {
+        "username": (user.get("username") or user.get("name") or "").strip(),
+        "role": (user.get("role") or "").strip(),
+        "ts_ms": int(datetime.now().timestamp() * 1000),
+    }
+    _save_json_file(path, payload)
+
+
+def read_session_power_audit_pending() -> Optional[Dict[str, Any]]:
+    path = _get_storage_path(_SESSION_POWER_AUDIT_PENDING)
+    if not path.exists():
+        return None
+    data = _load_json_file(path, default=None)
+    return data if isinstance(data, dict) else None
+
+
+def delete_session_power_audit_pending():
+    path = _get_storage_path(_SESSION_POWER_AUDIT_PENDING)
+    if path.exists():
+        try:
+            path.unlink()
+        except Exception:
+            pass
+
+
+def consume_app_clean_stop_flag() -> bool:
+    """If the previous process exit was marked clean (SIGTERM/SIGINT), return True and remove the flag."""
+    path = _get_storage_path(_APP_CLEAN_STOP_FLAG)
+    if not path.exists():
+        return False
+    try:
+        path.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def touch_app_clean_stop_flag():
+    """Mark a clean application shutdown (best-effort; used to avoid false power-interruption audits)."""
+    path = _get_storage_path(_APP_CLEAN_STOP_FLAG)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    except Exception:
+        pass
+
+
 # =================== TEST RUN DATA ==========================
 
 

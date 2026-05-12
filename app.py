@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -211,6 +212,70 @@ def _audit_event(
         timestamp_ms=audit_time.get("timestamp_ms"),
         date_time=audit_time.get("date_time"),
     )
+
+
+def _startup_session_power_audit():
+    """If the last run ended without a clean stop while a session was active, log one power-interruption row."""
+    try:
+        had_clean_shutdown = data_service.consume_app_clean_stop_flag()
+        pending = data_service.read_session_power_audit_pending()
+        if pending and not had_clean_shutdown:
+            un = (pending.get("username") or "").strip()
+            role = (pending.get("role") or "").strip()
+            audit_time = _audit_time_fields()
+            if audit_service.is_hidden_factory_actor(un, role):
+                audit_service.log_structured_event(
+                    user="--",
+                    role="--",
+                    action="Power interruption",
+                    outcome="success",
+                    entity_type="session",
+                    entity_name="power",
+                    details="Privileged factory session was active when power was interrupted or the system restarted.",
+                    event_type="compliance",
+                    request_source="system/startup",
+                    timestamp_ms=audit_time.get("timestamp_ms"),
+                    date_time=audit_time.get("date_time"),
+                )
+            else:
+                audit_service.log_structured_event(
+                    user="--",
+                    role="--",
+                    action="Power interruption",
+                    outcome="success",
+                    entity_type="session",
+                    entity_name="power",
+                    details="Session was active when power was interrupted or the system restarted.",
+                    event_type="compliance",
+                    target_user=un,
+                    extra={"lastKnownRole": role} if role else None,
+                    request_source="system/startup",
+                    timestamp_ms=audit_time.get("timestamp_ms"),
+                    date_time=audit_time.get("date_time"),
+                )
+        cur = data_service.get_current_user()
+        if cur:
+            data_service.write_session_power_audit_pending(cur)
+        else:
+            data_service.delete_session_power_audit_pending()
+    except Exception:
+        app.logger.exception("Startup session power audit failed")
+
+
+def _register_clean_shutdown_signals():
+    """Mark clean shutdown on SIGTERM/SIGINT so the next start does not log a false power interruption."""
+
+    def _handler(signum, frame):
+        try:
+            data_service.touch_app_clean_stop_flag()
+        except Exception:
+            pass
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError, AttributeError):
+            pass
 
 
 def _require_user_admin_verification():
@@ -1043,9 +1108,70 @@ def factory_reset():
         user = data_service.get_current_user()
         if not user or (user.get("role") or "").strip().lower() != "factory":
             return jsonify({"error": "Forbidden. Factory role required."}), 403
+
+        # Find when the current login session began so we can keep its rows.
+        # write_session_power_audit_pending is set on every successful login
+        # (password, biometric, password-expired-reset), so ts_ms is reliable.
+        pending = data_service.read_session_power_audit_pending() or {}
+        try:
+            session_start_ms = int(pending.get("ts_ms") or 0)
+        except (TypeError, ValueError):
+            session_start_ms = 0
+
+        # Delete recipes, reports, members, report files (existing behaviour;
+        # does NOT touch current_user.json or session_power_audit_pending.json,
+        # so the user stays signed in).
         result = data_service.factory_reset()
-        _audit(user.get("username") or user.get("name"), user.get("role"), "Factory settings changed", "Factory reset")
-        return jsonify({"success": True, "deleted": result["deleted"]}), 200
+
+        # Wipe audit rows older than the current session start.
+        # If session_start_ms is missing/zero we wipe EVERYTHING per the
+        # 'delete the rest' directive.
+        audit_removed = audit_service.clear_entries_before(session_start_ms)
+
+        # Write the post-reset audit row AFTER the wipe so it survives.
+        # If the actor is the hidden factory user, write an anonymised row so
+        # it is not stripped by the RLERLT/Factory suppression filter.
+        un = (user.get("username") or user.get("name") or "").strip()
+        role = (user.get("role") or "").strip()
+        audit_time = _audit_time_fields()
+        if audit_service.is_hidden_factory_actor(un, role):
+            audit_service.log_structured_event(
+                user="--",
+                role="--",
+                action="Factory reset performed",
+                outcome="success",
+                entity_type="system",
+                entity_name="factory-reset",
+                details="Factory reset performed; audit history older than the current session was erased.",
+                event_type="compliance",
+                request_source=_audit_request_source(),
+                extra={
+                    "deleted": result.get("deleted") or {},
+                    "auditRowsRemoved": audit_removed,
+                    "sessionStartMs": session_start_ms,
+                },
+                timestamp_ms=audit_time.get("timestamp_ms"),
+                date_time=audit_time.get("date_time"),
+            )
+        else:
+            _audit_event(
+                action="Factory reset performed",
+                outcome="success",
+                entity_type="system",
+                entity_name="factory-reset",
+                details="Factory reset performed; audit history older than the current session was erased.",
+                extra={
+                    "deleted": result.get("deleted") or {},
+                    "auditRowsRemoved": audit_removed,
+                    "sessionStartMs": session_start_ms,
+                },
+            )
+
+        return jsonify({
+            "success": True,
+            "deleted": result["deleted"],
+            "auditRowsRemoved": audit_removed,
+        }), 200
     except Exception as e:
         app.logger.exception("Error during factory reset")
         return jsonify({"error": str(e)}), 500
@@ -1080,6 +1206,7 @@ def login():
             user = data_service.authenticate_user(username, password)
             if user:
                 data_service.save_current_user(user)
+                data_service.write_session_power_audit_pending(user)
                 _audit_event(
                     action="Login",
                     outcome="success",
@@ -1135,6 +1262,7 @@ def login():
                     }), 403
             data_service.record_successful_login(username)
             data_service.save_current_user(user)
+            data_service.write_session_power_audit_pending(user)
             _audit_event(
                 action="Login",
                 outcome="success",
@@ -1253,6 +1381,7 @@ def login_biometric():
         user.pop("password", None)
         data_service.record_successful_login(username)
         data_service.save_current_user(user)
+        data_service.write_session_power_audit_pending(user)
         _audit_event(
             action="Biometric login",
             outcome="success",
@@ -1274,14 +1403,33 @@ def logout():
     try:
         user = data_service.get_current_user()
         if user:
-            _audit_event(
-                action="Logout",
-                outcome="success",
-                entity_type="session",
-                entity_name="logout",
-                details="User logged out",
-                target_user=user.get("username") or user.get("name") or "",
-            )
+            un = (user.get("username") or user.get("name") or "").strip()
+            role = (user.get("role") or "").strip()
+            if audit_service.is_hidden_factory_actor(un, role):
+                audit_time = _audit_time_fields()
+                audit_service.log_structured_event(
+                    user="--",
+                    role="--",
+                    action="Logout",
+                    outcome="success",
+                    entity_type="session",
+                    entity_name="logout",
+                    details="Privileged factory session ended",
+                    event_type="compliance",
+                    request_source="POST /api/data/auth/logout",
+                    timestamp_ms=audit_time.get("timestamp_ms"),
+                    date_time=audit_time.get("date_time"),
+                )
+            else:
+                _audit_event(
+                    action="Logout",
+                    outcome="success",
+                    entity_type="session",
+                    entity_name="logout",
+                    details="User logged out",
+                    target_user=user.get("username") or user.get("name") or "",
+                )
+        data_service.delete_session_power_audit_pending()
         data_service.clear_current_user()
         return jsonify({"success": True}), 200
     except Exception as e:
@@ -1296,6 +1444,7 @@ def session_ui_reset():
     Not a user-initiated logout: no audit entry (avoids false Logout on every refresh).
     """
     try:
+        data_service.delete_session_power_audit_pending()
         data_service.clear_current_user()
         return jsonify({"success": True}), 200
     except Exception as e:
@@ -2659,6 +2808,10 @@ def set_rtc_date_route():
     if result.get("success"):
         _audit(None, None, "RTC date set", dt_str)
     return jsonify(result), 200 if result.get("success") else 500
+
+
+_startup_session_power_audit()
+_register_clean_shutdown_signals()
 
 
 # =================== MAIN ==========================

