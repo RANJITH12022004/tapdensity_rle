@@ -21,6 +21,7 @@ except ImportError:
     CORS = None
 
 import data_service
+import rbac_service
 import audit_service
 import calculation_service
 import report_service
@@ -323,6 +324,39 @@ def _display_role_label(role_str):
     return r
 
 
+def _rbac_member_from_session():
+    """Member record (with normalized permissions) for RBAC, or factory stub user."""
+    cur = data_service.get_current_user()
+    if not cur:
+        return None
+    role = str((cur or {}).get("role") or "").strip().lower()
+    un = str((cur or {}).get("username") or "").strip().upper()
+    if role == "factory" or un == data_service.FACTORY_USERNAME.upper():
+        return cur
+    m = data_service.get_member_by_username(cur.get("username") or "")
+    return m if m else cur
+
+
+def _session_has_internal(internal_key: str) -> bool:
+    m = _rbac_member_from_session()
+    if not m:
+        return False
+    return rbac_service.member_has_internal(m, internal_key)
+
+
+def _verifier_payload_has_internal(verified, internal_key: str) -> bool:
+    if not verified:
+        return False
+    vr = str((verified or {}).get("role") or "").strip().lower()
+    if vr == "factory":
+        return True
+    un = (verified or {}).get("username") or ""
+    vm = data_service.get_member_by_username(un) if un else None
+    if not vm:
+        return False
+    return rbac_service.member_has_internal(vm, internal_key)
+
+
 def _session_role_header():
     return (request.headers.get("X-User-Role") or "").strip().lower()
 
@@ -448,14 +482,17 @@ def _consume_approval_verify_token(expected_purpose):
     if got != exp:
         return None, "Approval verification was issued for a different action."
     if exp == "report":
-        if not _approval_verifier_eligible_for_report(payload.get("role")):
-            return None, "Verification role does not match approval policy."
+        if not _verifier_payload_has_internal(payload, "test-report-approve"):
+            return None, "Verifier does not have test report approval permission."
     elif exp == "recipe":
-        if not _approval_verifier_eligible_for_recipe(payload.get("role")):
-            return None, "Verification role does not match approval policy."
+        if not _verifier_payload_has_internal(payload, "recipe-approve"):
+            return None, "Verifier does not have recipe approval permission."
     elif exp == "user_admin":
         if str(payload.get("role") or "").strip().lower() not in ("admin", "factory"):
             return None, "Verification role does not match approval policy."
+    elif exp == "export":
+        if not _verifier_payload_has_internal(payload, "export-approve"):
+            return None, "Verifier does not have export approval permission."
     else:
         return None, "Invalid approval purpose."
     return payload, None
@@ -1458,7 +1495,7 @@ def approval_verify():
         payload = request.get_json(force=True, silent=True) or {}
         method = str(payload.get("method") or "credentials").strip().lower()
         purpose = str(payload.get("purpose") or "recipe").strip().lower()
-        if purpose not in ("recipe", "report", "user_admin"):
+        if purpose not in ("recipe", "report", "user_admin", "export"):
             return jsonify({"ok": False, "error": "purpose must be recipe, report, or user_admin"}), 400
         verifier = None
         username = (payload.get("username") or "").strip()
@@ -1613,15 +1650,29 @@ def get_current_user_route():
 # =================== DATA: AUDIT LOG ==========================
 
 
+def _require_export_usb_and_verification_json():
+    cur = data_service.get_current_user()
+    if not cur:
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    if not _session_has_internal("export-usb"):
+        return jsonify({"success": False, "error": "Forbidden. Export to USB is not permitted for this account."}), 403
+    role = str(cur.get("role") or "").strip().lower()
+    if role != "factory":
+        _verified, verify_err = _consume_approval_verify_token("export")
+        if verify_err:
+            return jsonify({"success": False, "error": verify_err}), 401
+    return None
+
+
 @app.route("/api/data/audit-log", methods=["GET"])
 def get_audit_log():
-    """Return audit log entries. Restricted to factory/admin roles."""
+    """Return audit log entries. Requires audit-view permission (Factory bypass in RBAC)."""
     try:
-        # Enforce strict role-based access: only Factory and Admin may view audit trails.
         cur = data_service.get_current_user()
-        role = str((cur or {}).get("role") or "").strip().lower()
-        if role not in ("factory", "admin"):
-            return jsonify({"error": "Forbidden. Audit log visible only to Admin and Factory."}), 403
+        if not cur:
+            return jsonify({"error": "Unauthorized"}), 401
+        if not _session_has_internal("audit-view"):
+            return jsonify({"error": "Forbidden. You do not have permission to view the audit log."}), 403
 
         _audit(
             cur.get("username") or cur.get("name"),
@@ -1861,10 +1912,10 @@ def export_audit_trails():
     """
     mounted_now = None
     try:
+        gate = _require_export_usb_and_verification_json()
+        if gate is not None:
+            return gate
         cur = data_service.get_current_user()
-        role = str((cur or {}).get("role") or "").strip().lower()
-        if role not in ("factory", "admin"):
-            return jsonify({"success": False, "error": "Forbidden. Audit log visible only to Admin and Factory."}), 403
 
         data = request.get_json(force=True, silent=True) or {}
         filters_in = data.get("filters") or {}
@@ -2103,6 +2154,9 @@ def export_reports():
                 continue
         if not report_ids:
             return jsonify({"success": False, "error": "No report IDs provided"}), 400
+        gate = _require_export_usb_and_verification_json()
+        if gate is not None:
+            return gate
         device_path = (data.get("device_path") or "").strip() or None
         requested_export_path = (data.get("export_path") or "").strip() or None
         pdf_html_by_id = data.get("pdf_html_by_id") or {}
@@ -2240,6 +2294,10 @@ def export_reports_stream():
     else:
         pdf_html_by_id = {}
     power_off = bool(data.get("power_off") or False)
+
+    gate = _require_export_usb_and_verification_json()
+    if gate is not None:
+        return gate
 
     def _emit(obj):
         return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")

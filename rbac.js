@@ -1,5 +1,9 @@
 /**
  * rbac.js - Role-Based Access Control for Tap Density
+ *
+ * Non-Factory users: capability is driven only by permission cards stored in
+ * featureOverrides.allow (whitelist). Role no longer grants implicit feature access.
+ * Factory / RLERLT: full access except factory-only routes handled separately.
  */
 
 var ROLE_RESTRICTIONS = {
@@ -40,35 +44,120 @@ var ROLE_RESTRICTIONS = {
   factory: {},
 };
 
+/** Stored permission card keys (Add Member UI + member.featureOverrides.allow). */
+var PERMISSION_CARD_KEYS = [
+  'perm_test_access',
+  'perm_test_report_approve',
+  'perm_recipe_manage',
+  'perm_recipe_approve',
+  'perm_profile_admin',
+  'perm_validation_test',
+  'perm_validation_report_approve',
+  'perm_datetime',
+  'perm_reports_view',
+  'perm_audit_view',
+  'perm_export_usb',
+  'perm_export_approve',
+];
+
+/**
+ * Each card expands to internal feature keys used by navigation and checks.
+ * Internal keys are unique strings (screen map, action checks, or explicit gates).
+ */
+var PERM_CARD_EXPAND = {
+  perm_test_access: ['quick-test', 'recipe-list', 'recipe-test'],
+  perm_test_report_approve: ['test-report-approve'],
+  perm_recipe_manage: ['recipe-list', 'recipe-edit', 'settings'],
+  perm_recipe_approve: ['recipe-approve'],
+  perm_profile_admin: [
+    'user-manage',
+    'user-add',
+    'user-delete',
+    'user-unlock',
+    'user-enable',
+    'user-change-role',
+    'settings',
+  ],
+  perm_validation_test: ['validation-test', 'settings'],
+  perm_validation_report_approve: ['validation-report-approve'],
+  perm_datetime: ['edit-datetime', 'settings'],
+  perm_reports_view: ['reports-view'],
+  perm_audit_view: ['reports-view', 'audit-view'],
+  perm_export_usb: ['reports-view', 'audit-view', 'export-usb'],
+  perm_export_approve: ['export-approve'],
+};
+
+var PERMISSION_CARD_CATALOG = [
+  { key: 'perm_test_access', label: 'Test access', description: 'Quick test and recipe-based test runs.', accent: 0 },
+  { key: 'perm_test_report_approve', label: 'Test report approval', description: 'Approve pending test reports.', accent: 1 },
+  { key: 'perm_recipe_manage', label: 'Manage recipes', description: 'Create and edit recipes.', accent: 2 },
+  { key: 'perm_recipe_approve', label: 'Recipe approval', description: 'Participate in recipe approval / verification.', accent: 3 },
+  { key: 'perm_profile_admin', label: 'Profile management', description: 'Add, disable, edit, lock, unlock, and change roles for profiles.', accent: 4 },
+  { key: 'perm_validation_test', label: 'Validation test access', description: 'Run validation tests (USP 1 / USP 2).', accent: 5 },
+  { key: 'perm_validation_report_approve', label: 'Validation report approval', description: 'Approve pending validation reports.', accent: 6 },
+  { key: 'perm_datetime', label: 'Edit date and time', description: 'Change system date, time, and RTC.', accent: 7 },
+  { key: 'perm_reports_view', label: 'View and print reports', description: 'Open, preview, and print reports.', accent: 8 },
+  { key: 'perm_audit_view', label: 'View and print audit trails', description: 'View audit log and print audit trails.', accent: 9 },
+  { key: 'perm_export_usb', label: 'Export reports and audit (USB)', description: 'Export reports and audit trails to USB.', accent: 10 },
+  { key: 'perm_export_approve', label: 'Export approval', description: 'Verify another user’s USB export (secondary approval).', accent: 11 },
+];
+
+/** Legacy fine-grained keys (v1); still honored if present in allow until re-saved. */
+var LEGACY_INTERNAL_KEYS = [
+  'quick-test',
+  'recipe-list',
+  'recipe-edit',
+  'recipe-delete',
+  'reports-view',
+  'reports-delete',
+  'validate-menu',
+  'settings',
+  'edit-datetime',
+  'profile',
+  'user-manage',
+  'user-add',
+  'user-delete',
+  'user-unlock',
+  'user-enable',
+  'user-change-role',
+  'disable-recipes',
+];
+
+var ALL_STORABLE_ALLOW_KEYS = PERMISSION_CARD_KEYS.concat(LEGACY_INTERNAL_KEYS);
+
 var SCREEN_FEATURE_MAP = {
-  'login': 'login',
-  'home': 'dashboard',
+  login: 'login',
+  home: 'dashboard',
   'quick-test': 'quick-test',
-  'test-run': 'dashboard',
+  'test-run': 'recipe-test',
   'manage-recipes': 'recipe-list',
   'create-recipe-step1': 'recipe-edit',
   'create-recipe-step2': 'recipe-edit',
   'create-recipe-step3': 'recipe-edit',
-  'reports': 'reports-view',
+  reports: 'reports-view',
   'report-preview': 'reports-view',
   'view-recipes': 'recipe-list',
   'recipe-print-preview': 'reports-view',
-  'validate': 'validate-menu',
-  'validate-type-select': 'validate-menu',
-  'load-validation': 'validate-menu',
-  'distance-validation': 'validate-menu',
-  'validation-run': 'validate-menu',
-  'calibration-type-select': 'validate-menu',
-  'load-calibration': 'validate-menu',
-  'distance-zero-calibration': 'validate-menu',
-  'settings': 'settings',
+  validate: 'validation-test',
+  'approval-verify': 'dashboard',
+  'validate-type-select': 'validation-test',
+  'load-validation': 'validation-test',
+  'distance-validation': 'validation-test',
+  'validation-run': 'validation-test',
+  'calibration-type-select': 'calibration-menu',
+  'load-calibration': 'calibration-menu',
+  'distance-zero-calibration': 'calibration-menu',
+  settings: 'settings',
   'factory-settings': 'factory-settings',
-  'datetime': 'edit-datetime',
+  datetime: 'edit-datetime',
   'user-profile': 'profile',
   'manage-members': 'user-manage',
   'add-member': 'user-add',
   'locked-members': 'user-manage',
   'disabled-members': 'user-manage',
+  'disable-recipes': 'disable-recipes',
+  'member-biometric': 'profile',
+  'password-expired-reset': 'profile',
 };
 
 var ACTION_FEATURE_MAP = {
@@ -81,29 +170,16 @@ var ACTION_FEATURE_MAP = {
   'save-recipe': 'recipe-edit',
   'delete-recipe': 'recipe-delete',
   'edit-recipe': 'recipe-edit',
-  'start-validation': 'validate-menu',
+  'start-validation': 'validation-test',
+  'start-calibration': 'calibration-menu',
   'delete-report': 'reports-delete',
   'save-profile': 'profile',
 };
 
-var FEATURE_CATALOG = [
-  { key: 'quick-test', label: 'Quick Test', description: 'Access quick test workflow', group: 'Testing' },
-  { key: 'recipe-list', label: 'View Recipes', description: 'Browse recipe list and details', group: 'Recipe' },
-  { key: 'recipe-edit', label: 'Create/Edit Recipes', description: 'Create or modify recipes', group: 'Recipe' },
-  { key: 'recipe-delete', label: 'Disable Recipes', description: 'Disable recipes', group: 'Recipe' },
-  { key: 'reports-view', label: 'View Reports', description: 'Open test and report history', group: 'Reports' },
-  { key: 'validate-menu', label: 'Validation & Calibration', description: 'Run validation/calibration flows', group: 'Hardware' },
-  { key: 'settings', label: 'Settings', description: 'Open settings area', group: 'Settings' },
-  { key: 'edit-datetime', label: 'Date/Time Edit', description: 'Edit system date/time and RTC', group: 'Settings' },
-  { key: 'profile', label: 'User Profile', description: 'Access user profile page', group: 'General' },
-  { key: 'user-manage', label: 'Manage Members', description: 'View member management screens', group: 'Users' },
-  { key: 'user-add', label: 'Add Member', description: 'Create new users and operators', group: 'Users' },
-  { key: 'user-delete', label: 'Disable Member', description: 'Disable member accounts', group: 'Users' },
-  { key: 'user-unlock', label: 'Unlock Member', description: 'Unlock locked user accounts', group: 'Users' },
-  { key: 'user-enable', label: 'Enable Member', description: 'Enable disabled user accounts', group: 'Users' },
-  { key: 'user-change-role', label: 'Change Role', description: 'Change user role assignment', group: 'Users' },
-  { key: 'disable-recipes', label: 'Disable Recipes Tool', description: 'Access disable recipes utility', group: 'Recipe' }
-];
+/** Deprecated catalog for non–add-member callers; prefer PERMISSION_CARD_CATALOG + expand. */
+var FEATURE_CATALOG = PERMISSION_CARD_CATALOG.map(function (c) {
+  return { key: c.key, label: c.label, description: c.description, group: 'Permissions' };
+});
 
 var currentUser = null;
 
@@ -114,12 +190,18 @@ function getCurrentRole() {
   return role ? String(role).toLowerCase() : null;
 }
 
+function getPermissionCardCatalog() {
+  return PERMISSION_CARD_CATALOG.slice();
+}
+
 function getFeatureCatalog() {
-  return FEATURE_CATALOG.slice();
+  return getPermissionCardCatalog().map(function (c) {
+    return { key: c.key, label: c.label, description: c.description, group: 'Permissions' };
+  });
 }
 
 function getKnownFeatureKeys() {
-  return FEATURE_CATALOG.map(function (f) { return f.key; });
+  return ALL_STORABLE_ALLOW_KEYS.slice();
 }
 
 function getRestriction(role, featureKey) {
@@ -128,24 +210,64 @@ function getRestriction(role, featureKey) {
   return roleRules[featureKey] || null;
 }
 
+function isProtectedFactoryUser(user) {
+  if (!user) return false;
+  var username = (user.username || user.user || '').toString().toUpperCase();
+  return username === 'RLERLT';
+}
+
+function isFactoryLikeRole(role, userObj) {
+  var r = String(role || '').toLowerCase();
+  if (r === 'factory') return true;
+  return !!(userObj && isProtectedFactoryUser(userObj));
+}
+
 function normalizeFeatureOverrides(overrides) {
-  var known = getKnownFeatureKeys();
   var out = { allow: [], deny: [] };
   if (!overrides || typeof overrides !== 'object') return out;
   if (Array.isArray(overrides.allow)) {
     overrides.allow.forEach(function (k) {
       var key = String(k || '').trim();
-      if (key && known.indexOf(key) !== -1 && out.allow.indexOf(key) === -1) out.allow.push(key);
+      if (key && ALL_STORABLE_ALLOW_KEYS.indexOf(key) !== -1 && out.allow.indexOf(key) === -1) out.allow.push(key);
     });
   }
   if (Array.isArray(overrides.deny)) {
     overrides.deny.forEach(function (k) {
       var key = String(k || '').trim();
-      if (key && known.indexOf(key) !== -1 && out.deny.indexOf(key) === -1) out.deny.push(key);
+      if (key && ALL_STORABLE_ALLOW_KEYS.indexOf(key) !== -1 && out.deny.indexOf(key) === -1) out.deny.push(key);
     });
   }
-  out.allow = out.allow.filter(function (k) { return out.deny.indexOf(k) === -1; });
+  out.allow = out.allow.filter(function (k) {
+    return out.deny.indexOf(k) === -1;
+  });
   return out;
+}
+
+function expandAllowListToInternalKeys(allowList) {
+  var internal = [];
+  (allowList || []).forEach(function (k) {
+    var key = String(k || '').trim();
+    if (!key) return;
+    var exp = PERM_CARD_EXPAND[key];
+    if (exp) {
+      exp.forEach(function (ik) {
+        if (internal.indexOf(ik) === -1) internal.push(ik);
+      });
+      return;
+    }
+    if (LEGACY_INTERNAL_KEYS.indexOf(key) !== -1 && internal.indexOf(key) === -1) internal.push(key);
+  });
+  return internal;
+}
+
+function getExpandedInternalKeysForUser(userObj) {
+  if (!userObj || typeof userObj !== 'object') return [];
+  var o = normalizeFeatureOverrides(userObj.featureOverrides);
+  return expandAllowListToInternalKeys(o.allow);
+}
+
+function userHasInternalKey(userObj, internalKey) {
+  return getExpandedInternalKeysForUser(userObj).indexOf(internalKey) !== -1;
 }
 
 function _getUserObjectFromInput(roleOrUser) {
@@ -163,17 +285,23 @@ function _getRoleFromInput(roleOrUser) {
 function getEffectiveRestriction(roleOrUser, featureKey) {
   if (!featureKey) return 'no-access';
   var role = _getRoleFromInput(roleOrUser);
-  if (!role) return 'no-access';
-  if (featureKey === 'dashboard') return 'full-access';
+  var userObj = _getUserObjectFromInput(roleOrUser);
+  if (!role && !userObj) return 'no-access';
+
+  if (featureKey === 'dashboard' || featureKey === 'login') return 'full-access';
+  if (featureKey === 'profile') return 'full-access';
+
   if (featureKey === 'factory-settings' || featureKey === 'factory-reset') {
     return role === 'factory' ? 'full-access' : 'no-access';
   }
-  var base = getRestriction(role, featureKey);
-  var userObj = _getUserObjectFromInput(roleOrUser);
-  var overrides = normalizeFeatureOverrides(userObj && userObj.featureOverrides ? userObj.featureOverrides : null);
-  if (overrides.deny.indexOf(featureKey) !== -1) return 'no-access';
-  if (overrides.allow.indexOf(featureKey) !== -1) return 'full-access';
-  return base;
+
+  if (isFactoryLikeRole(role, userObj)) {
+    return 'full-access';
+  }
+
+  var expanded = getExpandedInternalKeysForUser(userObj);
+  if (expanded.indexOf(featureKey) !== -1) return 'full-access';
+  return 'no-access';
 }
 
 function canAccess(roleOrUser, featureKey) {
@@ -193,12 +321,6 @@ function canPerformAction(roleOrUser, featureKey, action) {
     return editActions.indexOf(String(action || '').toLowerCase()) === -1;
   }
   return true;
-}
-
-function isProtectedFactoryUser(user) {
-  if (!user) return false;
-  var username = (user.username || user.user || '').toString().toUpperCase();
-  return username === 'RLERLT';
 }
 
 function checkNavigationAccess(screenId) {

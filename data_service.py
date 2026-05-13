@@ -24,26 +24,10 @@ FACTORY_USER = {
     "role": "Factory",
 }
 
-PERMISSIONS_VERSION = 1
-FEATURE_CATALOG_KEYS = [
-    "quick-test",
-    "recipe-list",
-    "recipe-edit",
-    "recipe-delete",
-    "reports-view",
-    "reports-delete",
-    "validate-menu",
-    "settings",
-    "edit-datetime",
-    "profile",
-    "user-manage",
-    "user-add",
-    "user-delete",
-    "user-unlock",
-    "user-enable",
-    "user-change-role",
-    "disable-recipes",
-]
+import rbac_service
+
+PERMISSIONS_VERSION = rbac_service.PERMISSIONS_VERSION
+FEATURE_CATALOG_KEYS = rbac_service.FEATURE_CATALOG_KEYS
 
 
 def init(config):
@@ -357,6 +341,7 @@ def _normalize_member_biometric_fields(member: Dict[str, Any]) -> None:
 
 
 def _normalize_member_feature_overrides(member: Dict[str, Any]) -> None:
+    rbac_service.migrate_member_permissions_v1_to_v2(member)
     member["permissionsVersion"] = int(member.get("permissionsVersion") or PERMISSIONS_VERSION)
     raw = member.get("featureOverrides")
     if not isinstance(raw, dict):
