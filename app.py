@@ -2879,18 +2879,33 @@ def _set_datetime_common():
 
 
 def _run_datetime_command(cmd, timeout_sec=5):
-    """Run date/time command with direct and sudo fallback."""
-    try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, check=True)
-        return True, ""
-    except Exception as first_err:
-        if cmd and cmd[0] == "sudo":
-            return False, str(first_err)
+    """Run a privileged date/time helper. Prefer non-interactive sudo for kiosk services."""
+    cmd = list(cmd)
+
+    def _attempt(argv):
         try:
-            subprocess.run(["sudo"] + list(cmd), capture_output=True, text=True, timeout=timeout_sec, check=True)
-            return True, ""
-        except Exception as sudo_err:
-            return False, str(sudo_err or first_err)
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_sec)
+            if proc.returncode == 0:
+                return True, ""
+            err = (proc.stderr or proc.stdout or "").strip() or ("exit code %s" % proc.returncode)
+            return False, err
+        except Exception as ex:
+            return False, str(ex)
+
+    ok, msg = _attempt(cmd)
+    if ok:
+        return True, ""
+    if cmd and cmd[0] == "sudo":
+        return False, msg
+    if os.geteuid() == 0:
+        return False, msg
+    ok2, msg2 = _attempt(["sudo", "-n"] + cmd)
+    if ok2:
+        return True, ""
+    ok3, msg3 = _attempt(["sudo"] + cmd)
+    if ok3:
+        return True, ""
+    return False, "{} | sudo -n: {} | sudo: {}".format(msg, msg2, msg3)
 
 
 def _set_system_datetime(dt_obj):
@@ -2907,21 +2922,44 @@ def _set_system_datetime(dt_obj):
     return False, ("date failed: {} ; timedatectl failed: {}".format(err, err2)).strip()
 
 
+def _kernel_rtc_device_path():
+    """Path to kernel RTC node when present (e.g. DS1307 via dtoverlay=i2c-rtc,ds1307)."""
+    if os.path.exists("/dev/rtc0"):
+        return "/dev/rtc0"
+    if os.path.exists("/dev/rtc"):
+        return "/dev/rtc"
+    return None
+
+
 def _sync_rtc_after_datetime_set(dt_obj):
-    """Best-effort RTC sync after system datetime update."""
-    # 1) Sync DS1307 via I2C (if available).
-    try:
-        rtc_res = rtc_service.set_rtc_date(dt_obj)
-        if not rtc_res.get("success"):
-            app.logger.warning("RTC I2C sync failed after datetime set: %s", rtc_res.get("error"))
-    except Exception as rtc_err:
-        app.logger.warning("RTC I2C sync exception after datetime set: %s", rtc_err)
-    # 2) Sync OS hardware clock for boot-time restore.
+    """Copy system time to hardware RTC after datetime update.
+
+    When the DS1307 is bound as rtc-ds1307, /dev/rtc0 is root-only and userspace I2C to 0x68
+    returns EBUSY — use hwclock(8) against that device. Userspace SMBus is only used when
+    no kernel RTC node exists (e.g. some custom setups).
+    """
     if sys.platform == "win32":
         return
-    ok, err = _run_datetime_command(["hwclock", "--systohc"], timeout_sec=5)
-    if not ok:
-        app.logger.warning("hwclock sync failed after datetime set: %s", err)
+    rtc_dev = _kernel_rtc_device_path()
+    if rtc_dev:
+        ok, err = _run_datetime_command(["hwclock", "-f", rtc_dev, "--systohc"], timeout_sec=8)
+        if ok:
+            app.logger.info("RTC synced from system time (%s hwclock --systohc)", rtc_dev)
+            return
+        app.logger.warning("hwclock --systohc failed (%s): %s", rtc_dev, err)
+    try:
+        rtc_res = rtc_service.set_rtc_date(dt_obj)
+        if rtc_res.get("success"):
+            app.logger.info("RTC synced via I2C (DS1307 userspace)")
+            return
+        app.logger.warning("RTC I2C sync failed after datetime set: %s", rtc_res.get("error"))
+    except Exception as rtc_err:
+        app.logger.warning("RTC I2C sync exception after datetime set: %s", rtc_err)
+    if rtc_dev:
+        return
+    ok2, err2 = _run_datetime_command(["hwclock", "--systohc"], timeout_sec=8)
+    if not ok2:
+        app.logger.warning("hwclock sync (no explicit rtc device) failed: %s", err2)
 
 
 @app.route("/api/set_datetime", methods=["POST"])

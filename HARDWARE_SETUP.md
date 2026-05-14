@@ -146,24 +146,28 @@ curl -s -X POST http://127.0.0.1:5000/api/data/auth/login-biometric -H "Content-
 
 **Edit Date & Time** (and setting the hardware RTC) is only allowed for users with role **Admin** or **Factory**. If you use a member account (e.g. username `rle`), ensure that member has role **Admin** (or Factory) in the app so that both system time and the DS1307 on SDA/SCL are updated when you apply date and time.
 
-### RTC: I2C only (no hwclock)
+### RTC: kernel driver vs I2C userspace
 
-The app talks to the DS1307 over **I2C** (smbus). Install the Python I2C library on the Pi:
+With `dtoverlay=i2c-rtc,ds1307` in `/boot/firmware/config.txt`, the kernel binds the chip as **`rtc-ds1307`** on **`/dev/rtc0`**. In that mode:
+
+- **Userspace SMBus** to address `0x68` returns **`Device or resource busy`** — the app must use **`hwclock -f /dev/rtc0`** (read/write), not raw I2C.
+- **`/dev/rtc0` is root-only** (`crw-------`). The Flask user (e.g. `rle`) needs **passwordless sudo** for `hwclock` (and for `date` / `timedatectl` when setting system time), for example:
+
+```
+rle ALL=(ALL) NOPASSWD: /usr/bin/date, /usr/bin/timedatectl, /sbin/hwclock, /usr/sbin/hwclock
+```
+
+After changing sudoers, restart the kiosk service: `sudo systemctl restart kiosk-bridge` (or your unit name).
+
+Diagnostics (writes append to the given log path):
+
+```bash
+/opt/kiosk/scripts/rtc_diag.sh /tmp/kiosk-rtc-diag.log
+```
+
+If there is **no** kernel RTC node (unusual setups), the app falls back to **I2C** (`python3-smbus`) as before:
 
 ```bash
 sudo apt-get install python3-smbus
-```
-
-If the app runs as a **non-root user** (e.g. `rle`), add that user to the `i2c` group so it can access `/dev/i2c-1`:
-
-```bash
 sudo usermod -aG i2c rle
 ```
-
-Then log out and back in (or reboot). Setting system time when applying date/time still needs `date`; if the process is not root, add to sudoers:
-
-```
-rle ALL=(ALL) NOPASSWD: /usr/bin/date
-```
-
-If the service runs as **root** (e.g. `User=root` in `kiosk.service`), no extra permissions are needed.

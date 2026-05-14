@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-rtc_service.py - RTC (DS1307) read/write. On Windows or when I2C unavailable, get_rtc_date returns system time.
+rtc_service.py - RTC (DS1307) read/write.
+
+When the kernel binds the chip (dtoverlay=i2c-rtc,ds1307), userspace I2C to 0x68 is EBUSY; use
+hwclock(8) with /dev/rtc0 (requires sudo for non-root). Otherwise SMBus read/write is used.
 """
 
 from datetime import datetime
 from typing import Dict, Any, Optional
+import os
+import re
+import subprocess
 
 _logger = None
 _smbus = None
@@ -43,6 +49,48 @@ def _int_to_bcd(n: int) -> int:
 def init(logger=None):
     global _logger
     _logger = logger
+
+
+def _kernel_rtc_device_path() -> Optional[str]:
+    if os.path.exists("/dev/rtc0"):
+        return "/dev/rtc0"
+    if os.path.exists("/dev/rtc"):
+        return "/dev/rtc"
+    return None
+
+
+def _read_hwclock(rtc_dev: str) -> Optional[datetime]:
+    """Read RTC via util-linux hwclock (needed when kernel owns the I2C device)."""
+    cmd = ["hwclock", "-f", rtc_dev, "-r"]
+    for argv in (cmd, ["sudo", "-n"] + cmd, ["sudo"] + cmd):
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=5)
+            if proc.returncode != 0 or not (proc.stdout or "").strip():
+                continue
+            line = (proc.stdout or "").strip().splitlines()[0].strip()
+            m = re.match(r"(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2}:\d{2})", line)
+            if m:
+                return datetime.strptime(m.group(1) + " " + m.group(2), "%Y-%m-%d %H:%M:%S")
+            m2 = re.match(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})", line.replace("T", " "))
+            if m2:
+                return datetime.strptime(m2.group(1) + " " + m2.group(2), "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            continue
+    return None
+
+
+def _write_hwclock_set(rtc_dev: str, dt: datetime) -> bool:
+    """Write RTC registers via hwclock --set (kernel path)."""
+    date_arg = dt.strftime("%Y-%m-%d %H:%M:%S")
+    cmd = ["hwclock", "-f", rtc_dev, "--set", "--date=" + date_arg]
+    for argv in (cmd, ["sudo", "-n"] + cmd, ["sudo"] + cmd):
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=8)
+            if proc.returncode == 0:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _read_ds1307_i2c() -> Optional[datetime]:
@@ -95,6 +143,16 @@ def get_rtc_date() -> Dict[str, Any]:
     dt = _read_ds1307_i2c()
     if dt is not None:
         return {"success": True, "datetime": dt.strftime("%Y-%m-%dT%H:%M:%S"), "error": None}
+    rtc_dev = _kernel_rtc_device_path()
+    if rtc_dev:
+        dth = _read_hwclock(rtc_dev)
+        if dth is not None:
+            return {
+                "success": True,
+                "datetime": dth.strftime("%Y-%m-%dT%H:%M:%S"),
+                "error": None,
+                "source": "hwclock",
+            }
     now = datetime.now()
     return {
         "success": True,
@@ -109,4 +167,7 @@ def set_rtc_date(dt: Optional[datetime] = None) -> Dict[str, Any]:
         return {"success": False, "error": "datetime required"}
     if _write_ds1307_i2c(dt):
         return {"success": True, "error": None}
+    rtc_dev = _kernel_rtc_device_path()
+    if rtc_dev and _write_hwclock_set(rtc_dev, dt):
+        return {"success": True, "error": None, "method": "hwclock-set"}
     return {"success": False, "error": "RTC write failed"}
