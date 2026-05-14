@@ -1,17 +1,0 @@
-                          TAP DENSITY REPORT                          
-
-Product: qqq
-Batch: 2
-Date: 2026-04-04T06:41:48.234Z
-Company: ttyio
-
-productName: qqq
-batchNumber: 2
-status: completed
-completedSteps: 3
-stepCount: 3
-initialWeightG: 22
-usp: USP 1
-createdAt: 2026-04-04T06:41:48.234Z
-completedAt: 2026-04-04T06:41:48.234Z
-

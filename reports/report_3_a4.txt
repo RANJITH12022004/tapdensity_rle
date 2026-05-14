@@ -1,14 +1,28 @@
-                          TAP DENSITY REPORT                          
+======================================================================
+                    TAP DENSITY VALIDATION REPORT                     
+======================================================================
+Company: RAM
+Model No: THYY
+Serial No: THY
+Location: dd
+Instrument ID: qq
+Last Validation Date: N/A
+Next Validation Due: N/A
 
-Product: eee
-Batch: 200
-Date: 2026-03-23T05:00:32.974Z
-Company: ttyio
+Date / Time: 14/05/2026 19:24:25
+USP: USP 1
+Taps/Min: 300
+Drop Height (mm): 14
+Expected Tap Count: 300
+Actual Tap Count: 300
+Status: Pass
 
-productName: eee
-batchNumber: 200
-completedSteps: 1
-stepCount: 5
-createdAt: 2026-03-23T05:00:32.974Z
-completedAt: 2026-03-23T05:00:32.974Z
+Operated by: GANESH
+Employee ID: 123456
+Approval Status: pending
+Approval Result: --
+Approved By: --
+Approved At: --
+Approval Remarks: 
+======================================================================
 

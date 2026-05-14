@@ -1,13 +1,24 @@
-               TAP DENSITY REPORT               
 
-Product: sns
-Batch: 33
-Date: 2026-03-23T06:20:13.704Z
-Company: ttyio
+TAP DENSITY TEST REPORT
 
-productName: sns
-batchNumber: 33
-completedSteps: 1
-stepCount: 3
-createdAt: 2026-03-23T06:20:13.704Z
-completedAt: 2026-03-23T06:20:13.704Z
+Company: RAM
+Model No: THYY
+Serial No: THY
+Location: dd
+Instrument ID: qq
+Last Validation Date: 14-05-2026
+Next Validation Due: 14-08-2026
+
+Product: ggbb
+Batch: 34
+Report/Test Start: 14/05/2026 22:20:52
+Generated: 14/05/2026 22:20:52
+Test Status: Completed
+
+Operated by: --
+Employee ID: --
+Approval Status: pending
+Approval Result: --
+Approved By: --
+Approved At: --
+Approval Remarks: 

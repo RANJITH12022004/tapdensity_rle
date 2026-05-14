@@ -65,7 +65,7 @@ var PERMISSION_CARD_KEYS = [
  * Internal keys are unique strings (screen map, action checks, or explicit gates).
  */
 var PERM_CARD_EXPAND = {
-  perm_test_access: ['quick-test', 'recipe-list', 'recipe-test'],
+  perm_test_access: ['quick-test', 'recipe-list', 'recipe-test', 'recipe-edit'],
   perm_test_report_approve: ['test-report-approve'],
   perm_recipe_manage: ['recipe-list', 'recipe-edit', 'settings'],
   perm_recipe_approve: ['recipe-approve'],
@@ -88,7 +88,7 @@ var PERM_CARD_EXPAND = {
 };
 
 var PERMISSION_CARD_CATALOG = [
-  { key: 'perm_test_access', label: 'Test access', description: 'Quick test and recipe-based test runs.', accent: 0 },
+  { key: 'perm_test_access', label: 'Test access', description: 'Quick test (including step setup), recipe-based test runs, and configuring recipe steps.', accent: 0 },
   { key: 'perm_test_report_approve', label: 'Test report approval', description: 'Approve pending test reports.', accent: 1 },
   { key: 'perm_recipe_manage', label: 'Manage recipes', description: 'Create and edit recipes.', accent: 2 },
   { key: 'perm_recipe_approve', label: 'Recipe approval', description: 'Participate in recipe approval / verification.', accent: 3 },
@@ -129,6 +129,7 @@ var SCREEN_FEATURE_MAP = {
   login: 'login',
   home: 'dashboard',
   'quick-test': 'quick-test',
+  'quick-test-steps': 'quick-test',
   'test-run': 'recipe-test',
   'manage-recipes': 'recipe-list',
   'create-recipe-step1': 'recipe-edit',

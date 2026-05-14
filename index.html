@@ -7,7 +7,7 @@
     <meta name="viewport"
         content="width=1024, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Tap Density Apparatus</title>
-    <link rel="stylesheet" href="styles.css?v=4">
+    <link rel="stylesheet" href="styles.css?v=6">
 </head>
 
 <body>
@@ -281,80 +281,75 @@
                                 <div class="validation-type-grid create-recipe-grid procedure-cards-grid">
                                     <label class="validation-type-settings-card create-recipe-card" data-procedure="usp1">
                                         <input type="radio" name="quick-usp-mode" value="USP1" checked onchange="applyQuickUspModeToSpeedHeight()">
-                                        <h3>USP 1</h3>
-                                        <p>300 / 14 mm</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">USP 1</span></h3>
+                                        <p class="step1-card-sublabel">300 / 14 mm</p>
                                     </label>
                                     <label class="validation-type-settings-card create-recipe-card" data-procedure="usp2">
                                         <input type="radio" name="quick-usp-mode" value="USP2" onchange="applyQuickUspModeToSpeedHeight()">
-                                        <h3>USP 2</h3>
-                                        <p>250 / 3 mm</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">USP 2</span></h3>
+                                        <p class="step1-card-sublabel">250 / 3 mm</p>
                                     </label>
                                     <label class="validation-type-settings-card create-recipe-card" data-procedure="custom">
                                         <input type="radio" name="quick-usp-mode" value="CUSTOM" onchange="applyQuickUspModeToSpeedHeight()">
-                                        <h3>Custom</h3>
-                                        <p>Speed and height, then steps</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">Custom</span></h3>
+                                        <p class="step1-card-sublabel">Speed, height &amp; steps</p>
                                     </label>
                                 </div>
                             </div>
                             <div id="quick-custom-speed-height-wrap" style="display: none;">
                             <div class="create-recipe-section">
                                 <h3 class="create-recipe-section-title">Tap Speed</h3>
-                                <div class="validation-type-grid create-recipe-grid">
+                                <div class="validation-type-grid create-recipe-grid create-recipe-grid--pair">
                                     <label class="validation-type-settings-card create-recipe-card" data-create-option="speed" data-value="300">
                                         <input type="radio" name="quick-speed" value="300">
-                                        <h3>300</h3>
-                                        <p>Taps/Min</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">300</span></h3>
+                                        <p class="step1-card-sublabel">Taps/Min</p>
                                     </label>
                                     <label class="validation-type-settings-card create-recipe-card" data-create-option="speed" data-value="250">
                                         <input type="radio" name="quick-speed" value="250">
-                                        <h3>250</h3>
-                                        <p>Taps/Min</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">250</span></h3>
+                                        <p class="step1-card-sublabel">Taps/Min</p>
                                     </label>
                                 </div>
                             </div>
                             <div class="create-recipe-section">
                                 <h3 class="create-recipe-section-title">Drop Height</h3>
-                                <div class="validation-type-grid create-recipe-grid">
+                                <div class="validation-type-grid create-recipe-grid create-recipe-grid--pair">
                                     <label class="validation-type-settings-card create-recipe-card" data-create-option="height" data-value="14">
                                         <input type="radio" name="quick-height" value="14">
-                                        <h3>14</h3>
-                                        <p>mm</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">14</span><span class="cylinder-unit">mm</span></h3>
                                     </label>
                                     <label class="validation-type-settings-card create-recipe-card" data-create-option="height" data-value="3">
                                         <input type="radio" name="quick-height" value="3">
-                                        <h3>3</h3>
-                                        <p>mm</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">3</span><span class="cylinder-unit">mm</span></h3>
                                     </label>
                                 </div>
                             </div>
                             </div>
                             <div class="create-recipe-section">
                                 <h3 class="create-recipe-section-title">Number of steps</h3>
-                                <div class="validation-type-grid create-recipe-grid">
+                                <div class="validation-type-grid create-recipe-grid create-recipe-grid--single">
                                     <button type="button" class="validation-type-settings-card create-recipe-card quick-step-select-card"
                                         onclick="goToQuickTestStepsPage()">
-                                        <h3 id="quick-step-count-summary">10</h3>
-                                        <p id="quick-step-count-summary-sub">Tap to select steps</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num" id="quick-step-count-summary">10</span></h3>
+                                        <p class="step1-card-sublabel" id="quick-step-count-summary-sub">Tap to select steps</p>
                                     </button>
                                 </div>
                             </div>
                             <div class="create-recipe-section">
                                 <h3 class="create-recipe-section-title">Cylinder (Sample volume)</h3>
-                                <div class="validation-type-grid create-recipe-grid">
-                                    <label class="validation-type-settings-card create-recipe-card" data-value="50">
+                                <div class="validation-type-grid create-recipe-grid procedure-cards-grid">
+                                    <label class="validation-type-settings-card create-recipe-card" data-cylinder data-value="50">
                                         <input type="radio" name="quick-cylinder" value="50">
-                                        <h3>50</h3>
-                                        <p>ml</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">50</span><span class="cylinder-unit">ml</span></h3>
                                     </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-value="100">
-                                        <input type="radio" name="quick-cylinder" value="100">
-                                        <h3>100</h3>
-                                        <p>ml</p>
+                                    <label class="validation-type-settings-card create-recipe-card" data-cylinder data-value="100">
+                                        <input type="radio" name="quick-cylinder" value="100" checked>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">100</span><span class="cylinder-unit">ml</span></h3>
                                     </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-value="250">
+                                    <label class="validation-type-settings-card create-recipe-card" data-cylinder data-value="250">
                                         <input type="radio" name="quick-cylinder" value="250">
-                                        <h3>250</h3>
-                                        <p>ml</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">250</span><span class="cylinder-unit">ml</span></h3>
                                     </label>
                                 </div>
                             </div>
@@ -395,8 +390,8 @@
                 <!-- Password Expired Reset -->
                 <div class="page" id="page-password-expired-reset">
                     <div class="add-member-container">
-                        <h2 class="section-title">Reset Expired Password</h2>
-                        <p class="section-subtitle">Your password has expired. Set a new password to continue.</p>
+                        <h2 class="section-title" id="password-reset-page-title">Reset Expired Password</h2>
+                        <p class="section-subtitle" id="password-reset-page-subtitle">Your password has expired. Set a new password to continue.</p>
                         <div class="add-member-form form-grid">
                             <div class="form-group full-width">
                                 <label>User ID</label>
@@ -422,7 +417,7 @@
                             </div>
                         </div>
                         <div class="add-member-actions members-actions-row">
-                            <button class="btn btn-primary" onclick="submitExpiredPasswordReset()">Update Password</button>
+                            <button class="btn btn-primary" onclick="submitPasswordResetFromLoginPage()">Update Password</button>
                         </div>
                     </div>
                 </div>
@@ -619,56 +614,83 @@
                                 <div class="validation-type-grid create-recipe-grid procedure-cards-grid">
                                     <label class="validation-type-settings-card create-recipe-card" data-procedure="usp1">
                                         <input type="radio" name="create-usp-mode" value="USP1" checked onchange="applyCreateUspModeToSpeedHeight()">
-                                        <h3>USP 1</h3>
-                                        <p>300 taps/min, 14 mm</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">USP 1</span></h3>
+                                        <p class="step1-card-sublabel">300 / 14 mm</p>
                                     </label>
                                     <label class="validation-type-settings-card create-recipe-card" data-procedure="usp2">
                                         <input type="radio" name="create-usp-mode" value="USP2" onchange="applyCreateUspModeToSpeedHeight()">
-                                        <h3>USP 2</h3>
-                                        <p>250 taps/min, 3 mm</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">USP 2</span></h3>
+                                        <p class="step1-card-sublabel">250 / 3 mm</p>
                                     </label>
                                     <label class="validation-type-settings-card create-recipe-card" data-procedure="custom">
                                         <input type="radio" name="create-usp-mode" value="CUSTOM" onchange="applyCreateUspModeToSpeedHeight()">
-                                        <h3>Custom</h3>
-                                        <p>Choose speed and height</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">Custom</span></h3>
+                                        <p class="step1-card-sublabel">Speed, height &amp; steps</p>
                                     </label>
                                 </div>
                             </div>
                             <div id="create-custom-speed-height-wrap" style="display: none;">
                             <div class="create-recipe-section">
                                 <h3 class="create-recipe-section-title">Tap Speed</h3>
-                                <div class="validation-type-grid create-recipe-grid">
+                                <div class="validation-type-grid create-recipe-grid create-recipe-grid--pair">
                                     <label class="validation-type-settings-card create-recipe-card"
                                         data-create-option="speed" data-value="300">
                                         <input type="radio" name="create-speed" value="300">
-                                        <h3>300</h3>
-                                        <p>Taps/Min</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">300</span></h3>
+                                        <p class="step1-card-sublabel">Taps/Min</p>
                                     </label>
                                     <label class="validation-type-settings-card create-recipe-card"
                                         data-create-option="speed" data-value="250">
                                         <input type="radio" name="create-speed" value="250">
-                                        <h3>250</h3>
-                                        <p>Taps/Min</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">250</span></h3>
+                                        <p class="step1-card-sublabel">Taps/Min</p>
                                     </label>
                                 </div>
                             </div>
                             <div class="create-recipe-section">
                                 <h3 class="create-recipe-section-title">Height</h3>
-                                <div class="validation-type-grid create-recipe-grid">
+                                <div class="validation-type-grid create-recipe-grid create-recipe-grid--pair">
                                     <label class="validation-type-settings-card create-recipe-card"
                                         data-create-option="height" data-value="3">
                                         <input type="radio" name="create-height" value="3">
-                                        <h3>3 mm</h3>
-                                        <p>Drop Height</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">3</span><span class="cylinder-unit">mm</span></h3>
                                     </label>
                                     <label class="validation-type-settings-card create-recipe-card"
                                         data-create-option="height" data-value="14">
                                         <input type="radio" name="create-height" value="14">
-                                        <h3>14 mm</h3>
-                                        <p>Drop Height</p>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">14</span><span class="cylinder-unit">mm</span></h3>
                                     </label>
                                 </div>
                             </div>
+                            <div id="create-custom-total-wrap" class="create-recipe-section" style="display: none;">
+                                <h3 class="create-recipe-section-title">Total taps</h3>
+                                <div class="form-group full-width">
+                                    <label for="create-custom-total-taps">Total for all steps</label>
+                                    <input type="number" id="create-custom-total-taps" class="input-field" min="1"
+                                        step="1" placeholder="e.g. 3760"
+                                        onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                    <p class="section-subtitle" style="margin-top: 6px; font-size: 13px;">Must be at least
+                                        the number of steps (default 10). Taps are split across steps on the next
+                                        screen.</p>
+                                </div>
+                            </div>
+                            </div>
+                            <div class="create-recipe-section">
+                                <h3 class="create-recipe-section-title">Cylinder (Sample volume)</h3>
+                                <div class="validation-type-grid create-recipe-grid procedure-cards-grid">
+                                    <label class="validation-type-settings-card create-recipe-card" data-cylinder data-value="50">
+                                        <input type="radio" name="create-cylinder" value="50">
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">50</span><span class="cylinder-unit">ml</span></h3>
+                                    </label>
+                                    <label class="validation-type-settings-card create-recipe-card" data-cylinder data-value="100">
+                                        <input type="radio" name="create-cylinder" value="100" checked>
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">100</span><span class="cylinder-unit">ml</span></h3>
+                                    </label>
+                                    <label class="validation-type-settings-card create-recipe-card" data-cylinder data-value="250">
+                                        <input type="radio" name="create-cylinder" value="250">
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">250</span><span class="cylinder-unit">ml</span></h3>
+                                    </label>
+                                </div>
                             </div>
                         </div>
                         <button type="button" class="btn btn-primary validation-start-btn"
@@ -1711,7 +1733,7 @@
                         <div id="add-member-permissions-panel" class="permissions-panel" style="display:none;">
                             <div class="permissions-panel-header">
                                 <label></label>
-                                <span class="permissions-panel-subtitle">Tap cards to grant access (none selected = no feature access)</span>
+                                <span class="permissions-panel-subtitle">Select the user functionalities to continue.</span>
                             </div>
                             <div id="permission-cards-grid" class="permission-cards-grid"></div>
                         </div>
@@ -1892,6 +1914,14 @@
                                     <option value="disabled">Disabled</option>
                                 </select>
                             </div>
+                            <div class="form-group">
+                                <label>Auto logout after idle (minutes)</label>
+                                <input type="number" id="factory-auto-logout-minutes" class="input-field" min="0" max="10080" placeholder="0"
+                                    value="0"
+                                    title="0 = disabled. While a test or validation run is active, logout is never forced."
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                <p class="section-subtitle" style="margin-top:6px;font-size:13px;">0 disables auto logout. When set, users are logged out after this many minutes with no screen activity. No auto logout during an active test run or validation run.</p>
+                            </div>
                         </div>
                         <div class="validation-actions-row">
                             <button type="button" class="btn btn-secondary"
@@ -1906,7 +1936,7 @@
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=2"></script>
     <script src="rbac.js?v=2"></script>
-    <script src="script.js?v=4"></script>
+    <script src="script.js?v=6"></script>
 </body>
 
 </html>

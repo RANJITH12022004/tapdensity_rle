@@ -1,13 +1,24 @@
-               TAP DENSITY REPORT               
 
-Product: eee
-Batch: rr
-Date: 2026-03-23T04:46:50.659Z
-Company: ttyio
+TAP DENSITY TEST REPORT
 
-productName: eee
-batchNumber: rr
-completedSteps: 3
-stepCount: 5
-createdAt: 2026-03-23T04:46:50.659Z
-completedAt: 2026-03-23T04:46:50.659Z
+Company: RAM
+Model No: THYY
+Serial No: THY
+Location: dd
+Instrument ID: qq
+Last Validation Date: N/A
+Next Validation Due: N/A
+
+Product: dhsbsj
+Batch: 123
+Report/Test Start: 14/05/2026 19:18:56
+Generated: 14/05/2026 19:18:56
+Test Status: Completed
+
+Operated by: --
+Employee ID: --
+Approval Status: pending
+Approval Result: --
+Approved By: --
+Approved At: --
+Approval Remarks: 

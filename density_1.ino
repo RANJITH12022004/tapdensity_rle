@@ -301,7 +301,8 @@ void motor_start()
     adapterErrorReported = false;
 
     if (!validationMode) {
-        PROTO.print("ok*");
+        // Single-line ack for Pi / firmware.txt (newline-terminated)
+        PROTO.println("ok");
         DEBUG.print("ok:normal_start_rpm:");
         DEBUG.print(selectedRPM);
         DEBUG.print(" taps:");
@@ -314,7 +315,7 @@ void motor_start()
         DEBUG.println(" continuous mode");
         
         // Send OK response for validation start
-        PROTO.print("ok*");
+        PROTO.println("ok");
         DEBUG.print("ok:");
         DEBUG.print(validationType);
         DEBUG.println("_validation_started*");
@@ -424,7 +425,6 @@ void processCommand(String cmd)
                 targetTaps = taps;
                 selectedRPM = 100;  // USP1 fixed at 100 RPM
                 
-                PROTO.print("ok*");
                 DEBUG.print("ok:spd1_start_rpm:100 taps:");
                 DEBUG.println(targetTaps);
                 
@@ -467,7 +467,6 @@ void processCommand(String cmd)
                 targetTaps = taps;
                 selectedRPM = 83;  // USP2 fixed at 83 RPM
                 
-                PROTO.print("ok*");
                 DEBUG.print("ok:spd2_start_rpm:83 taps:");
                 DEBUG.println(targetTaps);
                 
@@ -485,14 +484,12 @@ void processCommand(String cmd)
     // Handle validation commands
     else if (cmd == "usp1,start") {
         // USP1 validation - fixed RPM 100, runs until stop command
-        PROTO.print("ok*");
         DEBUG.println("ok:usp1_validation_starting*");
         startValidation("usp1", 100);
         return;
     }
     else if (cmd == "usp2,start") {
         // USP2 validation - fixed RPM 83, runs until stop command
-        PROTO.print("ok*");
         DEBUG.println("ok:usp2_validation_starting*");
         startValidation("usp2", 83);
         return;

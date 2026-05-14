@@ -14,14 +14,18 @@ var lastValidationType = 'distance'; // 'distance' = USP 1, 'load' = USP 2
 var validationRunState = 'idle'; // 'idle' | 'running'
 var validationRunIntervalId = null;
 var validationRunCurrentCount = 0;
-var validationRunExpected = 300;
 var validationRunTarget = 300;
 var validationRunTolerance = 50;
 var validationRunMin = 250;
 var validationRunMax = 350;
 var validationRunBackendPending = false;
-var validationHardwareEnabled = false; // temporarily disable backend hardware validation commands
+var validationHardwareEnabled = true;
 var validationCompletion = { distance: false, load: false }; // distance=USP 1, load=USP 2
+/** 60s timed validation: hardware tap count via SSE */
+var validationRunHardwareEs = null;
+var validationRunSseListener = null;
+var VALIDATION_RUN_DURATION_SEC = 60;
+var validationRunSecondsRemaining = 60;
 var biometricEnabledSetting = true;
 var currentReportId = null;
 var currentReportData = null;
@@ -40,6 +44,9 @@ var _approvalVerifyButtonOriginal = null;
 var _approvalVerifyEmptyCredentialsMessage = 'Enter QA username and password.';
 var _approvalVerifyPurpose = 'recipe';
 var _suppressTestRunNavGuardOnce = false;
+/** 'expired' | 'mandatory' — which POST to use from the shared reset page. */
+var _passwordResetScreenMode = 'expired';
+var _mandatoryPasswordResetPending = false;
 
 /** Display label: Supervisor role shown as Reviewer (stored value unchanged). */
 function displayRoleLabel(role) {
@@ -94,12 +101,14 @@ function getMissingValidationLabel() {
 }
 
 function stopActiveRunForLogout() {
-    // Abort active test-run simulation before logout.
+    // Abort active test-run (hardware or UI) before logout.
     if (testRunButtonState === 'abort') {
         if (testRunIntervalId != null) {
             clearInterval(testRunIntervalId);
             testRunIntervalId = null;
         }
+        hardwareTapStopSilently();
+        _closeTestRunHardwareEs();
         testRunButtonState = 'start';
         var testBtn = document.getElementById('btn-test-start-abort');
         if (testBtn) {
@@ -119,6 +128,7 @@ function stopActiveRunForLogout() {
             clearInterval(validationRunIntervalId);
             validationRunIntervalId = null;
         }
+        _closeValidationRunHardwareEs();
         return stopValidationOnBackend().catch(function () {}).finally(function () {
             validationRunState = 'idle';
             validationRunBackendPending = false;
@@ -425,10 +435,21 @@ function _getApprovalVerifyModalElements() {
     var errEl = document.getElementById('approval-verify-error');
     if (!overlay || !usernameEl || !passwordEl || !errEl) return null;
     var usernameLabelEl = overlay.querySelector('label[for="approval-verify-username"]');
-    var userBtn = overlay.querySelector('.btn-role-user');
-    var cancelBtn = overlay.querySelector('.btn-role-cancel');
-    var titleEl = overlay.querySelector('h3');
-    var subtitleEl = overlay.querySelector('p.section-subtitle');
+    var actionsRow = overlay.querySelector('.add-member-actions');
+    var userBtn = actionsRow ? actionsRow.querySelector('button.btn-primary') : null;
+    var cancelBtn = null;
+    if (actionsRow) {
+        var secs = actionsRow.querySelectorAll('button.btn-secondary');
+        for (var i = 0; i < secs.length; i++) {
+            var oc = secs[i].getAttribute('onclick') || '';
+            if (oc.indexOf('cancelApprovalVerifyModal') >= 0 || oc.indexOf('cancelAdminApprovalVerifyModal') >= 0) {
+                cancelBtn = secs[i];
+                break;
+            }
+        }
+    }
+    var titleEl = document.getElementById('approval-verify-title');
+    var subtitleEl = document.getElementById('approval-verify-subtitle');
     return { overlay: overlay, usernameEl: usernameEl, passwordEl: passwordEl, errEl: errEl, usernameLabelEl: usernameLabelEl, userBtn: userBtn, cancelBtn: cancelBtn, titleEl: titleEl, subtitleEl: subtitleEl };
 }
 
@@ -741,6 +762,7 @@ function applyQuickUspModeToSpeedHeight() {
 var PAGE_TITLES = {
     'home': 'Tap Density Apparatus',
     'quick-test': 'Quick Test',
+    'quick-test-steps': 'Quick Test — Steps',
     'create-recipe-step1': 'Create Recipe',
     'create-recipe-step2': 'Configure Steps',
     'create-recipe-step3': 'Cylinder Size',
@@ -818,7 +840,17 @@ function showLoginScreen() {
     var app = document.querySelector('.app-container');
     if (app) app.style.display = 'none';
     if (login) login.style.display = 'flex';
+    stopAutoLogoutWatcher();
+    resetLoginFormFields();
     if (typeof loadLoginFactorySettingsDisplay === 'function') loadLoginFactorySettingsDisplay();
+}
+
+/** Clear login ID and password fields (call on logout / session end). */
+function resetLoginFormFields() {
+    var loginUid = document.getElementById('login-uid');
+    var loginPwd = document.getElementById('login-pwd');
+    if (loginUid) loginUid.value = '';
+    if (loginPwd) loginPwd.value = '';
 }
 
 function showAppContainer() {
@@ -833,6 +865,9 @@ function showAppContainer() {
     setTimeout(function () {
         if (typeof refreshShellAccessVisibility === 'function') refreshShellAccessVisibility();
     }, 0);
+    if (window.currentUser && (window.currentUser.username || window.currentUser.name)) {
+        ensureAutoLogoutWatcher();
+    }
 }
 
 function updateSettingsVisibility() {
@@ -917,6 +952,10 @@ function goToPage(pageName) {
         }
     }
     _suppressTestRunNavGuardOnce = false;
+    if (window._mandatoryPasswordResetPending && pageName !== 'password-expired-reset') {
+        showAppModal('Please reset your password to continue.', 'Reset Password');
+        return;
+    }
     if (pageName === 'factory-settings') {
         var role = (typeof getCurrentRole === 'function') ? getCurrentRole() : null;
         if (String(role || '').toLowerCase() !== 'factory') {
@@ -1120,16 +1159,31 @@ function goBack() {
         goToPage('manage-members');
     } else if (pageId === 'page-settings' || pageId === 'page-reports' || pageId === 'page-user-profile' || pageId === 'page-manage-recipes') {
         goToPage('home');
+    } else if (pageId === 'page-password-expired-reset') {
+        if (window._mandatoryPasswordResetPending) {
+            showAppModal('Please reset your password before leaving this screen.', 'Reset Password');
+            return;
+        }
+        _restoreSidebarAndHeaderAfterExpiredReset();
+        showLoginScreen();
     } else {
         goToPage('home');
     }
 }
 
+/** Map common comma lookalikes to ASCII comma (matches server test-login normalization). */
+function normalizeTestCommaCredential(s) {
+    if (s == null || s === undefined) return '';
+    var t = String(s).trim();
+    t = t.replace(/\uFF0C/g, ',').replace(/\uFE50/g, ',').replace(/\uFE51/g, ',').replace(/\u201A/g, ',').replace(/\u060C/g, ',').replace(/\u066B/g, ',');
+    return t;
+}
+
 function login() {
     var uidEl = document.getElementById('login-uid');
     var pwdEl = document.getElementById('login-pwd');
-    var username = (uidEl && uidEl.value) ? uidEl.value.trim() : '';
-    var password = (pwdEl && pwdEl.value) || '';
+    var username = normalizeTestCommaCredential((uidEl && uidEl.value) ? uidEl.value : '');
+    var password = normalizeTestCommaCredential((pwdEl && pwdEl.value) ? pwdEl.value : '');
     if (!username || !password) {
         showAppModal('Please enter User/Employee ID and Password.', 'Login');
         return;
@@ -1164,6 +1218,10 @@ function login() {
         }
         var msg = data.error || '';
         var remaining = (typeof data.remainingAttempts === 'number') ? data.remainingAttempts : null;
+        if (result.status === 403 && data && data.passwordChangeRequired) {
+            showMandatoryPasswordResetScreen(data.username || username);
+            return;
+        }
         if (result.status === 403 && data && data.passwordExpired) {
             showPasswordExpiredResetScreen(data.username || username, password);
             return;
@@ -1186,6 +1244,12 @@ function login() {
 }
 
 function showPasswordExpiredResetScreen(username, oldPassword) {
+    window._passwordResetScreenMode = 'expired';
+    window._mandatoryPasswordResetPending = false;
+    var titleEl = document.getElementById('password-reset-page-title');
+    var subEl = document.getElementById('password-reset-page-subtitle');
+    if (titleEl) titleEl.textContent = 'Reset Expired Password';
+    if (subEl) subEl.textContent = 'Your password has expired. Set a new password to continue.';
     var login = document.getElementById('page-login');
     var app = document.querySelector('.app-container');
     var sidebar = document.querySelector('.app-container .sidebar');
@@ -1214,6 +1278,43 @@ function showPasswordExpiredResetScreen(username, oldPassword) {
     }, 60);
 }
 
+function showMandatoryPasswordResetScreen(username) {
+    window._passwordResetScreenMode = 'mandatory';
+    window._mandatoryPasswordResetPending = true;
+    var titleEl = document.getElementById('password-reset-page-title');
+    var subEl = document.getElementById('password-reset-page-subtitle');
+    if (titleEl) titleEl.textContent = 'Reset your password';
+    if (subEl) {
+        subEl.textContent = 'Your account was created with a temporary password. Choose a new password that only you know before you can use the app.';
+    }
+    var login = document.getElementById('page-login');
+    var app = document.querySelector('.app-container');
+    var sidebar = document.querySelector('.app-container .sidebar');
+    var header = document.querySelector('.app-container .app-header');
+    if (login) login.style.display = 'none';
+    if (sidebar) {
+        sidebar.setAttribute('data-prev-display', sidebar.style.display || '');
+        sidebar.style.display = 'none';
+    }
+    if (header) {
+        header.setAttribute('data-prev-display', header.style.display || '');
+        header.style.display = 'none';
+    }
+    if (app) app.style.display = 'flex';
+    goToPage('password-expired-reset');
+    setTimeout(function () {
+        var userEl = document.getElementById('expired-reset-username');
+        var oldEl = document.getElementById('expired-reset-old-password');
+        var newEl = document.getElementById('expired-reset-new-password');
+        var confEl = document.getElementById('expired-reset-confirm-password');
+        if (userEl) userEl.value = username || '';
+        if (oldEl) oldEl.value = '';
+        if (newEl) { newEl.value = ''; }
+        if (confEl) { confEl.value = ''; }
+        if (oldEl && typeof oldEl.focus === 'function') oldEl.focus();
+    }, 60);
+}
+
 function _restoreSidebarAndHeaderAfterExpiredReset() {
     var sidebar = document.querySelector('.app-container .sidebar');
     var header = document.querySelector('.app-container .app-header');
@@ -1227,6 +1328,74 @@ function _restoreSidebarAndHeaderAfterExpiredReset() {
         header.style.display = prevH != null ? prevH : '';
         header.removeAttribute('data-prev-display');
     }
+}
+
+function submitPasswordResetFromLoginPage() {
+    if (window._passwordResetScreenMode === 'mandatory') {
+        submitMandatoryPasswordReset();
+    } else {
+        submitExpiredPasswordReset();
+    }
+}
+
+function submitMandatoryPasswordReset() {
+    var userEl = document.getElementById('expired-reset-username');
+    var oldEl = document.getElementById('expired-reset-old-password');
+    var newEl = document.getElementById('expired-reset-new-password');
+    var confEl = document.getElementById('expired-reset-confirm-password');
+    var username = userEl ? String(userEl.value || '').trim() : '';
+    var oldPassword = oldEl ? String(oldEl.value || '') : '';
+    var newPassword = newEl ? String(newEl.value || '') : '';
+    var confirmPassword = confEl ? String(confEl.value || '') : '';
+
+    if (!username || !oldPassword || !newPassword || !confirmPassword) {
+        showAppModal('Please fill all fields.', 'Reset Password');
+        return;
+    }
+    if (newPassword !== confirmPassword) {
+        showAppModal('New Password and Confirm Password do not match.', 'Reset Password');
+        return;
+    }
+    if (oldPassword === newPassword) {
+        showAppModal('New password must be different from your current password.', 'Reset Password');
+        return;
+    }
+    var passwordError = getStrongPasswordError(newPassword);
+    if (passwordError) {
+        showAppModal(passwordError, 'Reset Password');
+        return;
+    }
+
+    fetch((API_BASE || '') + '/api/data/auth/mandatory-password-reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username, oldPassword: oldPassword, newPassword: newPassword })
+    }).then(function (res) {
+        var ct = res.headers.get('content-type') || '';
+        if (ct.indexOf('json') !== -1) {
+            return res.json().then(function (body) { return { ok: res.ok, status: res.status, body: body }; });
+        }
+        return res.text().then(function (text) { return { ok: res.ok, status: res.status, body: { error: text } }; });
+    }).then(function (result) {
+        var data = result.body || {};
+        if (result.ok && data.ok && data.user) {
+            window._mandatoryPasswordResetPending = false;
+            window._passwordResetScreenMode = 'expired';
+            window.currentUser = data.user;
+            try { localStorage.setItem('currentUser', JSON.stringify(data.user)); } catch (e) {}
+            if (typeof currentUser !== 'undefined') currentUser = data.user;
+            updateProfileFromCurrentUser(data.user);
+            _restoreSidebarAndHeaderAfterExpiredReset();
+            showAppContainer();
+            refreshActiveQaCount();
+            goToPage('home');
+            return;
+        }
+        var msg = (data && data.error) ? String(data.error) : ('Password reset failed (HTTP ' + result.status + ').');
+        showAppModal(msg, 'Reset Password');
+    }).catch(function (err) {
+        showAppModal('Password reset failed: ' + (err && err.message ? err.message : 'Network error'), 'Reset Password');
+    });
 }
 
 function submitExpiredPasswordReset() {
@@ -1342,13 +1511,134 @@ function applyBiometricSetting(enabled) {
     }
 }
 
+/** Minutes (0 = off). Updated from factory settings API / localStorage. */
+var factoryAutoLogoutMinutes = 0;
+var _autoLogoutLastActivityMs = 0;
+var _autoLogoutIntervalId = null;
+var _autoLogoutListenersAttached = false;
+
+function applyFactoryAutoLogoutSetting(settings) {
+    var raw = settings && settings.autoLogoutMinutes != null ? settings.autoLogoutMinutes : 0;
+    var m = parseInt(raw, 10);
+    if (isNaN(m)) m = 0;
+    m = Math.max(0, Math.min(10080, m));
+    factoryAutoLogoutMinutes = m;
+    if (m < 1) {
+        stopAutoLogoutWatcher();
+    } else {
+        markAutoLogoutActivity();
+        if (window.currentUser && (window.currentUser.username || window.currentUser.name)) {
+            ensureAutoLogoutWatcher();
+        }
+    }
+}
+
+function markAutoLogoutActivity() {
+    _autoLogoutLastActivityMs = Date.now();
+}
+
+function isAutoLogoutRunBlocked() {
+    return (testRunButtonState === 'abort') ||
+        (validationRunState === 'running') ||
+        (validationRunBackendPending === true);
+}
+
+function ensureAutoLogoutListeners() {
+    if (_autoLogoutListenersAttached) return;
+    _autoLogoutListenersAttached = true;
+    var opts = { capture: true, passive: true };
+    ['pointerdown', 'touchstart', 'click', 'keydown', 'wheel'].forEach(function (ev) {
+        document.addEventListener(ev, markAutoLogoutActivity, opts);
+    });
+}
+
+function stopAutoLogoutWatcher() {
+    if (_autoLogoutIntervalId != null) {
+        clearInterval(_autoLogoutIntervalId);
+        _autoLogoutIntervalId = null;
+    }
+}
+
+function ensureAutoLogoutWatcher() {
+    ensureAutoLogoutListeners();
+    if (!window.currentUser || !(window.currentUser.username || window.currentUser.name)) return;
+    if (factoryAutoLogoutMinutes < 1) return;
+    markAutoLogoutActivity();
+    if (_autoLogoutIntervalId != null) return;
+    _autoLogoutIntervalId = setInterval(autoLogoutTick, 10000);
+}
+
+function autoLogoutTick() {
+    if (!window.currentUser || !(window.currentUser.username || window.currentUser.name)) {
+        stopAutoLogoutWatcher();
+        return;
+    }
+    var app = document.querySelector('.app-container');
+    if (!app || app.style.display === 'none') return;
+    if (isAutoLogoutRunBlocked()) {
+        markAutoLogoutActivity();
+        return;
+    }
+    if (factoryAutoLogoutMinutes < 1) return;
+    var limitMs = factoryAutoLogoutMinutes * 60000;
+    if (Date.now() - _autoLogoutLastActivityMs >= limitMs) {
+        stopAutoLogoutWatcher();
+        performAutoLogoutDueToInactivity();
+    }
+}
+
+function performAutoLogoutDueToInactivity() {
+    apiRequest(API_BASE + '/api/data/auth/logout', { method: 'POST' }).catch(function () {});
+    window.currentUser = null;
+    try { localStorage.removeItem('currentUser'); } catch (e) {}
+    if (typeof currentUser !== 'undefined') currentUser = null;
+    showLoginScreen();
+    setTimeout(function () {
+        showAppModal('You were logged out due to inactivity.', 'Session');
+    }, 200);
+}
+
 function loginBiometric() {
     if (!biometricEnabledSetting) {
         showAppModal('Biometric login is disabled by Factory Settings.', 'Biometric Disabled');
         return;
     }
-    showAppContainer();
-    goToPage('home');
+    fetch((API_BASE || '') + '/api/data/auth/login-biometric', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+    }).then(function (res) {
+        var ct = res.headers.get('content-type') || '';
+        var isJson = ct.indexOf('json') !== -1;
+        if (isJson) {
+            return res.json().then(function (body) {
+                return { ok: res.ok, status: res.status, body: body };
+            });
+        }
+        return res.text().then(function (text) {
+            return { ok: res.ok, status: res.status, body: { error: text } };
+        });
+    }).then(function (result) {
+        var data = result.body || {};
+        if (result.ok && data.success && data.user) {
+            window.currentUser = data.user;
+            try { localStorage.setItem('currentUser', JSON.stringify(data.user)); } catch (e) {}
+            if (typeof currentUser !== 'undefined') currentUser = data.user;
+            updateProfileFromCurrentUser(data.user);
+            showAppContainer();
+            refreshActiveQaCount();
+            goToPage('home');
+            return;
+        }
+        if (result.status === 403 && data && data.passwordChangeRequired && data.username) {
+            showMandatoryPasswordResetScreen(data.username);
+            return;
+        }
+        var msg = (data && data.error) ? String(data.error) : 'Biometric login failed.';
+        showAppModal(msg, 'Biometric Login');
+    }).catch(function (err) {
+        showAppModal('Biometric login failed: ' + (err && err.message ? err.message : 'Network error'), 'Biometric Login');
+    });
 }
 
 function enrollMemberBiometric() {
@@ -2004,6 +2294,8 @@ function startValidationFromType() {
 }
 
 function startUspValidation(type) {
+    var t = String(type || '').toLowerCase();
+    lastValidationType = t === 'usp2' ? 'load' : 'distance';
     goToPage('validation-run');
 }
 
@@ -2012,7 +2304,12 @@ function goBackFromValidationRun() {
         clearInterval(validationRunIntervalId);
         validationRunIntervalId = null;
     }
+    if (validationRunState === 'running' || validationRunBackendPending) {
+        stopValidationOnBackend().catch(function () {});
+        _closeValidationRunHardwareEs();
+    }
     validationRunState = 'idle';
+    validationRunBackendPending = false;
     goToPage('validate-type-select');
 }
 
@@ -2030,7 +2327,6 @@ function initValidationRunPage() {
     validationRunTolerance = 50;
     validationRunMin = validationRunTarget - validationRunTolerance;
     validationRunMax = validationRunTarget + validationRunTolerance;
-    validationRunExpected = validationRunTarget;
 
     setValRunEl('val-run-usp', usp);
     setValRunEl('val-run-taps-min', String(tapsMin));
@@ -2045,6 +2341,8 @@ function initValidationRunPage() {
 
     validationRunCurrentCount = 0;
     validationRunState = 'idle';
+    validationRunSecondsRemaining = VALIDATION_RUN_DURATION_SEC;
+    updateValidationRunTimerUi(validationRunSecondsRemaining);
     if (validationRunIntervalId != null) {
         clearInterval(validationRunIntervalId);
         validationRunIntervalId = null;
@@ -2164,7 +2462,7 @@ function unlockMember(id) {
     if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
         var role = getCurrentRole();
         if (!canPerformAction(role, 'user-unlock', 'change')) {
-            showAppModal('Only Admin/Factory can unlock accounts.', 'Permission');
+            showAppModal('You do not have permission to unlock accounts.', 'Permission');
             return;
         }
     }
@@ -2190,7 +2488,7 @@ function enableMember(id) {
     if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
         var role = getCurrentRole();
         if (!canPerformAction(role, 'user-enable', 'change')) {
-            showAppModal('Only Admin/Factory can enable accounts.', 'Permission');
+            showAppModal('You do not have permission to enable accounts.', 'Permission');
             return;
         }
     }
@@ -3019,6 +3317,8 @@ function skipTestRunCompletionToReport() {
 }
 
 var lastTestRunRecipe = null;
+/** Set when starting a test from Quick Test; cleared after report save so the form resets. */
+var _quickTestRunPendingFormReset = false;
 var testRunButtonState = 'start'; // 'start' | 'abort'
 var testRunIntervalId = null;
 var testRunCurrentStepIndex = 0;
@@ -3036,6 +3336,279 @@ var testRunLastStepCurrentMl = null;
 var _pendingStepVolumeDeltaMl = null;
 var _testRunInitialWeightResolve = null;
 
+/** EventSource for MCU SSE during hardware-backed test run */
+var testRunHardwareEs = null;
+var _testRunHardwareTapListener = null;
+
+function _getHardwareSseUrl() {
+    var base = API_BASE || '';
+    var path = '/api/hardware/stream';
+    if (base && String(base).indexOf('http') === 0) {
+        return String(base).replace(/\/$/, '') + path;
+    }
+    return path;
+}
+
+function _closeTestRunHardwareEs() {
+    if (testRunHardwareEs) {
+        if (_testRunHardwareTapListener) {
+            try {
+                testRunHardwareEs.removeEventListener('message', _testRunHardwareTapListener);
+            } catch (e) {}
+            _testRunHardwareTapListener = null;
+        }
+        try {
+            testRunHardwareEs.close();
+        } catch (e2) {}
+        testRunHardwareEs = null;
+    }
+}
+
+function hardwareTapStopSilently() {
+    return apiRequest(API_BASE + '/api/hardware/tap/stop', { method: 'POST' }).catch(function () {});
+}
+
+function recipeExpectedAdapterKind(recipe) {
+    if (!recipe) return null;
+    var mode = String(recipe.uspMode || '').toUpperCase();
+    if (mode === 'USP1') return 'usp1';
+    if (mode === 'USP2') return 'usp2';
+    if (mode === 'CUSTOM') {
+        var dh = null;
+        if (recipe.steps && recipe.steps[0] && recipe.steps[0].dropHeight != null) {
+            dh = parseFloat(recipe.steps[0].dropHeight);
+        } else if (recipe.dropHeight != null) {
+            dh = parseFloat(recipe.dropHeight);
+        }
+        if (dh == null || isNaN(dh)) return 'usp1';
+        return dh <= 5 ? 'usp2' : 'usp1';
+    }
+    var usp = String(recipe.usp || '').toLowerCase();
+    if (usp.indexOf('usp 2') >= 0 || usp.indexOf('usp2') >= 0) return 'usp2';
+    if (usp.indexOf('custom') >= 0) {
+        var dh2 = null;
+        if (recipe.steps && recipe.steps[0] && recipe.steps[0].dropHeight != null) {
+            dh2 = parseFloat(recipe.steps[0].dropHeight);
+        } else if (recipe.dropHeight != null) {
+            dh2 = parseFloat(recipe.dropHeight);
+        }
+        if (dh2 == null || isNaN(dh2)) return 'usp1';
+        return dh2 <= 5 ? 'usp2' : 'usp1';
+    }
+    return 'usp1';
+}
+
+function detectedAdapterKindFromCheckResult(result) {
+    if (!result || result.ok === false) return null;
+    var s = String(result.normalized != null ? result.normalized : (result.response || '')).toLowerCase();
+    if (s.indexOf('adapt') >= 0 && s.indexOf('error') >= 0) return 'error';
+    if (s.indexOf('usp1') >= 0 && (s.indexOf('ok') >= 0 || s.indexOf('ready') >= 0)) return 'usp1';
+    if (s.indexOf('usp2') >= 0 && (s.indexOf('ok') >= 0 || s.indexOf('ready') >= 0)) return 'usp2';
+    return null;
+}
+
+function stepSpeedToSpdMode(speed) {
+    var n = parseInt(speed, 10);
+    if (n === 300) return 'spd1';
+    if (n === 250) return 'spd2';
+    return null;
+}
+
+function getTestRunStepSpeed(step, recipe) {
+    if (step && step.speed != null && !isNaN(parseInt(step.speed, 10))) {
+        return parseInt(step.speed, 10);
+    }
+    if (recipe && recipe.speed != null && !isNaN(parseInt(recipe.speed, 10))) {
+        return parseInt(recipe.speed, 10);
+    }
+    var mode = String(recipe && recipe.uspMode ? recipe.uspMode : '').toUpperCase();
+    if (mode === 'USP1') return 300;
+    if (mode === 'USP2') return 250;
+    var usp = String(recipe && recipe.usp ? recipe.usp : '').toLowerCase();
+    if (usp.indexOf('usp 2') >= 0 || usp.indexOf('usp2') >= 0) return 250;
+    return 300;
+}
+
+function _testRunRevertUiToStartAfterHardwareFail() {
+    testRunButtonState = 'start';
+    var btn = document.getElementById('btn-test-start-abort');
+    if (btn) {
+        btn.disabled = false;
+        btn.className = 'btn-ctrl start';
+        btn.innerHTML = '<span class="ctrl-icon">&#9654;</span><span>START</span>';
+        btn.classList.remove('danger');
+    }
+    var statusText = document.getElementById('run-status-text');
+    var statusSubtext = document.getElementById('run-status-subtext');
+    if (statusText) statusText.textContent = 'Ready';
+    if (statusSubtext) statusSubtext.textContent = 'Waiting to start';
+    _closeTestRunHardwareEs();
+}
+
+function waitForHardwareTapSequence(targetTaps, speedMode) {
+    return new Promise(function (resolve, reject) {
+        if (!testRunHardwareEs) {
+            reject(new Error('Hardware stream not connected.'));
+            return;
+        }
+        var tapGoal = Math.max(1, parseInt(targetTaps, 10) || 1);
+        var handler = function (ev) {
+            try {
+                var raw = ev.data;
+                if (raw == null || raw === '') return;
+                var data = JSON.parse(raw);
+                if (data.ping) return;
+                var kind = String(data.kind || '');
+                var norm = String(data.normalized != null ? data.normalized : '').toLowerCase().replace(/\*$/, '');
+                var lineStr = String(data.line != null ? data.line : '').trim();
+                if (kind === 'ok' || norm === 'ok') return;
+                if (kind === 'progress' || /^\d+$/.test(norm)) {
+                    var n = parseInt(norm || lineStr, 10);
+                    if (!isNaN(n) && n >= 0) {
+                        testRunCurrentTapCount = n;
+                        setRunCard('run-tap-count-card', String(n));
+                    }
+                }
+                if (kind === 'completed' || norm === 'completed' || norm === 'complete.') {
+                    if (testRunHardwareEs) {
+                        testRunHardwareEs.removeEventListener('message', handler);
+                    }
+                    if (_testRunHardwareTapListener === handler) {
+                        _testRunHardwareTapListener = null;
+                    }
+                    resolve();
+                    return;
+                }
+                if (kind === 'error' || kind === 'adapter_error') {
+                    if (testRunHardwareEs) {
+                        testRunHardwareEs.removeEventListener('message', handler);
+                    }
+                    if (_testRunHardwareTapListener === handler) {
+                        _testRunHardwareTapListener = null;
+                    }
+                    reject(new Error(lineStr || norm || 'Hardware reported an error.'));
+                }
+            } catch (ex) {
+                // ignore malformed SSE payloads
+            }
+        };
+        _testRunHardwareTapListener = handler;
+        testRunHardwareEs.addEventListener('message', handler);
+        apiRequest(API_BASE + '/api/hardware/tap/start', {
+            method: 'POST',
+            body: { speedMode: speedMode, tapCount: tapGoal }
+        }).then(function (res) {
+            if (!res || res.ok === false) {
+                if (testRunHardwareEs) {
+                    testRunHardwareEs.removeEventListener('message', handler);
+                }
+                if (_testRunHardwareTapListener === handler) {
+                    _testRunHardwareTapListener = null;
+                }
+                reject(new Error((res && res.error) ? String(res.error) : 'Tap start rejected by device.'));
+            }
+        }).catch(function (err) {
+            if (testRunHardwareEs) {
+                testRunHardwareEs.removeEventListener('message', handler);
+            }
+            if (_testRunHardwareTapListener === handler) {
+                _testRunHardwareTapListener = null;
+            }
+            reject(err instanceof Error ? err : new Error(String(err)));
+        });
+    });
+}
+
+function runTestRunHardwareStep(stepIndex) {
+    if (stepIndex < 0 || stepIndex >= testRunTotalSteps) return Promise.resolve();
+    var recipe = lastTestRunRecipe;
+    var step = testRunSteps[stepIndex];
+    if (!step) return Promise.reject(new Error('Invalid step.'));
+
+    testRunCurrentStepIndex = stepIndex;
+    var speed = getTestRunStepSpeed(step, recipe);
+    var speedMode = stepSpeedToSpdMode(speed);
+    var target = parseInt(step.tapCount, 10) || 0;
+    if (!speedMode) {
+        return Promise.reject(new Error('Unsupported step speed for hardware (use 300 or 250 taps/min).'));
+    }
+    if (target < 1) {
+        return Promise.reject(new Error('Invalid tap count for this step.'));
+    }
+
+    setRunCard('run-current-step-card', String(stepIndex + 1));
+    setRunCard('run-tap-count-of-card', 'of ' + target);
+    setRunCard('run-tap-count-card', '0');
+    testRunCurrentTapCount = 0;
+
+    return waitForHardwareTapSequence(target, speedMode).then(function () {
+        return askVolumeForStep(stepIndex).then(function (vol) {
+            if (vol === null || vol === '') {
+                return runTestRunHardwareStep(stepIndex);
+            }
+            var curr = parseFloat(vol);
+            if (isNaN(curr) || curr <= 0) {
+                return runTestRunHardwareStep(stepIndex);
+            }
+
+            var prev = testRunPreviousVolumeMl;
+            testRunLastStepPreviousMl = prev;
+            testRunLastStepCurrentMl = curr;
+            if (prev != null && !isNaN(prev)) {
+                testRunLastStepVolumeDeltaMl = prev - curr;
+            } else {
+                testRunLastStepVolumeDeltaMl = null;
+            }
+            testRunPreviousVolumeMl = curr;
+
+            var initialVol = (testRunInitialVolumeMl != null && !isNaN(testRunInitialVolumeMl))
+                ? testRunInitialVolumeMl
+                : parseFloat(testRunStepVolumes[0]);
+            var bulkD = computeBulkDensityGPerMl(testRunInitialWeightG, initialVol);
+            var tapD = computeTapDensityGPerMl(testRunInitialWeightG, testRunStepVolumes[testRunCurrentStepIndex]);
+            setRunCard('run-bulk-density', _formatDensity(bulkD));
+            setRunCard('run-tap-density', _formatDensity(tapD));
+            _pendingStepVolumeDeltaMl = testRunLastStepVolumeDeltaMl;
+            recordCurrentStepResult();
+            _pendingStepVolumeDeltaMl = null;
+            return true;
+        }).then(function (ok) {
+            if (!ok) return;
+            var isLastStep = (stepIndex + 1) >= testRunTotalSteps;
+            showTestRunStepCompleteModal(isLastStep);
+        });
+    });
+}
+
+function runTestRunHardwareOrchestration() {
+    var steps = getTestRunSteps();
+    if (!steps || steps.length === 0) return;
+    testRunSteps = steps;
+    testRunTotalSteps = steps.length;
+    testRunCurrentStepIndex = 0;
+    testRunCurrentTapCount = 0;
+    testRunStepResults = [];
+    renderTestRunResultsTable();
+
+    _closeTestRunHardwareEs();
+    try {
+        testRunHardwareEs = new EventSource(_getHardwareSseUrl());
+    } catch (esErr) {
+        showAppModal('Could not connect to the hardware stream. Check the server and try again.', 'Test Run');
+        _testRunRevertUiToStartAfterHardwareFail();
+        return;
+    }
+
+    runTestRunHardwareStep(0).catch(function (err) {
+        hardwareTapStopSilently();
+        _closeTestRunHardwareEs();
+        if (err && err.message === 'adapter') return;
+        var msg = err && err.message ? String(err.message) : 'Hardware error';
+        showAppModal('Test run failed: ' + msg, 'Test Run');
+        _testRunRevertUiToStartAfterHardwareFail();
+    });
+}
+
 function getMaxSampleVolumeMl(recipe) {
     if (!recipe) return null;
     if (recipe.sampleVolumeMl != null && recipe.sampleVolumeMl !== '') {
@@ -3048,6 +3621,13 @@ function getMaxSampleVolumeMl(recipe) {
         return isNaN(n2) ? null : n2;
     }
     return null;
+}
+
+/** True if entered ml is above the last reading (initial or prior step); skip when no prior reading yet. */
+function testRunVolumeExceedsMonotonicCap(numMl) {
+    var prev = testRunPreviousVolumeMl;
+    if (prev == null || isNaN(prev) || isNaN(numMl)) return false;
+    return numMl > prev;
 }
 
 function _formatDensity(n) {
@@ -3200,6 +3780,10 @@ function openTestRunVolumeModal(stepIndex) {
                     window.alert('Volume in ml cannot exceed cylinder size (' + maxMl + ' ml).');
                     continue;
                 }
+                if (testRunVolumeExceedsMonotonicCap(num)) {
+                    window.alert('Please check the weight you have entered.');
+                    continue;
+                }
                 resolve(String(vol).trim());
                 return;
             }
@@ -3266,6 +3850,12 @@ function confirmTestRunVolume() {
     var maxMl = getMaxSampleVolumeMl(lastTestRunRecipe);
     if (maxMl != null && num > maxMl) {
         showAppModal('Volume in ml cannot exceed cylinder size (' + maxMl + ' ml).', 'Volume');
+        if (input) input.select();
+        return;
+    }
+
+    if (testRunVolumeExceedsMonotonicCap(num)) {
+        showAppModal('Please check the weight you have entered.', 'Volume');
         if (input) input.select();
         return;
     }
@@ -3345,6 +3935,7 @@ function startTestRun(recipe) {
     testRunLastStepPreviousMl = null;
     testRunLastStepCurrentMl = null;
     _pendingStepVolumeDeltaMl = null;
+    _closeTestRunHardwareEs();
 }
 
 function startQuickTestRun() {
@@ -3428,7 +4019,27 @@ function startQuickTestRun() {
         var qte = document.getElementById('quick-custom-total-taps');
         recipe.customTotalTaps = qte ? parseInt(qte.value, 10) : taps.reduce(function (a, b) { return a + b; }, 0);
     }
+    _quickTestRunPendingFormReset = true;
     startTestRun(recipe);
+}
+
+function resetQuickTestFormAfterRunIfPending() {
+    if (!_quickTestRunPendingFormReset) return;
+    _quickTestRunPendingFormReset = false;
+    var pn = document.getElementById('quick-product-name');
+    var bn = document.getElementById('quick-batch-number');
+    if (pn) pn.value = '';
+    if (bn) bn.value = '';
+    window._quickStepTaps = null;
+    window._quickStepCount = null;
+    var qtot = document.getElementById('quick-custom-total-taps');
+    if (qtot) qtot.value = '';
+    if (typeof _refreshQuickStepSummary === 'function') {
+        _refreshQuickStepSummary();
+    }
+    document.querySelectorAll('input[name="quick-cylinder"]').forEach(function (el) {
+        el.checked = el.value === '100';
+    });
 }
 
 function getTestRunSteps() {
@@ -3544,75 +4155,6 @@ function renderTestRunResultsTable() {
     });
 }
 
-function runTestRunTick() {
-    if (testRunCurrentStepIndex >= testRunTotalSteps) return;
-    var step = testRunSteps[testRunCurrentStepIndex];
-    var target = parseInt(step.tapCount, 10) || 0;
-    testRunCurrentTapCount++;
-    setRunCard('run-tap-count-card', String(testRunCurrentTapCount));
-        if (testRunCurrentTapCount >= target) {
-        clearInterval(testRunIntervalId);
-        testRunIntervalId = null;
-        askVolumeForStep(testRunCurrentStepIndex).then(function (vol) {
-            if (vol === null || vol === '') {
-                startTestRunInterval();
-                return false;
-            }
-            var curr = parseFloat(vol);
-            if (isNaN(curr) || curr <= 0) {
-                startTestRunInterval();
-                return false;
-            }
-
-            var prev = testRunPreviousVolumeMl;
-            testRunLastStepPreviousMl = prev;
-            testRunLastStepCurrentMl = curr;
-            if (prev != null && !isNaN(prev)) {
-                testRunLastStepVolumeDeltaMl = prev - curr;
-            } else {
-                testRunLastStepVolumeDeltaMl = null;
-            }
-            testRunPreviousVolumeMl = curr;
-
-            var initialVol = (testRunInitialVolumeMl != null && !isNaN(testRunInitialVolumeMl))
-                ? testRunInitialVolumeMl
-                : parseFloat(testRunStepVolumes[0]);
-            var bulkD = computeBulkDensityGPerMl(testRunInitialWeightG, initialVol);
-            var tapD = computeTapDensityGPerMl(testRunInitialWeightG, testRunStepVolumes[testRunCurrentStepIndex]);
-            setRunCard('run-bulk-density', _formatDensity(bulkD));
-            setRunCard('run-tap-density', _formatDensity(tapD));
-            _pendingStepVolumeDeltaMl = testRunLastStepVolumeDeltaMl;
-            recordCurrentStepResult();
-            _pendingStepVolumeDeltaMl = null;
-            return true;
-        }).then(function (ok) {
-            if (!ok) return;
-            var isLastStep = (testRunCurrentStepIndex + 1) >= testRunTotalSteps;
-            showTestRunStepCompleteModal(isLastStep);
-        });
-    }
-}
-
-function startTestRunInterval() {
-    setRunCard('run-current-step-card', String(testRunCurrentStepIndex + 1));
-    setRunCard('run-tap-count-of-card', 'of ' + (testRunSteps[testRunCurrentStepIndex] && testRunSteps[testRunCurrentStepIndex].tapCount));
-    setRunCard('run-tap-count-card', '0');
-    testRunCurrentTapCount = 0;
-    testRunIntervalId = setInterval(runTestRunTick, 30);
-}
-
-function runTestRunSimulation() {
-    var steps = getTestRunSteps();
-    if (!steps || steps.length === 0) return;
-    testRunSteps = steps;
-    testRunTotalSteps = steps.length;
-    testRunCurrentStepIndex = 0;
-    testRunCurrentTapCount = 0;
-    testRunStepResults = [];
-    renderTestRunResultsTable();
-    startTestRunInterval();
-}
-
 function buildTestRunReportPayload() {
     var recipe = lastTestRunRecipe;
     if (!recipe) return null;
@@ -3653,6 +4195,8 @@ function abortTestRunAndSave() {
         clearInterval(testRunIntervalId);
         testRunIntervalId = null;
     }
+    hardwareTapStopSilently();
+    _closeTestRunHardwareEs();
     closeTestRunStepCompleteModal();
     cancelTestRunVolume();
 
@@ -3686,6 +4230,7 @@ function abortTestRunAndSave() {
     apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: payload })
         .then(function (result) {
             _abortSaveInFlight = false;
+            resetQuickTestFormAfterRunIfPending();
             var reportId = (result && result.id) ? result.id : null;
             if (reportId) {
                 _saveReportPdfSilent(reportId);
@@ -3710,6 +4255,7 @@ function saveTestRunReportAndGoToReportPreview() {
             clearInterval(testRunIntervalId);
             testRunIntervalId = null;
         }
+        _closeTestRunHardwareEs();
         testRunButtonState = 'start';
         goToPage('reports');
         return;
@@ -3721,6 +4267,8 @@ function saveTestRunReportAndGoToReportPreview() {
                 clearInterval(testRunIntervalId);
                 testRunIntervalId = null;
             }
+            hardwareTapStopSilently();
+            _closeTestRunHardwareEs();
             setRunCard('run-status-text', 'Completed');
             setRunCard('run-status-subtext', 'Report saved');
             var btn = document.getElementById('btn-test-start-abort');
@@ -3731,6 +4279,7 @@ function saveTestRunReportAndGoToReportPreview() {
             }
             testRunButtonState = 'start';
             var reportId = (result && result.id) ? result.id : null;
+            resetQuickTestFormAfterRunIfPending();
             if (reportId) {
                 _saveReportPdfSilent(reportId);
                 _pendingTestRunReportId = reportId;
@@ -3754,6 +4303,7 @@ function saveTestRunReportAndGoToReports() {
             clearInterval(testRunIntervalId);
             testRunIntervalId = null;
         }
+        _closeTestRunHardwareEs();
         testRunButtonState = 'start';
         goToPage('reports');
         return;
@@ -3765,6 +4315,8 @@ function saveTestRunReportAndGoToReports() {
                 clearInterval(testRunIntervalId);
                 testRunIntervalId = null;
             }
+            hardwareTapStopSilently();
+            _closeTestRunHardwareEs();
             setRunCard('run-status-text', 'Saved');
             setRunCard('run-status-subtext', 'Report saved');
             var btn = document.getElementById('btn-test-start-abort');
@@ -3775,6 +4327,7 @@ function saveTestRunReportAndGoToReports() {
             }
             testRunButtonState = 'start';
             var reportId = (result && result.id) ? result.id : null;
+            resetQuickTestFormAfterRunIfPending();
             if (reportId) {
                 _saveReportPdfSilent(reportId);
                 _pendingTestRunReportId = reportId;
@@ -3802,9 +4355,8 @@ function confirmTestRunStepContinue() {
     if (volInput) volInput.value = '';
     // Move to next step
     testRunCurrentStepIndex++;
-    // Resume ticking for the new step if currently running
-    if (testRunButtonState === 'abort' && testRunIntervalId == null) {
-        startTestRunInterval();
+    if (testRunButtonState === 'abort') {
+        runTestRunHardwareStep(testRunCurrentStepIndex);
     }
 }
 
@@ -3846,17 +4398,31 @@ function toggleTestRunState() {
             setRunCard('run-bulk-density', _formatDensity(bulkD));
             setRunCard('run-tap-density', '--');
 
-            testRunButtonState = 'abort';
-            if (btn) {
-                btn.disabled = false;
-                btn.className = 'btn-ctrl danger';
-                btn.innerHTML = '<span class="ctrl-icon">&#9726;</span><span>ABORT</span>';
-            }
-            if (statusText) statusText.textContent = 'Running';
-            if (statusSubtext) statusSubtext.textContent = 'Test in progress';
-            runTestRunSimulation();
+            return apiRequest(API_BASE + '/api/hardware/adapter/check', { method: 'POST' }).then(function (checkRes) {
+                var expected = recipeExpectedAdapterKind(lastTestRunRecipe);
+                var detected = detectedAdapterKindFromCheckResult(checkRes);
+                if (!checkRes || checkRes.ok === false || !detected || detected === 'error') {
+                    showAppModal('Please fit the correct USP adapter for this recipe and try again.', 'Test Run');
+                    throw new Error('adapter');
+                }
+                if (expected && detected !== expected) {
+                    showAppModal('Please fit the correct USP adapter for this recipe and try again.', 'Test Run');
+                    throw new Error('adapter');
+                }
+            }).then(function () {
+                testRunButtonState = 'abort';
+                if (btn) {
+                    btn.disabled = false;
+                    btn.className = 'btn-ctrl danger';
+                    btn.innerHTML = '<span class="ctrl-icon">&#9726;</span><span>ABORT</span>';
+                }
+                if (statusText) statusText.textContent = 'Running';
+                if (statusSubtext) statusSubtext.textContent = 'Test in progress';
+                runTestRunHardwareOrchestration();
+            });
         }).catch(function (err) {
             if (btn) btn.disabled = false;
+            if (err && err.message === 'adapter') return;
             showAppModal('Test run failed: ' + (err && err.message ? err.message : 'Error'), 'Test Run');
         });
     } else {
@@ -4141,7 +4707,10 @@ function updateCreateRecipeContinueButton() {
     if (mode === 'CUSTOM') {
         var totalEl = document.getElementById('create-custom-total-taps');
         var tv = totalEl ? parseInt(totalEl.value, 10) : 0;
-        customOk = !isNaN(tv) && tv >= 1;
+        var minSteps = (typeof window.currentRecipeStepCount === 'number' && window.currentRecipeStepCount > 0)
+            ? window.currentRecipeStepCount
+            : 10;
+        customOk = !isNaN(tv) && tv >= minSteps;
     }
     var canContinue = !!(recipeName && speedOk && heightOk && customOk);
     if (btn) {
@@ -4647,40 +5216,142 @@ function completeRecipeFromStep2() {
         showAppModal('Failed to save recipe: ' + msg, 'Save Recipe');
     });
 }
-function validationRunTick() {
-    validationRunCurrentCount++;
-    setValRunEl('val-run-tap-count', String(validationRunCurrentCount));
-    if (validationRunCurrentCount >= validationRunExpected) {
-        clearInterval(validationRunIntervalId);
-        validationRunIntervalId = null;
-        validationRunState = 'idle';
-        stopValidationOnBackend().catch(function () {});
-        setValRunEl('val-run-status', 'Completed');
-        setValRunEl('val-run-status-sub', 'Validation run finished');
-        var resultCard = document.getElementById('val-result-card');
-        var resultEl = document.getElementById('val-run-result');
-        var detailEl = document.getElementById('val-run-result-detail');
-        var isPass = validationRunCurrentCount >= validationRunMin && validationRunCurrentCount <= validationRunMax;
-        if (resultCard) resultCard.style.display = '';
-        if (resultEl) resultEl.textContent = isPass ? 'Pass' : 'Fail';
-        if (detailEl) detailEl.textContent = 'Expected ' + validationRunTarget + ' (+/- ' + validationRunTolerance + '), actual ' + validationRunCurrentCount + '.';
-        var btn = document.getElementById('btn-validation-start-abort');
-        var label = document.getElementById('btn-validation-label');
-        if (btn) {
-            btn.className = 'btn btn-primary validation-action-btn';
-            btn.innerHTML = '<span class="ctrl-icon">&#9654;</span><span id="btn-validation-label">Start Validation</span>';
-        }
-        if (label) label.textContent = 'Start Validation';
 
-        var usp = lastValidationType === 'load' ? 'USP 2' : 'USP 1';
-        var tapsMin = lastValidationType === 'load' ? 250 : 300;
-        var dropHeight = lastValidationType === 'load' ? 3 : 14;
-        var user = window.currentUser || {};
-        var reportPayload = {
-            name: 'Validation - ' + (isPass ? 'Pass' : 'Fail'),
-            type: 'validation',
-            validationSubtype: lastValidationType,
-            status: isPass ? 'Pass' : 'Fail',
+function _closeValidationRunHardwareEs() {
+    if (validationRunHardwareEs) {
+        if (validationRunSseListener) {
+            try {
+                validationRunHardwareEs.removeEventListener('message', validationRunSseListener);
+            } catch (e) {}
+            validationRunSseListener = null;
+        }
+        try {
+            validationRunHardwareEs.close();
+        } catch (e2) {}
+        validationRunHardwareEs = null;
+    }
+}
+
+function updateValidationRunTimerUi(secondsRemaining) {
+    var total = VALIDATION_RUN_DURATION_SEC;
+    var sec = Math.max(0, Math.min(total, parseInt(secondsRemaining, 10) || 0));
+    setValRunEl('val-run-timer-digital', String(sec));
+    var fill = document.getElementById('val-run-timer-fill');
+    if (fill && fill.style) {
+        var deg = total > 0 ? (sec / total) * 360 : 0;
+        fill.style.setProperty('--val-timer-sweep-deg', String(deg) + 'deg');
+    }
+}
+
+function _resetValidationRunActionButtonToStart() {
+    var btn = document.getElementById('btn-validation-start-abort');
+    var label = document.getElementById('btn-validation-label');
+    if (btn) {
+        btn.className = 'btn btn-primary validation-action-btn';
+        btn.innerHTML = '<span class="ctrl-icon">&#9654;</span><span id="btn-validation-label">Start Validation</span>';
+    }
+    if (label) label.textContent = 'Start Validation';
+}
+
+function validationRunHardwareMessage(ev) {
+    if (validationRunState !== 'running') return;
+    try {
+        var raw = ev.data;
+        if (raw == null || raw === '') return;
+        var data = JSON.parse(raw);
+        if (data.ping) return;
+        var kind = String(data.kind || '');
+        var norm = String(data.normalized != null ? data.normalized : '').toLowerCase().replace(/\*$/, '');
+        var lineStr = String(data.line != null ? data.line : '').trim();
+        if (kind === 'ok' || norm === 'ok') return;
+        if (kind === 'stopped' || norm === 'stopped') return;
+        if (kind === 'progress' || /^\d+$/.test(norm)) {
+            var n = parseInt(norm || lineStr, 10);
+            if (!isNaN(n) && n >= 0) {
+                validationRunCurrentCount = n;
+                setValRunEl('val-run-tap-count', String(n));
+            }
+            return;
+        }
+        if (kind === 'error' || kind === 'adapter_error') {
+            if (validationRunIntervalId != null) {
+                clearInterval(validationRunIntervalId);
+                validationRunIntervalId = null;
+            }
+            validationRunState = 'idle';
+            stopValidationOnBackend().catch(function () {});
+            _closeValidationRunHardwareEs();
+            _resetValidationRunActionButtonToStart();
+            updateValidationRunTimerUi(VALIDATION_RUN_DURATION_SEC);
+            showAppModal(
+                'Hardware error during validation: ' + (lineStr || norm || 'Unknown'),
+                'Validation'
+            );
+        }
+    } catch (ex) {
+        // ignore malformed SSE payloads
+    }
+}
+
+function validationRunTimerTick() {
+    validationRunSecondsRemaining--;
+    if (validationRunSecondsRemaining < 0) validationRunSecondsRemaining = 0;
+    updateValidationRunTimerUi(validationRunSecondsRemaining);
+    if (validationRunSecondsRemaining <= 0) {
+        if (validationRunIntervalId != null) {
+            clearInterval(validationRunIntervalId);
+            validationRunIntervalId = null;
+        }
+        completeValidationRunAfterDuration();
+    }
+}
+
+function completeValidationRunAfterDuration() {
+    validationRunState = 'idle';
+    stopValidationOnBackend().catch(function () {});
+    _closeValidationRunHardwareEs();
+    setValRunEl('val-run-status', 'Completed');
+    setValRunEl('val-run-status-sub', 'Validation run finished');
+    var resultCard = document.getElementById('val-result-card');
+    var resultEl = document.getElementById('val-run-result');
+    var detailEl = document.getElementById('val-run-result-detail');
+    var isPass = validationRunCurrentCount >= validationRunMin && validationRunCurrentCount <= validationRunMax;
+    if (resultCard) resultCard.style.display = '';
+    if (resultEl) resultEl.textContent = isPass ? 'Pass' : 'Fail';
+    if (detailEl) {
+        detailEl.textContent =
+            'After ' +
+            String(VALIDATION_RUN_DURATION_SEC) +
+            ' s: expected ' +
+            validationRunTarget +
+            ' (\u00b1' +
+            validationRunTolerance +
+            '), actual ' +
+            validationRunCurrentCount +
+            '.';
+    }
+    _resetValidationRunActionButtonToStart();
+
+    var usp = lastValidationType === 'load' ? 'USP 2' : 'USP 1';
+    var tapsMin = lastValidationType === 'load' ? 250 : 300;
+    var dropHeight = lastValidationType === 'load' ? 3 : 14;
+    var user = window.currentUser || {};
+    var reportPayload = {
+        name: 'Validation - ' + (isPass ? 'Pass' : 'Fail'),
+        type: 'validation',
+        validationSubtype: lastValidationType,
+        status: isPass ? 'Pass' : 'Fail',
+        usp: usp,
+        tapsMin: tapsMin,
+        dropHeight: dropHeight,
+        expectedTapCount: validationRunTarget,
+        expectedTolerance: validationRunTolerance,
+        expectedTapCountMin: validationRunMin,
+        expectedTapCountMax: validationRunMax,
+        actualTapCount: validationRunCurrentCount,
+        createdAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        testData: {
             usp: usp,
             tapsMin: tapsMin,
             dropHeight: dropHeight,
@@ -4689,60 +5360,48 @@ function validationRunTick() {
             expectedTapCountMin: validationRunMin,
             expectedTapCountMax: validationRunMax,
             actualTapCount: validationRunCurrentCount,
+            validationDurationSec: VALIDATION_RUN_DURATION_SEC,
+            status: isPass ? 'Pass' : 'Fail',
+            operatorName: user.name || user.username || '--',
+            employeeId: user.username || '--',
             createdAt: new Date().toISOString(),
-            completedAt: new Date().toISOString(),
-            testData: {
-                usp: usp,
-                tapsMin: tapsMin,
-                dropHeight: dropHeight,
-                expectedTapCount: validationRunTarget,
-                expectedTolerance: validationRunTolerance,
-                expectedTapCountMin: validationRunMin,
-                expectedTapCountMax: validationRunMax,
-                actualTapCount: validationRunCurrentCount,
-                status: isPass ? 'Pass' : 'Fail',
-                operatorName: user.name || user.username || '--',
-                employeeId: user.username || '--',
-                createdAt: new Date().toISOString(),
-                completedAt: new Date().toISOString()
-            }
-        };
-        // mark completion for the procedure we just ran
-        if (lastValidationType === 'distance' || lastValidationType === 'load') {
-            validationCompletion[lastValidationType] = true;
+            completedAt: new Date().toISOString()
         }
-
-        apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: reportPayload })
-            .then(function (result) {
-                // Do not close validation until BOTH USP 1 and USP 2 are completed.
-                if (!isValidationFullyCompleted()) {
-                    var missing = getMissingValidationLabel();
-                    showAppModal('Validation saved. Please complete ' + missing + ' to close validation.', 'Validation');
-                    goToPage('validate-type-select');
-                    return;
-                }
-
-                var reportId = result && result.id;
-                currentReportFilter = 'validation';
-                if (reportId) {
-                    _saveReportPdfSilent(reportId);
-                    if (typeof openReportPreview === 'function') openReportPreview(reportId);
-                    else goToPage('reports');
-                } else {
-                    goToPage('reports');
-                }
-            })
-            .catch(function (err) {
-                console.error('Failed to save validation report', err);
-                currentReportFilter = 'validation';
-                goToPage('reports');
-            });
+    };
+    if (lastValidationType === 'distance' || lastValidationType === 'load') {
+        validationCompletion[lastValidationType] = true;
     }
+
+    apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: reportPayload })
+        .then(function (result) {
+            if (!isValidationFullyCompleted()) {
+                var missing = getMissingValidationLabel();
+                showAppModal('Validation saved. Please complete ' + missing + ' to close validation.', 'Validation');
+                goToPage('validate-type-select');
+                return;
+            }
+
+            var reportId = result && result.id;
+            currentReportFilter = 'validation';
+            if (reportId) {
+                _saveReportPdfSilent(reportId);
+                if (typeof openReportPreview === 'function') openReportPreview(reportId);
+                else goToPage('reports');
+            } else {
+                goToPage('reports');
+            }
+        })
+        .catch(function (err) {
+            console.error('Failed to save validation report', err);
+            currentReportFilter = 'validation';
+            goToPage('reports');
+        });
 }
 
 function startValidationOnBackend() {
     if (!validationHardwareEnabled) return Promise.resolve({ ok: true, skipped: true });
-    return apiRequest(API_BASE + '/api/hardware/validation/load/start', { method: 'POST' });
+    var mode = lastValidationType === 'load' ? 'usp2' : 'usp1';
+    return apiRequest(API_BASE + '/api/hardware/validation/load/start', { method: 'POST', body: { mode: mode } });
 }
 
 function stopValidationOnBackend() {
@@ -4759,6 +5418,21 @@ function toggleValidationRunState() {
         if (btn) btn.disabled = true;
         setValRunEl('val-run-status', 'Starting');
         setValRunEl('val-run-status-sub', validationHardwareEnabled ? 'Waiting for hardware' : 'Starting');
+
+        _closeValidationRunHardwareEs();
+        try {
+            validationRunHardwareEs = new EventSource(_getHardwareSseUrl());
+        } catch (esErr) {
+            validationRunBackendPending = false;
+            if (btn) btn.disabled = false;
+            setValRunEl('val-run-status', 'Ready');
+            setValRunEl('val-run-status-sub', 'Failed to connect to hardware stream');
+            showAppModal('Could not connect to the hardware stream. Check the server and try again.', 'Validation');
+            return;
+        }
+        validationRunSseListener = validationRunHardwareMessage;
+        validationRunHardwareEs.addEventListener('message', validationRunSseListener);
+
         startValidationOnBackend().then(function (res) {
             if (!res || res.ok !== true) {
                 throw new Error((res && (res.error || res.response)) || 'Hardware did not acknowledge start');
@@ -4766,8 +5440,10 @@ function toggleValidationRunState() {
             validationRunState = 'running';
             validationRunCurrentCount = 0;
             setValRunEl('val-run-tap-count', '0');
+            validationRunSecondsRemaining = VALIDATION_RUN_DURATION_SEC;
+            updateValidationRunTimerUi(validationRunSecondsRemaining);
             setValRunEl('val-run-status', 'Running');
-            setValRunEl('val-run-status-sub', 'Tap count in progress');
+            setValRunEl('val-run-status-sub', String(VALIDATION_RUN_DURATION_SEC) + 's run — tap count from device');
             var resultCard = document.getElementById('val-result-card');
             if (resultCard) resultCard.style.display = 'none';
             if (btn) {
@@ -4775,9 +5451,10 @@ function toggleValidationRunState() {
                 btn.innerHTML = '<span class="ctrl-icon">&#9726;</span><span id="btn-validation-label">Abort</span>';
             }
             if (label) label.textContent = 'Abort';
-            validationRunIntervalId = setInterval(validationRunTick, 30);
+            validationRunIntervalId = setInterval(validationRunTimerTick, 1000);
         }).catch(function (err) {
             validationRunState = 'idle';
+            _closeValidationRunHardwareEs();
             setValRunEl('val-run-status', 'Ready');
             setValRunEl('val-run-status-sub', 'Failed to start hardware validation');
             showAppModal('Failed to start validation: ' + (err && err.message ? err.message : 'Unknown error'), 'Validation');
@@ -4789,21 +5466,18 @@ function toggleValidationRunState() {
         validationRunBackendPending = true;
         var btn = document.getElementById('btn-validation-start-abort');
         if (btn) btn.disabled = true;
-        stopValidationOnBackend().catch(function () {}).finally(function () {
         if (validationRunIntervalId != null) {
             clearInterval(validationRunIntervalId);
             validationRunIntervalId = null;
         }
-        validationRunState = 'idle';
-        setValRunEl('val-run-status', 'Aborted');
-        setValRunEl('val-run-status-sub', 'Tap count: ' + validationRunCurrentCount);
-        var label = document.getElementById('btn-validation-label');
-        if (btn) {
-            btn.className = 'btn btn-primary validation-action-btn';
-            btn.innerHTML = '<span class="ctrl-icon">&#9654;</span><span id="btn-validation-label">Start Validation</span>';
-            btn.disabled = false;
-        }
-        if (label) label.textContent = 'Start Validation';
+        stopValidationOnBackend().catch(function () {}).finally(function () {
+            validationRunState = 'idle';
+            _closeValidationRunHardwareEs();
+            updateValidationRunTimerUi(VALIDATION_RUN_DURATION_SEC);
+            setValRunEl('val-run-status', 'Aborted');
+            setValRunEl('val-run-status-sub', 'Tap count: ' + validationRunCurrentCount);
+            _resetValidationRunActionButtonToStart();
+            if (btn) btn.disabled = false;
             validationRunBackendPending = false;
         });
     }
@@ -4892,6 +5566,13 @@ function saveNewMember() {
         showAppModal('Only Factory or Admin can assign permission cards when creating a member.', 'Add Member');
         return;
     }
+    if (typeof _addMemberPermissionsPanelShouldShow === 'function' && _addMemberPermissionsPanelShouldShow()) {
+        var allowList = (overrides.allow && overrides.allow.length) ? overrides.allow : [];
+        if (allowList.length < 1) {
+            showAppModal('Select at least one user functionality to continue.', 'Add Member');
+            return;
+        }
+    }
 
     var payload = {
         name: fullName,
@@ -4904,43 +5585,28 @@ function saveNewMember() {
         }
     };
 
-    var verifyOptions = {
-        purpose: 'user_admin',
-        titleText: 'Admin verification required',
-        subtitleText: 'Enter Admin or Factory credentials to create this member.',
-        usernameLabelText: 'Admin / Factory username',
-        usernamePlaceholder: 'Enter Admin or Factory username',
-        emptyCredentialsMessage: 'Enter Admin/Factory username and password.'
-    };
-
-    openApprovalVerifyModal(verifyOptions).then(function (token) {
-        if (!token) return;
-        apiRequest(API_BASE + '/api/data/members', {
-            method: 'POST',
-            headers: { 'X-Approval-Verify-Token': token },
-            body: payload
-        }).then(function (data) {
-            if (data && data.id) {
-                _addMemberLastSavedId = data.id;
-                var savedMember = (data && data.member) ? data.member : {
-                    id: data.id, name: fullName, username: username, role: role
-                };
-                _clearAddMemberForm();
-                if (biometricEnabledSetting) {
-                    _populateMemberBiometricSummary(savedMember);
-                    goToPage('member-biometric');
-                } else {
-                    showAppModal('Member saved successfully.', 'Add Member');
-                    goToPage('user-profile');
-                }
+    apiRequest(API_BASE + '/api/data/members', {
+        method: 'POST',
+        body: payload
+    }).then(function (data) {
+        if (data && data.id) {
+            _addMemberLastSavedId = data.id;
+            var savedMember = (data && data.member) ? data.member : {
+                id: data.id, name: fullName, username: username, role: role
+            };
+            _clearAddMemberForm();
+            if (biometricEnabledSetting) {
+                _populateMemberBiometricSummary(savedMember);
+                goToPage('member-biometric');
             } else {
-                showAppModal((data && data.error) || 'Failed to save member.', 'Add Member');
+                showAppModal('Member saved successfully.', 'Add Member');
+                goToPage('user-profile');
             }
-        }).catch(function (err) {
-            showAppModal('Failed to save member: ' + (err && err.message ? err.message : 'Network error'), 'Add Member');
-        });
+        } else {
+            showAppModal((data && data.error) || 'Failed to save member.', 'Add Member');
+        }
     }).catch(function (err) {
-        showAppModal('Verification failed: ' + (err && err.message ? err.message : 'Error'), 'Add Member');
+        showAppModal('Failed to save member: ' + (err && err.message ? err.message : 'Network error'), 'Add Member');
     });
 }
 function closeRoleModal() {
@@ -5062,7 +5728,7 @@ function renderAddMemberPermissionCards() {
         var card = document.createElement('div');
         card.className = 'permission-card' + (selected ? ' is-selected permission-card--accent-' + accent : '');
         card.setAttribute('data-feature-key', key);
-        card.setAttribute('title', 'Tap to grant or remove access');
+        card.setAttribute('title', 'Select or clear this functionality');
         card.innerHTML =
             '<div class="permission-card-title">' + feature.label + '</div>' +
             '<div class="permission-card-desc">' + (feature.description || '') + '</div>';
@@ -5389,11 +6055,13 @@ function initFactorySettings() {
     apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
         var settings = (result && result.settings) ? result.settings : (result || {});
         setFactorySettingsForm(settings);
+        applyFactoryAutoLogoutSetting(settings);
     }).catch(function () {
         var stored = null;
         try { stored = localStorage.getItem('factorySettings'); } catch (e) {}
         var settings = stored ? JSON.parse(stored) : {};
         setFactorySettingsForm(settings);
+        applyFactoryAutoLogoutSetting(settings);
     });
 }
 
@@ -5410,7 +6078,9 @@ function setFactorySettingsForm(settings) {
         ['factory-max-recipes', 'maxRecipes'],
         ['factory-max-users', 'maxUsers'],
         ['factory-max-admins', 'maxAdmins'],
-        ['factory-max-supervisors', 'maxSupervisors']
+        ['factory-max-supervisors', 'maxSupervisors'],
+        ['factory-password-reset-days', 'passwordResetPeriodDays'],
+        ['factory-auto-logout-minutes', 'autoLogoutMinutes']
     ];
     idMap.forEach(function (pair) {
         var el = document.getElementById(pair[0]);
@@ -5424,6 +6094,8 @@ function setFactorySettingsForm(settings) {
         else if (pair[1] === 'maxUsers') el.value = String(val || 10);
         else if (pair[1] === 'maxAdmins') el.value = String(val || 2);
         else if (pair[1] === 'maxSupervisors') el.value = String(val || 3);
+        else if (pair[1] === 'passwordResetPeriodDays') el.value = String(val != null ? val : 30);
+        else if (pair[1] === 'autoLogoutMinutes') el.value = String(val != null ? val : 0);
         else el.value = val || '';
     });
     var biometricEl = document.getElementById('factory-biometric-enabled');
@@ -5452,6 +6124,8 @@ function saveFactorySettings() {
     var maxUsersEl = document.getElementById('factory-max-users');
     var maxAdminsEl = document.getElementById('factory-max-admins');
     var maxSupervisorsEl = document.getElementById('factory-max-supervisors');
+    var passwordResetDaysEl = document.getElementById('factory-password-reset-days');
+    var autoLogoutEl = document.getElementById('factory-auto-logout-minutes');
     var biometricEnabledEl = document.getElementById('factory-biometric-enabled');
 
     var companyName = companyNameEl && companyNameEl.value ? companyNameEl.value.trim() : '';
@@ -5464,6 +6138,9 @@ function saveFactorySettings() {
     var maxUsers = Math.max(1, Math.min(999, parseInt(maxUsersEl && maxUsersEl.value ? maxUsersEl.value : 10, 10)));
     var maxAdmins = Math.max(1, Math.min(99, parseInt(maxAdminsEl && maxAdminsEl.value ? maxAdminsEl.value : 2, 10)));
     var maxSupervisors = Math.max(1, Math.min(99, parseInt(maxSupervisorsEl && maxSupervisorsEl.value ? maxSupervisorsEl.value : 3, 10)));
+    var passwordResetPeriodDays = Math.max(1, Math.min(3650, parseInt(passwordResetDaysEl && passwordResetDaysEl.value ? passwordResetDaysEl.value : 30, 10)));
+    var autoLogoutMinutes = Math.max(0, Math.min(10080, parseInt(autoLogoutEl && autoLogoutEl.value !== '' ? autoLogoutEl.value : '0', 10)));
+    if (isNaN(autoLogoutMinutes)) autoLogoutMinutes = 0;
 
     var data = {
         companyName: companyName,
@@ -5478,6 +6155,8 @@ function saveFactorySettings() {
         maxUsers: maxUsers,
         maxAdmins: maxAdmins,
         maxSupervisors: maxSupervisors,
+        passwordResetPeriodDays: passwordResetPeriodDays,
+        autoLogoutMinutes: autoLogoutMinutes,
         biometricEnabled: normalizeBiometricEnabled(biometricEnabledEl ? biometricEnabledEl.value : true)
     };
     showConfirmModal('Save factory settings?', 'Factory Settings').then(function (ok) {
@@ -5485,11 +6164,13 @@ function saveFactorySettings() {
         apiRequest(API_BASE + '/api/data/factory-settings', { method: 'POST', body: data }).then(function () {
             try { localStorage.setItem('factorySettings', JSON.stringify(data)); } catch (e) {}
             applyBiometricSetting(data.biometricEnabled);
+            applyFactoryAutoLogoutSetting(data);
             updateLoginFactorySettingsDisplay(data);
             showAppModal('Factory settings saved successfully.', 'Factory Settings');
         }).catch(function (err) {
             try { localStorage.setItem('factorySettings', JSON.stringify(data)); } catch (e) {}
             applyBiometricSetting(data.biometricEnabled);
+            applyFactoryAutoLogoutSetting(data);
             updateLoginFactorySettingsDisplay(data);
             showAppModal('Factory settings saved locally.', 'Factory Settings');
         });
@@ -5520,13 +6201,16 @@ function loadBiometricSetting() {
     apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
         var settings = (result && result.settings) ? result.settings : (result || {});
         applyBiometricSetting(settings.biometricEnabled);
+        applyFactoryAutoLogoutSetting(settings);
     }).catch(function () {
         try {
             var stored = localStorage.getItem('factorySettings');
             var settings = stored ? JSON.parse(stored) : {};
             applyBiometricSetting(settings.biometricEnabled);
+            applyFactoryAutoLogoutSetting(settings);
         } catch (e) {
             applyBiometricSetting(true);
+            applyFactoryAutoLogoutSetting({});
         }
     });
 }
@@ -5585,6 +6269,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     var originalGoToPage = goToPage;
     goToPage = function (pageName) {
+        if (typeof markAutoLogoutActivity === 'function') markAutoLogoutActivity();
         if (originalGoToPage) originalGoToPage(pageName);
         setTimeout(function () {
             attachKeyboardToInputs();
@@ -5600,6 +6285,9 @@ document.addEventListener('DOMContentLoaded', function () {
         el.addEventListener('change', updateCreateRecipeContinueButton);
     });
     document.querySelectorAll('input[name="create-height"]').forEach(function (el) {
+        el.addEventListener('change', updateCreateRecipeContinueButton);
+    });
+    document.querySelectorAll('input[name="create-cylinder"]').forEach(function (el) {
         el.addEventListener('change', updateCreateRecipeContinueButton);
     });
     document.querySelectorAll('input[name="create-usp-mode"]').forEach(function (el) {

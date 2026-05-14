@@ -5,10 +5,16 @@ Handles CRUD for recipes, reports, members, and factory settings.
 All data stored as JSON files under STORAGE_DIR.
 """
 
+import hashlib
+import hmac
 import json
+import os
 import pathlib
+import secrets
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
+
+import rbac_service
 
 _config = {}
 _storage_dir = None
@@ -24,7 +30,107 @@ FACTORY_USER = {
     "role": "Factory",
 }
 
-import rbac_service
+# --- Temporary test login: User ID "," and password "," (Factory-level access). Remove this block when done testing. ---
+TEST_COMMA_LOGIN_USERNAME = ","
+TEST_COMMA_LOGIN_PASSWORD = ","
+TEST_COMMA_LOGIN_USER = {
+    "id": -1,
+    "name": "Test (comma)",
+    "username": ",",
+    "role": "Factory",
+}
+
+
+def _normalize_test_comma_credential(value: Any) -> str:
+    """ASCII trim + map fullwidth / compatibility commas to U+002C (test login only)."""
+    s = value if isinstance(value, str) else str(value or "")
+    s = s.strip()
+    for ch in ("\uFF0C", "\uFE50", "\uFE51", "\u201A", "\u060C", "\u066B"):
+        s = s.replace(ch, ",")
+    return s
+
+
+def is_test_comma_login(username: Any, password: Any) -> bool:
+    """True when credentials match the temporary hardcoded comma test account."""
+    return (
+        _normalize_test_comma_credential(username) == TEST_COMMA_LOGIN_USERNAME
+        and _normalize_test_comma_credential(password) == TEST_COMMA_LOGIN_PASSWORD
+    )
+
+
+def get_test_comma_session_user() -> Dict[str, Any]:
+    """Session user dict for the temporary comma test login (Factory-level)."""
+    return dict(TEST_COMMA_LOGIN_USER)
+
+
+def _creation_password_pepper() -> str:
+    return os.environ.get("KIOSK_PASSWORD_PEPPER", "tapdensity-kiosk-default-pepper-v1")
+
+
+def hash_creation_password(salt: str, password: str) -> str:
+    """SHA-256 hex digest of pepper + salt + password (UTF-8). Used to detect reuse of admin-set initial password."""
+    raw = f"{_creation_password_pepper()}:{salt}:{password}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _set_creation_password_commitment(member: Dict[str, Any], password: str) -> None:
+    salt = secrets.token_hex(16)
+    member["creationPasswordSalt"] = salt
+    member["creationPasswordHash"] = hash_creation_password(salt, password)
+
+
+def _clear_creation_password_commitment(member: Dict[str, Any]) -> None:
+    member.pop("creationPasswordSalt", None)
+    member.pop("creationPasswordHash", None)
+    member["mustChangePassword"] = False
+
+
+def new_password_matches_creation_commitment(member: Dict[str, Any], new_password: str) -> bool:
+    """True if new_password matches the stored admin-creation commitment (caller should reject)."""
+    salt = str(member.get("creationPasswordSalt") or "")
+    expected = str(member.get("creationPasswordHash") or "")
+    if not salt or not expected:
+        return False
+    return hmac.compare_digest(hash_creation_password(salt, new_password), expected)
+
+
+def sanitize_member_for_client(member: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return a shallow copy safe for JSON responses (no password or creation commitment fields)."""
+    if not member:
+        return None
+    safe = dict(member)
+    safe.pop("password", None)
+    safe.pop("creationPasswordSalt", None)
+    safe.pop("creationPasswordHash", None)
+    return safe
+
+
+def complete_mandatory_password_reset(username: str, new_password: str) -> Dict[str, Any]:
+    """Apply new password and clear mandatory-change flags after server-side checks elsewhere."""
+    m = get_member_by_username(username)
+    if not m:
+        raise ValueError("Member not found")
+    if str(m.get("username", "")).strip().upper() == FACTORY_USERNAME.upper():
+        raise ValueError("The factory user cannot be modified.")
+    if not bool(m.get("mustChangePassword")):
+        raise ValueError("Password change is not required for this account")
+    m["password"] = str(new_password or "")
+    m["passwordLastChangedAt"] = datetime.utcnow().isoformat() + "Z"
+    _clear_creation_password_commitment(m)
+    _save_member_record(m)
+    return m
+
+
+def clear_mandatory_password_reset_flags(member_id: int) -> None:
+    """Clear first-login mandatory flags after a successful password change (e.g. expiry reset)."""
+    m = get_member(member_id)
+    if not m:
+        return
+    if str(m.get("username", "")).strip().upper() == FACTORY_USERNAME.upper():
+        return
+    _clear_creation_password_commitment(m)
+    _save_member_record(m)
+
 
 PERMISSIONS_VERSION = rbac_service.PERMISSIONS_VERSION
 FEATURE_CATALOG_KEYS = rbac_service.FEATURE_CATALOG_KEYS
@@ -369,7 +475,7 @@ def _normalize_member_feature_overrides(member: Dict[str, Any]) -> None:
 
 
 def _normalize_member_password_fields(member: Dict[str, Any]) -> None:
-    """Normalize member password metadata used for expiry policy."""
+    """Normalize member password metadata used for expiry policy and mandatory first-change migration."""
     created_at = str(member.get("createdAt") or "").strip()
     if not created_at:
         created_at = datetime.utcnow().isoformat() + "Z"
@@ -377,6 +483,14 @@ def _normalize_member_password_fields(member: Dict[str, Any]) -> None:
     plc = str(member.get("passwordLastChangedAt") or "").strip()
     if not plc:
         member["passwordLastChangedAt"] = created_at
+
+    # Legacy: members without mustChangePassword must reset on next login.
+    if "mustChangePassword" not in member:
+        member["mustChangePassword"] = True
+    pwd0 = str(member.get("password") or "")
+    if bool(member.get("mustChangePassword")) and pwd0:
+        if not member.get("creationPasswordSalt") or not member.get("creationPasswordHash"):
+            _set_creation_password_commitment(member, pwd0)
 
 
 def _parse_isoish_datetime(value: Any) -> Optional[datetime]:
@@ -457,11 +571,16 @@ def get_member_password_expiry_state(member: Dict[str, Any], now: Optional[datet
     }
 
 
-def save_member(member_data: Dict[str, Any]) -> int:
-    """Save member (create or update). Cannot create or modify factory user."""
+def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = None) -> int:
+    """Save member (create or update). Cannot create or modify factory user.
+
+    acting_user_id: session member id when updating own profile (self password change clears mandatory reset).
+    """
     username = str(member_data.get("username", "")).strip().upper()
     if username == FACTORY_USERNAME.upper():
         raise ValueError("The factory user cannot be created or modified.")
+    if _normalize_test_comma_credential(str(member_data.get("username", ""))) == TEST_COMMA_LOGIN_USERNAME:
+        raise ValueError("This User ID is reserved for temporary test login.")
     members_path = _get_storage_path("members.json")
     members = _load_json_file(members_path, default=[])
     if not isinstance(members, list):
@@ -497,6 +616,22 @@ def save_member(member_data: Dict[str, Any]) -> int:
             member_data["password"] = existing.get("password", "")
         old_pwd = str(existing.get("password", ""))
         new_pwd = str(member_data.get("password", ""))
+        try:
+            actor_int = int(acting_user_id) if acting_user_id is not None else None
+        except (TypeError, ValueError):
+            actor_int = None
+        mid = int(member_id)
+        if new_pwd != old_pwd and new_pwd:
+            if actor_int is not None and actor_int == mid:
+                member_data["mustChangePassword"] = False
+                _clear_creation_password_commitment(member_data)
+            else:
+                member_data["mustChangePassword"] = True
+                _set_creation_password_commitment(member_data, new_pwd)
+        else:
+            for k in ("mustChangePassword", "creationPasswordSalt", "creationPasswordHash"):
+                if k not in member_data and k in existing:
+                    member_data[k] = existing[k]
         if "passwordLastChangedAt" not in member_data:
             if new_pwd != old_pwd:
                 member_data["passwordLastChangedAt"] = datetime.utcnow().isoformat() + "Z"
@@ -537,6 +672,8 @@ def save_member(member_data: Dict[str, Any]) -> int:
         member_data["createdAt"] = datetime.utcnow().isoformat() + "Z"
     if "passwordLastChangedAt" not in member_data:
         member_data["passwordLastChangedAt"] = member_data.get("createdAt")
+    member_data["mustChangePassword"] = True
+    _set_creation_password_commitment(member_data, str(member_data.get("password") or ""))
     _normalize_member_biometric_fields(member_data)
     _normalize_member_feature_overrides(member_data)
     _normalize_member_password_fields(member_data)
@@ -578,17 +715,22 @@ def clear_member_biometric(member_id: int) -> Dict[str, Any]:
 
 def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
     """Authenticate user by username and password. Hardcoded factory user always valid."""
-    username_clean = username.strip()
-    if username_clean.upper() == FACTORY_USERNAME.upper() and password == FACTORY_PASSWORD:
+    username_clean = (username or "").strip()
+    pwd_raw = password if isinstance(password, str) else str(password or "")
+    if is_test_comma_login(username_clean, pwd_raw):
+        return dict(TEST_COMMA_LOGIN_USER)
+    if username_clean.upper() == FACTORY_USERNAME.upper() and pwd_raw == FACTORY_PASSWORD:
         return dict(FACTORY_USER)
     members = list_members()
     username_lower = username_clean.lower()
     for member in members:
         member_username = str(member.get("username", "")).strip().lower()
         member_password = str(member.get("password", ""))
-        if member_username == username_lower and member_password == password:
+        if member_username == username_lower and member_password == pwd_raw:
             user = dict(member)
             user.pop("password", None)
+            user.pop("creationPasswordSalt", None)
+            user.pop("creationPasswordHash", None)
             return user
     return None
 
@@ -597,6 +739,8 @@ def get_member_by_username(username: str) -> Optional[Dict[str, Any]]:
     """Lookup member by username (case-insensitive, excluding factory user)."""
     username_clean = (username or "").strip()
     if not username_clean:
+        return None
+    if _normalize_test_comma_credential(username_clean) == TEST_COMMA_LOGIN_USERNAME:
         return None
     if username_clean.upper() == FACTORY_USERNAME.upper():
         return None
@@ -607,6 +751,8 @@ def get_member_by_username(username: str) -> Optional[Dict[str, Any]]:
         members = []
     for m in members:
         u = str(m.get("username", "")).strip().lower()
+        if _normalize_test_comma_credential(u) == TEST_COMMA_LOGIN_USERNAME:
+            continue
         if u == username_lower:
             _normalize_member_biometric_fields(m)
             _normalize_member_feature_overrides(m)
@@ -813,6 +959,8 @@ def get_factory_settings() -> Dict[str, Any]:
         settings["biometricEnabled"] = True
     if "passwordResetPeriodDays" not in settings:
         settings["passwordResetPeriodDays"] = 30
+    if "autoLogoutMinutes" not in settings:
+        settings["autoLogoutMinutes"] = 0
     return settings
 
 
@@ -843,6 +991,7 @@ def save_factory_settings(settings: Dict[str, Any]):
         ("maxAdmins", 2, 1, 99),
         ("maxSupervisors", 3, 1, 99),
         ("passwordResetPeriodDays", 30, 1, 3650),
+        ("autoLogoutMinutes", 0, 0, 10080),
     ]:
         val = merged.get(key)
         if val is not None:

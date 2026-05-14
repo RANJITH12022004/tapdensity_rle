@@ -1,16 +1,0 @@
-                          TAP DENSITY REPORT                          
-
-Product: hh
-Batch: uuu
-Date: 2026-04-20T09:14:44.616Z
-Company: ttyio
-
-productName: hh
-batchNumber: uuu
-status: completed
-completedSteps: 3
-stepCount: 3
-initialWeightG: 11
-createdAt: 2026-04-20T09:14:44.616Z
-completedAt: 2026-04-20T09:14:44.616Z
-

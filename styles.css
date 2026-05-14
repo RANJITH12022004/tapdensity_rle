@@ -1611,7 +1611,8 @@ body {
 }
 
 .create-recipe-section .validation-type-grid label:has(input[name="quick-height"][value="14"]) h3,
-.create-recipe-section .validation-type-grid label:has(input[name="quick-height"][value="14"]) p {
+.create-recipe-section .validation-type-grid label:has(input[name="quick-height"][value="14"]) .cylinder-volume-line,
+.create-recipe-section .validation-type-grid label:has(input[name="quick-height"][value="14"]) .step1-card-sublabel {
     color: #ffffff;
 }
 
@@ -3484,7 +3485,9 @@ body.keyboard-open {
 #page-distance-zero-calibration.active,
 #page-create-recipe-step1.active,
 #page-create-recipe-step2.active,
-#page-create-recipe-step3.active {
+#page-create-recipe-step3.active,
+#page-quick-test-steps.active,
+#page-approval-verify.active {
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -3600,44 +3603,95 @@ body.keyboard-open {
     gap: var(--spacing-lg);
 }
 
+.create-recipe-grid--single {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 16px;
+}
+
+.create-recipe-grid--pair {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+
 .create-recipe-card .create-recipe-value {
     font-size: 1.5rem;
     font-weight: 700;
     color: inherit;
 }
 
+/* Create Recipe step 1 + Quick Test: shared card size and typography (cylinder-style numerals) */
+.create-recipe-step1-page {
+    --step1-unified-font: clamp(1.35rem, 3.6vw, 2.05rem);
+    --step1-unified-min-h: 122px;
+    --step1-unified-pad: 16px 14px;
+}
+
+#page-quick-test .create-recipe-step1-page .create-recipe-card,
+#page-quick-test .create-recipe-step1-page .quick-step-select-card,
+#page-create-recipe-step1 .create-recipe-card {
+    min-height: var(--step1-unified-min-h);
+    min-width: 0;
+    padding: var(--step1-unified-pad);
+    box-sizing: border-box;
+    gap: 6px;
+}
+
+#page-quick-test .create-recipe-step1-page .create-recipe-card h3.cylinder-volume-line,
+#page-quick-test .create-recipe-step1-page .quick-step-select-card h3.cylinder-volume-line,
+#page-create-recipe-step1 .create-recipe-card h3.cylinder-volume-line {
+    display: flex;
+    flex-direction: row;
+    align-items: baseline;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 0.14em;
+    font-size: var(--step1-unified-font);
+    font-weight: 700;
+    line-height: 1.12;
+    margin: 0;
+    letter-spacing: -0.02em;
+}
+
+#page-quick-test .create-recipe-step1-page .create-recipe-card .cylinder-num,
+#page-quick-test .create-recipe-step1-page .create-recipe-card .cylinder-unit,
+#page-quick-test .create-recipe-step1-page .quick-step-select-card .cylinder-num,
+#page-create-recipe-step1 .create-recipe-card .cylinder-num,
+#page-create-recipe-step1 .create-recipe-card .cylinder-unit {
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+}
+
+#page-quick-test .create-recipe-step1-page .step1-card-sublabel,
+#page-create-recipe-step1 .create-recipe-card .step1-card-sublabel {
+    font-size: var(--step1-unified-font);
+    font-weight: 700;
+    line-height: 1.2;
+    margin: 0;
+    text-align: center;
+    max-width: 100%;
+    opacity: 0.96;
+}
+
+@media (max-width: 640px) {
+    .create-recipe-step1-page {
+        --step1-unified-font: clamp(1.45rem, 4.5vw, 2.15rem);
+    }
+}
+
 /* Create Recipe step 1 cards: balanced size, no scroll (shared with Quick Test) */
 .create-recipe-step1-page .create-recipe-card {
     color: white;
     border: none;
-    min-height: 96px;
-    padding: 16px 18px;
+    min-height: var(--step1-unified-min-h, 122px);
+    padding: var(--step1-unified-pad, 16px 14px);
     border-radius: var(--radius-md);
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-}
-
-.create-recipe-step1-page .create-recipe-card[data-procedure] {
-    min-height: 112px;
-    padding: 18px 16px;
-}
-
-.create-recipe-step1-page .create-recipe-card h3 {
-    font-size: 5.2rem;
-    font-weight: 700;
-    margin: 0 0 8px 0;
-    line-height: 1.2;
-}
-
-.create-recipe-step1-page .create-recipe-card p {
-    font-size: 13px;
-    line-height: 1.35;
-    margin: 0;
-    opacity: 0.96;
-    text-align: center;
-    max-width: 12rem;
 }
 
 /* ----- Quick Test Page ----- */
@@ -3685,7 +3739,6 @@ body.keyboard-open {
 #page-quick-test .quick-step-select-card {
     width: 100%;
     min-width: 0;
-    min-height: 120px;
     border: none;
     background: linear-gradient(135deg, #0ea5e9, #0284c7);
     color: #fff;
@@ -3708,22 +3761,42 @@ body.keyboard-open {
 }
 
 /* Quick Test page – cylinder card colours */
-#page-quick-test .create-recipe-card[data-value="50"] {
+#page-quick-test .create-recipe-card[data-cylinder][data-value="50"] {
     background: linear-gradient(135deg, #14b8a6, #0d9488);
 }
-#page-quick-test .create-recipe-card[data-value="50"]:hover {
+#page-quick-test .create-recipe-card[data-cylinder][data-value="50"]:hover {
     background: linear-gradient(135deg, #2dd4bf, #14b8a6);
 }
-#page-quick-test .create-recipe-card[data-value="100"] {
+#page-quick-test .create-recipe-card[data-cylinder][data-value="100"] {
     background: linear-gradient(135deg, #f97316, #ea580c);
 }
-#page-quick-test .create-recipe-card[data-value="100"]:hover {
+#page-quick-test .create-recipe-card[data-cylinder][data-value="100"]:hover {
     background: linear-gradient(135deg, #fb923c, #f97316);
 }
-#page-quick-test .create-recipe-card[data-value="250"] {
+#page-quick-test .create-recipe-card[data-cylinder][data-value="250"] {
     background: linear-gradient(135deg, #a855f7, #7c3aed);
 }
-#page-quick-test .create-recipe-card[data-value="250"]:hover {
+#page-quick-test .create-recipe-card[data-cylinder][data-value="250"]:hover {
+    background: linear-gradient(135deg, #c084fc, #a855f7);
+}
+
+/* Create Recipe step 1 – cylinder cards (match Quick Test) */
+#page-create-recipe-step1 .create-recipe-card[data-cylinder][data-value="50"] {
+    background: linear-gradient(135deg, #14b8a6, #0d9488);
+}
+#page-create-recipe-step1 .create-recipe-card[data-cylinder][data-value="50"]:hover {
+    background: linear-gradient(135deg, #2dd4bf, #14b8a6);
+}
+#page-create-recipe-step1 .create-recipe-card[data-cylinder][data-value="100"] {
+    background: linear-gradient(135deg, #f97316, #ea580c);
+}
+#page-create-recipe-step1 .create-recipe-card[data-cylinder][data-value="100"]:hover {
+    background: linear-gradient(135deg, #fb923c, #f97316);
+}
+#page-create-recipe-step1 .create-recipe-card[data-cylinder][data-value="250"] {
+    background: linear-gradient(135deg, #a855f7, #7c3aed);
+}
+#page-create-recipe-step1 .create-recipe-card[data-cylinder][data-value="250"]:hover {
     background: linear-gradient(135deg, #c084fc, #a855f7);
 }
 
@@ -4028,16 +4101,24 @@ input[type="number"] {
     background: linear-gradient(135deg, #fbbf24, #f59e0b);
 }
 
-.procedure-cards-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 18px;
+/* Procedure picker: one row × three cards (USP 1 | USP 2 | Custom); stack on narrow viewports */
+.validation-type-grid.procedure-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px 16px;
 }
 
 @media (max-width: 640px) {
-    .procedure-cards-grid {
+    .validation-type-grid.procedure-cards-grid {
         grid-template-columns: 1fr;
-        gap: 14px;
+        grid-auto-rows: auto;
+        gap: 12px;
     }
+}
+
+.create-recipe-step1-page .procedure-cards-grid .validation-type-settings-card {
+    min-width: 0;
+    max-width: 100%;
 }
 
 /* Keep procedure cards stable to avoid overlap when selected */

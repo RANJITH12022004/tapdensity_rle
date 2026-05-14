@@ -25,7 +25,7 @@ PERMISSION_CARD_KEYS = [
 ]
 
 PERM_CARD_EXPAND: Dict[str, List[str]] = {
-    "perm_test_access": ["quick-test", "recipe-list", "recipe-test"],
+    "perm_test_access": ["quick-test", "recipe-list", "recipe-test", "recipe-edit"],
     "perm_test_report_approve": ["test-report-approve"],
     "perm_recipe_manage": ["recipe-list", "recipe-edit", "settings"],
     "perm_recipe_approve": ["recipe-approve"],

