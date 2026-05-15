@@ -4827,7 +4827,7 @@ function buildTestReportDerived(td, recipe, reportId) {
     if (dh == null && td.dropHeight != null) dh = td.dropHeight;
     if (dh != null && dh !== '') {
         var dhn = parseFloat(dh);
-        dropH = !isNaN(dhn) ? (Math.round(dhn) + ' mm +/- 0.2 mm') : String(dh);
+        dropH = !isNaN(dhn) ? (Math.round(dhn) + ' mm +/- ' + (dhn > 5 ? '2' : '0.2') + ' mm') : String(dh);
     }
     var completedN = getReportStepRowCount(td);
     var stepDropCounts = [];

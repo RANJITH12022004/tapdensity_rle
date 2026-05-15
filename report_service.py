@@ -335,7 +335,8 @@ def _drop_height_display(recipe: Dict[str, Any], td: Dict[str, Any]) -> str:
         return "--"
     try:
         mm = float(dh)
-        return f"{_format_derived_number(mm, 0)} mm +/- 0.2 mm"
+        tol = "2" if mm > 5 else "0.2"
+        return f"{_format_derived_number(mm, 0)} mm +/- {tol} mm"
     except (TypeError, ValueError):
         return str(dh)
 
