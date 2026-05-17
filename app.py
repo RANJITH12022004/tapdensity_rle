@@ -248,7 +248,21 @@ def _abort_pending_reports_after_power_loss(session_username):
         report["reportApprovalStatus"] = "aborted"
         if not report.get("completedAt"):
             report["completedAt"] = _utc_now_iso()
+        rid = report.get("id")
         data_service.save_report(report)
+        if rid is not None:
+            ctx = _format_report_audit_details(int(rid), report)
+            try:
+                pdf_ok = _generate_report_pdf_file(int(rid), write_audit=False)
+            except Exception:
+                pdf_ok = False
+                app.logger.exception("Aborted-report PDF after power loss failed for id %s", rid)
+            pl_detail = "{} | unclean shutdown".format(ctx)
+            if pdf_ok:
+                pl_detail = "{} | aborted PDF saved".format(pl_detail)
+            _audit(None, None, "Report aborted (power loss)", pl_detail)
+            if pdf_ok:
+                _audit_report_pdf_generated(int(rid), report)
         aborted += 1
     return aborted
 
@@ -265,9 +279,9 @@ def _startup_session_power_audit():
                 if audit_service.is_hidden_factory_actor(un, role):
                     pi_details = "Privileged factory session was active when power was interrupted or the system restarted."
                 elif un:
-                    pi_details = "User {} was logged in when power was interrupted or the system restarted.".format(un)
+                    pi_details = "Unclean shutdown while {} was logged in".format(un)
                 else:
-                    pi_details = "Session was active when power was interrupted or the system restarted."
+                    pi_details = "Unclean shutdown during active session"
                 audit_service.log_structured_event(
                     user="--",
                     role="--",
@@ -653,6 +667,26 @@ def _consume_approval_verify_token(expected_purpose):
     return payload, None
 
 
+def _audit_report_pdf_generated(report_id, report=None) -> None:
+    """Audit row when a report PDF file is written (approved or aborted only)."""
+    if report is None:
+        report = data_service.get_report(report_id)
+    rid = report_id if report_id is not None else (report or {}).get("id")
+    st = str((report or {}).get("reportApprovalStatus") or "").strip().lower()
+    if st == "approved":
+        pf = str((report or {}).get("approvalPassFail") or "").strip().upper()
+        detail = "Report id {}".format(rid)
+        if pf:
+            detail = "{} | {} | approved PDF".format(detail, pf)
+        else:
+            detail = "{} | approved PDF".format(detail)
+    elif st == "aborted":
+        detail = "Report id {} | aborted PDF".format(rid)
+    else:
+        return
+    _audit(None, None, "Report PDF generated", detail)
+
+
 def _format_report_audit_details(report_id, enriched):
     """Build audit trail details: saved report name, recipe, batch."""
     if not enriched:
@@ -879,6 +913,11 @@ def get_reports():
 def _audit_report_created(report_id, enriched):
     """Write audit row for a newly saved report/test/validation."""
     details = _format_report_audit_details(report_id, enriched)
+    approval_st = str(enriched.get("reportApprovalStatus") or "").strip().lower()
+    if approval_st == "pending":
+        details = "{} | awaiting approval (PDF after approval)".format(details)
+    elif approval_st == "aborted":
+        details = "{} | aborted".format(details)
     rtype = (enriched.get("type") or "").strip().lower()
     if rtype == "test":
         td = enriched.get("testData") or {}
@@ -918,7 +957,18 @@ def create_report():
             print_service.save_report_text_files(enriched, report_id, REPORTS_DIR)
         except Exception:
             pass
+        approval_st = str(enriched.get("reportApprovalStatus") or "").strip().lower()
+        pdf_ok = False
+        if approval_st == "pending":
+            _remove_report_pdf_file(report_id)
+        elif approval_st == "aborted":
+            try:
+                pdf_ok = _generate_report_pdf_file(report_id, write_audit=False)
+            except Exception:
+                app.logger.exception("Aborted-report PDF on create failed for id %s", report_id)
         _audit_report_created(report_id, enriched)
+        if approval_st == "aborted" and pdf_ok:
+            _audit_report_pdf_generated(report_id, enriched)
         return jsonify({"id": report_id, "report": enriched}), 201
     except Exception as e:
         app.logger.exception("Error creating report")
@@ -989,6 +1039,13 @@ def approve_report(report_id):
         report["approvedByUsername"] = verified_username
         report["approvedAt"] = _utc_now_iso()
         data_service.save_report(report)
+        pdf_ok = False
+        try:
+            pdf_ok = _generate_report_pdf_file(report_id, write_audit=False)
+        except Exception:
+            app.logger.exception("Approved-report PDF generation failed for id %s", report_id)
+        if pdf_ok:
+            _audit_report_pdf_generated(report_id, report)
         ctx = _format_report_audit_details(report_id, report)
         appr_detail = "{} | {} | verified by {}".format(ctx, pf, verified_name)
         v_audit_user = verified.get("username") or verified_username or verified_name
@@ -1035,8 +1092,18 @@ def abort_report(report_id):
         if not report.get("completedAt"):
             report["completedAt"] = _utc_now_iso()
         data_service.save_report(report)
+        pdf_ok = False
+        try:
+            pdf_ok = _generate_report_pdf_file(report_id, write_audit=False)
+        except Exception:
+            app.logger.exception("Aborted-report PDF generation failed for id %s", report_id)
+        if pdf_ok:
+            _audit_report_pdf_generated(report_id, report)
         ctx = _format_report_audit_details(report_id, report)
-        _audit(session_un or None, role or None, "Report aborted", ctx)
+        abort_detail = ctx
+        if pdf_ok:
+            abort_detail = "{} | aborted PDF saved".format(ctx)
+        _audit(session_un or None, role or None, "Report aborted", abort_detail)
         return jsonify({"ok": True, "report": report}), 200
     except Exception as e:
         app.logger.exception("Error aborting report")
@@ -1104,14 +1171,16 @@ def create_member():
             "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
             "role": (cur.get("role") or "").strip() or "--",
         }
+        uname = created.get("username") or created.get("name") or ""
+        urole = created.get("role") or ""
         _audit_event(
-            action="User create",
+            action="Added new user",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
-            entity_name=created.get("username") or created.get("name") or "",
-            details="Member created",
-            target_user=created.get("username") or "",
+            entity_name=uname,
+            details="Added new user: {} ({})".format(uname, urole or "—"),
+            target_user=uname,
             after=data_service.sanitize_member_for_client(created) or created,
             signature=sig,
         )
@@ -1148,6 +1217,7 @@ def update_member(member_id):
         member_data["id"] = member_id
         cur = data_service.get_current_user() or {}
         acting_id = cur.get("id")
+        password_changed = "password" in member_data and member_data.get("password") not in (None, "")
         data_service.save_member(member_data, acting_user_id=acting_id)
         updated = data_service.get_member(member_id) or dict(member_data)
         sig = {
@@ -1155,14 +1225,26 @@ def update_member(member_id):
             "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
             "role": (cur.get("role") or "").strip() or "--",
         }
+        uname = updated.get("username") or updated.get("name") or ""
+        if password_changed:
+            _audit_event(
+                action="Password changed",
+                outcome="success",
+                entity_type="member",
+                entity_id=member_id,
+                entity_name=uname,
+                details="Password changed for user: {}".format(uname),
+                target_user=uname,
+                signature=sig,
+            )
         _audit_event(
             action="User update",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
-            entity_name=updated.get("username") or updated.get("name") or "",
+            entity_name=uname,
             details="Member updated",
-            target_user=updated.get("username") or "",
+            target_user=uname,
             before=data_service.sanitize_member_for_client(before_member) if before_member else None,
             after=data_service.sanitize_member_for_client(updated) or updated,
             signature=sig,
@@ -1438,14 +1520,6 @@ def login():
                     after={"username": user.get("username"), "role": user.get("role")},
                 )
                 return jsonify({"success": True, "user": data_service.sanitize_member_for_client(user) or user}), 200
-            _audit_event(
-                action="Login",
-                outcome="failed",
-                entity_type="session",
-                entity_name="password",
-                details="Invalid username or password",
-                target_user=username,
-            )
             return jsonify({"error": "Invalid username or password"}), 401
 
         # Normal member: check status first
@@ -1528,12 +1602,10 @@ def login():
                     "error": "Account locked. Contact admin.",
                     "remainingAttempts": 0
                 }), 403
-            _audit_event(action="Login", outcome="failed", entity_type="session", entity_name="password", details="Invalid username or password", target_user=username, extra={"remainingAttempts": remaining})
             return jsonify({
                 "error": "Invalid username or password.",
                 "remainingAttempts": remaining
             }), 401
-        _audit_event(action="Login", outcome="failed", entity_type="session", entity_name="password", details="Invalid username or password", target_user=username)
         return jsonify({"error": "Invalid username or password"}), 401
     except Exception as e:
         app.logger.exception("Error during login")
@@ -1715,6 +1787,8 @@ def login_biometric():
 @app.route("/api/data/auth/logout", methods=["POST"])
 def logout():
     try:
+        payload = request.get_json(force=True, silent=True) or {}
+        reason = str(payload.get("reason") or "user").strip().lower()
         user = data_service.get_current_user()
         if user:
             un = (user.get("username") or user.get("name") or "").strip()
@@ -1735,14 +1809,35 @@ def logout():
                     date_time=audit_time.get("date_time"),
                 )
             else:
-                _audit_event(
-                    action="Logout",
-                    outcome="success",
-                    entity_type="session",
-                    entity_name="logout",
-                    details="User logged out: {}".format(user.get("username") or user.get("name") or ""),
-                    target_user=user.get("username") or user.get("name") or "",
-                )
+                if reason == "inactivity":
+                    fs = data_service.get_factory_settings() or {}
+                    mins = fs.get("autoLogoutMinutes")
+                    try:
+                        mins = int(mins) if mins is not None else 0
+                    except (TypeError, ValueError):
+                        mins = 0
+                    detail = "User logged out due to inactivity timeout"
+                    if mins > 0:
+                        detail += " ({} min limit)".format(mins)
+                    detail += ": {}".format(un)
+                    _audit_event(
+                        action="Logout (inactivity timeout)",
+                        outcome="success",
+                        entity_type="session",
+                        entity_name="logout",
+                        details=detail,
+                        target_user=un,
+                        extra={"autoLogoutMinutes": mins} if mins > 0 else None,
+                    )
+                else:
+                    _audit_event(
+                        action="Logout",
+                        outcome="success",
+                        entity_type="session",
+                        entity_name="logout",
+                        details="User logged out: {}".format(un),
+                        target_user=un,
+                    )
         data_service.touch_app_clean_stop_flag()
         data_service.delete_session_power_audit_pending()
         data_service.clear_current_user()
@@ -1984,7 +2079,7 @@ def get_audit_log():
             except (TypeError, ValueError):
                 pass
         entries = audit_service.list_entries(filters)
-        return jsonify({"entries": entries}), 200
+        return jsonify({"entries": _prepare_audit_entries_for_display(entries)}), 200
     except Exception as e:
         app.logger.exception("Error listing audit log")
         return jsonify({"error": str(e)}), 500
@@ -1994,12 +2089,43 @@ def get_audit_log():
 def create_client_audit_event():
     """Allow UI to emit lifecycle audit events for run navigation/actions."""
     try:
+        cur = data_service.get_current_user()
+        if not cur or not (cur.get("username") or cur.get("name")):
+            return jsonify({"ok": False, "error": "Authentication required"}), 401
         payload = request.get_json(force=True, silent=True) or {}
         action = str(payload.get("action") or "").strip()
         details = str(payload.get("details") or "").strip()
         if not action:
             return jsonify({"ok": False, "error": "action is required"}), 400
-        _audit(None, None, action, details)
+        actor = _audit_actor()
+        outcome = str(payload.get("outcome") or "success").strip() or "success"
+        event_type = str(payload.get("eventType") or payload.get("event_type") or "lifecycle").strip() or "lifecycle"
+        entity_type = str(payload.get("entityType") or payload.get("entity_type") or "").strip()
+        entity_name = str(payload.get("entityName") or payload.get("entity_name") or "").strip()
+        entity_id = payload.get("entityId", payload.get("entity_id"))
+        reason = str(payload.get("reason") or "").strip()
+        extra = payload.get("extra")
+        if extra is None and payload.get("extraJson"):
+            extra = payload.get("extraJson")
+        audit_time = _audit_time_fields()
+        audit_service.log_structured_event(
+            user=actor.get("user"),
+            role=actor.get("role"),
+            action=action,
+            details=details,
+            event_type=event_type,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            entity_name=entity_name,
+            outcome=outcome,
+            reason=reason,
+            session_user=actor.get("user"),
+            session_role=actor.get("role"),
+            request_source="POST /api/data/audit-log/event",
+            extra=extra,
+            timestamp_ms=audit_time.get("timestamp_ms"),
+            date_time=audit_time.get("date_time"),
+        )
         return jsonify({"ok": True}), 200
     except Exception as e:
         app.logger.exception("Error creating client audit event")
@@ -2018,6 +2144,133 @@ def _html_escape(value):
          .replace('"', "&quot;")
          .replace("'", "&#39;")
     )
+
+
+def _format_wall_datetime_for_audit(dt_value) -> str:
+    """Human-readable date/time for audit details (dd/mm/yyyy HH:MM:SS)."""
+    if dt_value is None:
+        return "--"
+    s = str(dt_value).strip()
+    if not s:
+        return "--"
+    try:
+        clean = s.replace("Z", "").strip()
+        if "+" in clean:
+            clean = clean.split("+", 1)[0].strip()
+        if clean.count("-") > 2:
+            clean = clean.rsplit("-", 1)[0].strip()
+        dt_obj = datetime.fromisoformat(clean)
+        if getattr(dt_obj, "tzinfo", None) is not None:
+            dt_obj = dt_obj.replace(tzinfo=None)
+        return dt_obj.strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        return s
+
+
+def _humanize_audit_details(action: str, details: str) -> str:
+    """Normalize verbose/internal audit detail text for UI and PDF export."""
+    action = str(action or "").strip()
+    details = str(details or "").strip()
+    if not details:
+        return details
+    if action == "Power interruption":
+        import re
+        if "privileged factory session" in details.lower():
+            return "Unclean shutdown during factory session"
+        m = re.search(r"User\s+([^\s]+)\s+was logged in", details, re.I)
+        if m:
+            return "Unclean shutdown while {} was logged in".format(m.group(1))
+        m2 = re.search(r"Unclean shutdown while\s+([^\s]+)", details, re.I)
+        if m2:
+            return "Unclean shutdown while {} was logged in".format(m2.group(1))
+        if "kiosk-bridge" in details.lower() or "clean shutdown" in details.lower():
+            return "Unclean shutdown during active session"
+        return details
+    if action == "Reports exported":
+        import re
+        if details.lower().startswith("exported "):
+            return details
+        m = re.search(r"\bok=(\d+)", details)
+        if m:
+            n = int(m.group(1))
+            return "Exported {} report{} to USB".format(n, "" if n == 1 else "s")
+        return "Exported report(s) to USB"
+    if action in ("Print thermal", "Print A4"):
+        details = (
+            details.replace(" | full data", "")
+            .replace("| full data", "")
+            .replace(" | inline", "")
+            .replace("| inline", "")
+            .strip()
+        )
+        import re
+        m = re.search(r"report\s+id\s+(\d+)", details, re.I)
+        if m:
+            return "Report id {}".format(m.group(1))
+        return details
+    if action == "Report PDF generated":
+        import re
+        m = re.search(r"report\s+id\s+(\d+)", details, re.I)
+        if not m:
+            m = re.search(r"report\s+(\d+)", details, re.I)
+        if m:
+            rid = m.group(1)
+            if "aborted PDF" in details:
+                return "Report id {} | aborted PDF".format(rid)
+            pf = re.search(r"\|\s*(PASS|FAIL)\s*\|", details, re.I)
+            if pf and "approved PDF" in details:
+                return "Report id {} | {} | approved PDF".format(rid, pf.group(1))
+            if "approved PDF" in details:
+                return "Report id {} | approved PDF".format(rid)
+            return "Report id {}".format(rid)
+        return "Report PDF saved"
+    if action in ("Report aborted", "Report aborted (power loss)", "Report approved", "Test performed", "Quick test performed", "Validation performed"):
+        import re
+        details = re.sub(
+            r"\s*\|\s*awaiting approval \(PDF after approval\)",
+            " | awaiting approval",
+            details,
+            flags=re.I,
+        )
+        return details
+    if action == "System date change":
+        if details.lower().startswith("changed from"):
+            return details
+        import re
+        if re.match(r"^\d{4}-\d{2}-\d{2}T", details):
+            return "Set to {}".format(_format_wall_datetime_for_audit(details))
+        return _format_wall_datetime_for_audit(details)
+    if "/opt/kiosk/" in details or "/media/" in details:
+        import re
+        details = re.sub(
+            r"report\s+(\d+)\s*->\s*\S+",
+            r"Report id \1",
+            details,
+            flags=re.I,
+        )
+        details = re.sub(r"\s*\|\s*dir\s+\S+", "", details, flags=re.I)
+    return details
+
+
+def _audit_entry_should_omit(entry: dict) -> bool:
+    """Drop noisy or sensitive rows from operator-facing audit views."""
+    action = str(entry.get("action") or "").strip()
+    outcome = str(entry.get("outcome") or "").strip().lower()
+    details = str(entry.get("details") or "").strip().lower()
+    if action == "Login" and "invalid username" in details:
+        return True
+    return False
+
+
+def _prepare_audit_entries_for_display(entries):
+    out = []
+    for entry in entries or []:
+        if _audit_entry_should_omit(entry):
+            continue
+        row = dict(entry)
+        row["details"] = _humanize_audit_details(row.get("action"), row.get("details"))
+        out.append(row)
+    return out
 
 
 def _build_audit_trail_html(entries, filters, factory):
@@ -2232,7 +2485,7 @@ def export_audit_trails():
             return jsonify({"success": False, "error": err, "devices": devices}), 400
         export_dir.mkdir(parents=True, exist_ok=True)
 
-        entries = audit_service.list_entries(filters)
+        entries = _prepare_audit_entries_for_display(audit_service.list_entries(filters))
         try:
             factory = data_service.get_factory_settings() or {}
         except Exception:
@@ -2329,6 +2582,46 @@ def _report_pdf_path(report_id):
     return REPORTS_DIR / "report_{}.pdf".format(int(report_id))
 
 
+def _report_pdf_status_allowed(report: dict) -> bool:
+    """PDF files are written only for approved or aborted test/validation reports."""
+    if not report or not _report_requires_approval(report):
+        return True
+    st = str(report.get("reportApprovalStatus") or "").strip().lower()
+    return st in ("approved", "aborted")
+
+
+def _remove_report_pdf_file(report_id: int) -> None:
+    try:
+        path = _report_pdf_path(report_id)
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _generate_report_pdf_file(report_id: int, html: str = None, write_audit: bool = True) -> bool:
+    """Render report PDF from client HTML or server-built HTML. Overwrites any existing file."""
+    report = data_service.get_report(report_id)
+    if not report:
+        return False
+    if not _report_pdf_status_allowed(report):
+        _remove_report_pdf_file(report_id)
+        return False
+    try:
+        if not isinstance(html, str) or not html.strip():
+            html = report_service.build_report_pdf_html(report)
+        out_path = _report_pdf_path(report_id)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf_generator.render_html_to_pdf(html, out_path)
+        ok = out_path.exists() and out_path.stat().st_size > 0
+        if ok and write_audit:
+            _audit_report_pdf_generated(report_id, report)
+        return ok
+    except Exception:
+        app.logger.exception("Report PDF generation failed for id %s", report_id)
+        return False
+
+
 def _friendly_export_error(exc_or_msg):
     """Translate any internal export failure into a single short user-facing message.
 
@@ -2360,13 +2653,18 @@ def save_report_pdf(report_id):
         report = data_service.get_report(report_id)
         if not report:
             return jsonify({"success": False, "error": "Report not found"}), 404
+        if not _report_pdf_status_allowed(report):
+            return jsonify({
+                "success": False,
+                "error": "PDF is available only after the report is approved or marked aborted.",
+            }), 403
         payload = request.get_json(force=True, silent=True) or {}
         html = payload.get("html")
         if not isinstance(html, str) or not html.strip():
             return jsonify({"success": False, "error": "html is required"}), 400
+        if not _generate_report_pdf_file(report_id, html=html, write_audit=True):
+            return jsonify({"success": False, "error": "PDF generation failed"}), 500
         out_path = _report_pdf_path(report_id)
-        pdf_generator.render_html_to_pdf(html, out_path)
-        _audit(None, None, "Report PDF generated", "report {} -> {}".format(report_id, out_path))
         return jsonify({"success": True, "path": str(out_path), "size_bytes": out_path.stat().st_size}), 200
     except Exception as e:
         app.logger.exception("Error rendering report PDF")
@@ -2445,29 +2743,37 @@ def export_reports():
         else:
             pdf_html_by_id = {}
 
-        # Generate any missing PDFs (best-effort; collect missing list for clear errors).
+        # Ensure PDFs exist (only approved/aborted reports may have PDF files).
         generated = []
         missing = []
         for rid in report_ids:
+            report = data_service.get_report(rid) or {}
+            if _report_requires_approval(report):
+                st = str(report.get("reportApprovalStatus") or "").strip().lower()
+                if st == "pending":
+                    missing.append(rid)
+                    continue
             pdf_path = _report_pdf_path(rid)
             if pdf_path.exists() and pdf_path.stat().st_size > 0:
                 continue
             html = pdf_html_by_id.get(str(rid))
-            if html:
+            if html and _report_pdf_status_allowed(report):
                 try:
                     pdf_generator.render_html_to_pdf(html, pdf_path)
                     generated.append(rid)
                 except Exception as e:
                     app.logger.warning("[EXPORT] PDF generation failed for report %s: %s", rid, e)
                     missing.append(rid)
+            elif _generate_report_pdf_file(rid):
+                generated.append(rid)
             else:
                 missing.append(rid)
         if missing:
             return jsonify({
                 "success": False,
                 "error": (
-                    "PDF unavailable for report(s): {}. Open each report in the app first, "
-                    "or re-export after saving."
+                    "PDF unavailable for report(s): {}. Approve the report first, "
+                    "or ensure aborted reports were saved correctly."
                 ).format(", ".join(str(i) for i in missing)),
                 "missing_pdfs": missing,
             }), 400
@@ -2517,14 +2823,12 @@ def export_reports():
             power_off = bool(data.get("power_off") or False)
             unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
 
-        id_part = ",".join(str(i) for i in report_ids[:20])
-        if len(report_ids) > 20:
-            id_part += ",…"
+        ok_count = len(exported_files)
         _audit(
             None, None,
             "Reports exported",
-            "count {} ok={} fail={} | ids [{}] | dir {}".format(
-                len(report_ids), len(exported_files), len(failed), id_part, export_dir
+            "Exported {} report{} to USB".format(
+                ok_count, "" if ok_count == 1 else "s"
             ),
         )
         return jsonify({
@@ -2637,24 +2941,33 @@ def export_reports_stream():
             for i, rid in enumerate(report_ids, start=1):
                 this_progress_at = accumulated + per_report_pct * (i - 1)
                 next_progress_at = accumulated + per_report_pct * i
-                # 1) Ensure a PDF exists for this report (generate if needed).
-                pdf_src = _report_pdf_path(rid)
-                if not (pdf_src.exists() and pdf_src.stat().st_size > 0):
-                    html = pdf_html_by_id.get(str(rid))
-                    if not html:
-                        result["failed"].append({"id": rid, "reason": "PDF not cached and no HTML supplied"})
+                report = data_service.get_report(rid) or {}
+                if _report_requires_approval(report):
+                    st = str(report.get("reportApprovalStatus") or "").strip().lower()
+                    if st == "pending":
+                        result["failed"].append({"id": rid, "reason": "pending"})
                         yield _emit({"event": "report", "current": i, "total": total,
                                      "percent": int(next_progress_at), "id": rid,
                                      "status": "failed"})
                         continue
+                # 1) Ensure a PDF exists for this report (generate if needed).
+                pdf_src = _report_pdf_path(rid)
+                if not (pdf_src.exists() and pdf_src.stat().st_size > 0):
+                    html = pdf_html_by_id.get(str(rid))
                     yield _emit({"event": "report", "current": i, "total": total,
                                  "percent": int(this_progress_at + per_report_pct * 0.3), "id": rid,
                                  "status": "generating",
                                  "message": "Generating PDF for report {} of {}...".format(i, total)})
-                    try:
-                        pdf_generator.render_html_to_pdf(html, pdf_src)
-                    except Exception as e:
-                        app.logger.warning("[EXPORT-STREAM] PDF render failed for %s: %s", rid, e)
+                    ok = False
+                    if html and _report_pdf_status_allowed(report):
+                        try:
+                            pdf_generator.render_html_to_pdf(html, pdf_src)
+                            ok = pdf_src.exists() and pdf_src.stat().st_size > 0
+                        except Exception as e:
+                            app.logger.warning("[EXPORT-STREAM] PDF render failed for %s: %s", rid, e)
+                    if not ok:
+                        ok = _generate_report_pdf_file(rid)
+                    if not ok:
                         result["failed"].append({"id": rid, "reason": "render"})
                         yield _emit({"event": "report", "current": i, "total": total,
                                      "percent": int(next_progress_at), "id": rid,
@@ -2662,7 +2975,6 @@ def export_reports_stream():
                         continue
 
                 # 2) Copy to pendrive destination.
-                report = data_service.get_report(rid) or {}
                 recipe = report.get("recipe") if isinstance(report.get("recipe"), dict) else {}
                 product = recipe.get("productName") or report.get("name") or "report"
                 safe_name = "".join(c for c in str(product) if c.isalnum() or c in "-_") or "report"
@@ -2694,14 +3006,12 @@ def export_reports_stream():
                 unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
                 mounted_now = None
 
-            id_part = ",".join(str(i) for i in report_ids[:20])
-            if len(report_ids) > 20:
-                id_part += ",..."
+            ok_count = result["count"]
             _audit(
                 None, None,
                 "Reports exported",
-                "stream count {} ok={} fail={} | ids [{}] | dir {}".format(
-                    total, result["count"], len(result["failed"]), id_part, result["export_directory"]
+                "Exported {} report{} to USB".format(
+                    ok_count, "" if ok_count == 1 else "s"
                 ),
             )
 
@@ -2784,7 +3094,7 @@ def print_a4():
                     pass
                 result = print_service.print_a4_report(report_data)
                 if result.get("success"):
-                    _audit(None, None, "Print A4", "report id {} | full data".format(report_id))
+                    _audit(None, None, "Print A4", "Report id {}".format(report_id))
                 return jsonify(result), 200 if result.get("success") else 500
         blocked = _check_report_approved_for_print_export(report_data=report_data)
         if blocked is not None:
@@ -2801,7 +3111,7 @@ def print_a4():
             None,
             None,
             "Print A4",
-            "report id {} | inline".format(rid if rid is not None else "—"),
+            "Report id {}".format(rid if rid is not None else "—"),
         )
         return jsonify(result), 200
     except Exception as e:
@@ -2839,7 +3149,7 @@ def print_thermal():
                     pass
                 result = print_service.print_thermal_report(report_data)
                 if result.get("success"):
-                    _audit(None, None, "Print thermal", "report id {} | full data".format(report_id))
+                    _audit(None, None, "Print thermal", "Report id {}".format(report_id))
                 return jsonify(result), 200 if result.get("success") else 500
         blocked = _check_report_approved_for_print_export(report_data=report_data)
         if blocked is not None:
@@ -2856,7 +3166,7 @@ def print_thermal():
             None,
             None,
             "Print thermal",
-            "report id {} | inline".format(rid if rid is not None else "—"),
+            "Report id {}".format(rid if rid is not None else "—"),
         )
         return jsonify(result), 200
     except Exception as e:
@@ -2939,6 +3249,17 @@ def validation_load_start():
     check = hardware_service.cmd_check_adapter()
     detected = _adapter_kind_from_check_result(check)
     if detected != mode:
+        usp_label = "USP 1" if mode == "usp1" else "USP 2"
+        _audit_event(
+            action="{} adapter error".format(usp_label),
+            outcome="failed",
+            entity_type="hardware",
+            entity_name="adapter",
+            details="Validation start blocked: expected {}, detected {}".format(
+                mode, detected or "none"
+            ),
+            extra={"expected": mode, "detected": detected, "mode": mode},
+        )
         return jsonify({
             "ok": False,
             "error": "adapter_mismatch",
@@ -2959,6 +3280,16 @@ def validation_load_stop():
 @app.route("/api/hardware/adapter/check", methods=["POST"])
 def hardware_check_adapter():
     result = hardware_service.cmd_check_adapter()
+    detected = _adapter_kind_from_check_result(result)
+    if detected == "error" or (result and not result.get("ok") and detected is None):
+        _audit_event(
+            action="Adapter check error",
+            outcome="failed",
+            entity_type="hardware",
+            entity_name="adapter",
+            details=(result.get("response") if isinstance(result, dict) else None) or "Adapter check failed",
+            extra={"detected": detected, "response": result},
+        )
     return jsonify(result)
 
 
@@ -3231,8 +3562,9 @@ def _set_datetime_common():
     dt_str = data.get("datetime", "")
     if not dt_str:
         return jsonify({"ok": False, "error": "datetime required"}), 400
+    prev_payload = _get_stored_datetime()
+    prev_raw = (prev_payload.get("datetime") or "").strip()
     try:
-        from datetime import datetime
         clean = dt_str.strip().replace("Z", "")
         if "+" in clean:
             clean = clean.split("+", 1)[0]
@@ -3253,7 +3585,16 @@ def _set_datetime_common():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     applied = rtc_service.get_device_wall_datetime_payload()
-    _audit(None, None, "System date change", dt_str)
+    new_raw = (applied.get("datetime") or dt_obj.strftime("%Y-%m-%dT%H:%M:%S")).strip()
+    _audit(
+        None,
+        None,
+        "System date change",
+        "Changed from {} to {}".format(
+            _format_wall_datetime_for_audit(prev_raw),
+            _format_wall_datetime_for_audit(new_raw),
+        ),
+    )
     return jsonify({
         "ok": True,
         "datetime": applied.get("datetime") or dt_obj.strftime("%Y-%m-%dT%H:%M:%S"),

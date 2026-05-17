@@ -261,11 +261,25 @@
         valueEl.textContent = displayValue || '';
     }
 
+    function _inputWantsDecimalKeyboard(inputElement) {
+        if (!inputElement) return false;
+        if (inputElement.getAttribute('data-decimal-input') === 'true') return true;
+        if (String(inputElement.getAttribute('inputmode') || '').toLowerCase() === 'decimal') return true;
+        return inputElement.classList.contains('decimal-input');
+    }
+
     // Open keyboard for input
     function openOSKForInput(inputElement) {
         if (!inputElement) return;
 
         currentInput = inputElement;
+
+        if (_inputWantsDecimalKeyboard(inputElement)) {
+            numbersActive = true;
+            capsLockActive = false;
+            shiftActive = false;
+            buildKeyboard();
+        }
 
         // Show keyboard
         var osk = document.getElementById('osk');

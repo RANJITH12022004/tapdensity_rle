@@ -25,6 +25,8 @@ A4_CANDIDATES = ["/dev/ttyAMA4", "/dev/ttyUSB0", "/dev/ttyUSB1", "COM3", "COM4"]
 THERMAL_CANDIDATES = ["/dev/ttyAMA3", "/dev/ttyUSB0", "/dev/ttyUSB1", "COM3", "COM4"]
 THERMAL_WIDTH = 32
 THERMAL_LINE_CHUNK = 32
+# Blank lines after content so date/time and footer clear the cutter (avoid half-cut).
+THERMAL_POST_PRINT_FEED_LINES = 10
 
 _PRINTER_INIT_SEQ = b"\x1b\x40"
 _log = logging.getLogger(__name__)
@@ -172,9 +174,11 @@ def _send_text_to_thermal(ser, text: str, baud: int) -> None:
             ser.write(payload)
             ser.flush()
             time.sleep(line_delay)
-    ser.write(b"\n\n\n")
-    ser.flush()
-    time.sleep(0.25)
+    for _ in range(THERMAL_POST_PRINT_FEED_LINES):
+        ser.write(b"\n")
+        ser.flush()
+        time.sleep(0.06)
+    time.sleep(0.5)
 
 
 def _send_text_to_a4(ser, text: str, baud: int) -> int:
@@ -274,14 +278,30 @@ def _effective_step_row_count(td: Dict[str, Any]) -> int:
     return 0
 
 
+def _section_sep(char: str, width: int, thermal: bool) -> str:
+    if thermal:
+        return _thermal_sep(char, width)
+    return char * min(width, 70)
+
+
+def _thermal_test_data_row(sn: int, vol: str, dvol: str, bulk: str, tap: str) -> str:
+    """Thermal step row: one space after S.No., two spaces before Tap."""
+    return f"{sn:>2} {str(vol):>5} {str(dvol):>5} {str(bulk):>5}  {str(tap):>5}"
+
+
+_THERMAL_TEST_DATA_HEADER = f"{'#':>2} {'Vol':>5} {'dV':>5} {'Blk':>5}  {'Tap':>5}"
+
+
 def _format_thermal_test_data_table(row_count: int, results: list, width: int = THERMAL_WIDTH) -> list:
-    """Fixed-width step table for 32-char thermal paper (no Result column)."""
+    """Compact fixed-width step table for 32-char thermal paper."""
     w = width
     lines = [
         "",
+        _section_sep("=", w, True),
         "TEST DATA",
-        f"{'S':>2}  {'VOL':>6}  {'dVOL':>6}  {'BLK':>6}  {'TAP':>6}",
-        _thermal_sep("-", w),
+        _section_sep("-", w, True),
+        _THERMAL_TEST_DATA_HEADER,
+        _section_sep("-", w, True),
     ]
     for i in range(row_count):
         r = results[i] if i < len(results) and isinstance(results[i], dict) else {}
@@ -301,12 +321,48 @@ def _format_thermal_test_data_table(row_count: int, results: list, width: int = 
             tap = _fmt_density_val(tap)
         else:
             tap = _cell_str(tap)
-        sn = i + 1
-        lines.append(
-            f"{sn:>2}  {str(vol):>6}  {str(dvol):>6}  {str(bulk):>6}  {str(tap):>6}"
-        )
-    lines.extend(["", _thermal_sep("-", w), ""])
+        lines.append(_thermal_test_data_row(i + 1, vol, dvol, bulk, tap))
+    lines.extend(["", _section_sep("-", w, True), ""])
     return lines
+
+
+def _append_test_statistics_block(
+    lines: list, stats: dict, width: int, thermal: bool, status_raw: str
+) -> None:
+    if str(status_raw or "").strip().lower() == "aborted":
+        lines.extend(["", _section_sep("=", width, thermal), "STATISTICS", "N/A", _section_sep("*", width, thermal), ""])
+        return
+    if not isinstance(stats, dict) or not stats:
+        return
+    dash = _section_sep("-", width, thermal)
+    eq = _section_sep("=", width, thermal)
+    star = _section_sep("*", width, thermal)
+    lines.extend(["", eq, "STATISTICS", dash])
+    for key, val in stats.items():
+        if not isinstance(val, dict):
+            continue
+        label = str(key)
+        if val.get("value") is not None:
+            lines.append(f"{label}:")
+            lines.append(f"  final {_fmt_density_val(val.get('value'))}")
+            continue
+        mean = val.get("mean", val.get("Mean", "--"))
+        mn = val.get("min", val.get("Min", "--"))
+        mx = val.get("max", val.get("Max", "--"))
+        if thermal:
+            lines.append(label + ":")
+            lines.append(f" mean {_fmt_density_val(mean)}")
+            lines.append(f" min  {_fmt_density_val(mn)}")
+            lines.append(f" max  {_fmt_density_val(mx)}")
+        else:
+            lines.append(f"{label}:")
+            lines.append(
+                f"  {'Mean':<8} {'Min':<8} {'Max':<8}"
+            )
+            lines.append(
+                f"  {str(_fmt_density_val(mean)):<8} {str(_fmt_density_val(mn)):<8} {str(_fmt_density_val(mx)):<8}"
+            )
+    lines.extend(["", star, ""])
 
 
 def _normalize_validation_runs(td: Dict[str, Any], report_data: Dict[str, Any]) -> list:
@@ -473,11 +529,13 @@ def _append_test_report_details(lines: list, td: Dict[str, Any], report_data: Di
         except (TypeError, ValueError):
             pass
 
+    status_raw = str(td.get("status") or report_data.get("status") or "").lower()
     if row_count > 0:
         if thermal:
             lines.extend(_format_thermal_test_data_table(row_count, results))
         else:
-            lines.extend(["", "TEST DATA", dash if dash else ""])
+            eq = _section_sep("=", width, False)
+            lines.extend(["", eq, "TEST DATA", dash if dash else ""])
             hdr = f"{'S':>2}  {'Vol(ml)':>9}  {'dVol':>8}  {'Bulk':>9}  {'Tap':>9}"
             lines.append(hdr)
             if dash:
@@ -498,29 +556,12 @@ def _append_test_report_details(lines: list, td: Dict[str, Any], report_data: Di
                 lines.append(
                     f"{sn:2d}  {str(vol):>9}  {str(dvol):>8}  {str(bulk):>9}  {str(tap):>9}"
                 )
+            lines.append(dash if dash else "")
     elif str(report_data.get("type") or "test").strip().lower() == "test":
         lines.extend(["", "TEST DATA: No test data recorded"])
 
     stats = report_data.get("statistics") or td.get("statistics") or {}
-    if isinstance(stats, dict) and stats:
-        if thermal:
-            lines.extend(["", "STATISTICS"])
-        else:
-            lines.extend(["", "STATISTICS", dash if dash else ""])
-        if not thermal:
-            lines.append(f"{'Parameter':<16} {'Mean':>10} {'Min':>10} {'Max':>10}")
-            if dash:
-                lines.append(dash)
-        for key, val in stats.items():
-            if not isinstance(val, dict):
-                continue
-            mean = val.get("mean", val.get("Mean", "--"))
-            mn = val.get("min", val.get("Min", "--"))
-            mx = val.get("max", val.get("Max", "--"))
-            if thermal:
-                lines.append(f"{key}: mean={mean} min={mn} max={mx}")
-            else:
-                lines.append(f"{str(key):<16} {str(mean):>10} {str(mn):>10} {str(mx):>10}")
+    _append_test_statistics_block(lines, stats, width, thermal, status_raw)
 
 
 def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
@@ -637,10 +678,14 @@ def _thermal_printed_timestamp_lines() -> list:
     return ["", f"Printed Date: {pdate}", f"Printed Time: {ptime}"]
 
 
+def _thermal_trailing_feed() -> str:
+    return "\n" * THERMAL_POST_PRINT_FEED_LINES
+
+
 def format_for_thermal_printer(report_data: Dict[str, Any]) -> str:
     text = _format_report_text(report_data, width=THERMAL_WIDTH).rstrip("\n")
     footer = "\n".join(_thermal_printed_timestamp_lines())
-    return text + "\n" + footer + "\n\n\n\n"
+    return text + "\n\n" + footer + _thermal_trailing_feed()
 
 
 def save_report_text_files(report_data: Dict[str, Any], report_id: int, reports_dir: pathlib.Path) -> None:
@@ -806,7 +851,7 @@ def print_recipe_thermal(recipe_data: Dict[str, Any], printer_port: Optional[str
     except FileNotFoundError as e:
         return {"success": False, "error": f"Thermal printer port not found: {e.filename or port}", "port": port}
     try:
-        text = _format_recipe_text(recipe_data, width=THERMAL_WIDTH).rstrip("\n") + "\n\n"
+        text = _format_recipe_text(recipe_data, width=THERMAL_WIDTH).rstrip("\n") + _thermal_trailing_feed()
         ser = serial.Serial(port=port, baudrate=baud, timeout=2.0)
         try:
             _send_printer_init(ser)

@@ -303,6 +303,7 @@ body {
     gap: 12px;
     width: 100%;
     min-height: 80px;
+    padding-bottom: 8px;
 }
 
 /* Generic loading overlay (export progress, long-running ops) */
@@ -834,11 +835,10 @@ body {
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    justify-content: flex-start;
+    justify-content: center;
     width: 100%;
     height: 100%;
     min-height: 0;
-    overflow: hidden;
 }
 
 .placeholder-page {
@@ -1550,15 +1550,16 @@ body {
 }
 
 #page-validate .validation-main-container {
-    flex: 0 0 auto;
+    flex: 1;
     display: flex;
     flex-direction: column;
-    justify-content: flex-start;
+    justify-content: center;
     align-items: center;
-    padding: 24px 20px 48px;
-    min-height: min-content;
+    padding: 24px 20px;
+    min-height: 0;
     width: 100%;
     box-sizing: border-box;
+    overflow: hidden;
 }
 
 .section-title {
@@ -1896,53 +1897,296 @@ body {
     font-size: 16px;
 }
 
-/* Validation Test Run page */
-.validation-run-page .validation-run-info-row {
+/* ===== Validation Test Run — fits 528px content area (no top gap, button visible) ===== */
+.page-content:has(#page-validation-run.active) {
+    padding: 0 20px 10px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+#page-validation-run.active {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    overflow: hidden;
+    padding-top: 0;
+}
+
+.validation-run-page {
+    width: 100%;
+    max-width: 900px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    flex: 0 0 auto;
+    max-height: 100%;
+    overflow: hidden;
+    box-sizing: border-box;
+}
+
+.validation-run-page .val-run-params,
+.validation-run-page .val-run-panel,
+.validation-run-page .val-run-cta {
+    width: 100%;
+    max-width: 860px;
+    box-sizing: border-box;
+}
+
+/* Parameter strip */
+.val-run-params {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
+    justify-content: center;
     flex-wrap: wrap;
     gap: 6px 12px;
-    margin: 16px 0;
-    font-size: 28px;
+    padding: 8px 16px;
+    border-radius: var(--radius-lg);
+    background: linear-gradient(135deg, rgba(14, 165, 233, 0.22), rgba(2, 132, 199, 0.12));
+    border: 1px solid rgba(56, 189, 248, 0.35);
+    box-shadow: 0 4px 18px rgba(14, 165, 233, 0.12);
 }
 
-.validation-run-page .info-label {
-    color: var(--text-secondary);
+.val-run-param {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    min-width: 88px;
 }
 
-.validation-run-page .info-value {
+.val-run-param-label {
+    font-size: 11px;
     font-weight: 600;
-    color: var(--text-primary);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: rgba(186, 230, 253, 0.85);
 }
 
-.validation-run-page .info-separator {
+.val-run-param-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: #f8fafc;
+    line-height: 1.1;
+}
+
+.val-run-param-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: rgba(148, 163, 184, 0.5);
+    flex-shrink: 0;
+}
+
+/* Single glass panel — fixed height band, does not grow and push button off-screen */
+.val-run-panel {
+    flex: 0 0 auto;
+    width: 100%;
+    display: flex;
+    border-radius: var(--radius-xl);
+    background: linear-gradient(160deg, rgba(28, 36, 48, 0.95) 0%, rgba(15, 20, 28, 0.98) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: var(--shadow-lg), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    overflow: hidden;
+}
+
+.val-run-panel-inner {
+    width: 100%;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    padding: 12px 20px;
+    box-sizing: border-box;
+}
+
+.val-run-timer-zone {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 0;
+}
+
+.validation-run-page .val-run-timer-dial {
+    position: relative;
+    width: 168px;
+    height: 168px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    overflow: hidden;
+    border: 3px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4), inset 0 0 18px rgba(0, 0, 0, 0.3);
+}
+
+.val-run-timer-core {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+    pointer-events: none;
+}
+
+.val-run-timer-digital {
+    font-size: 44px;
+    font-weight: 800;
+    color: #f8fafc;
+    line-height: 1;
+    letter-spacing: -0.03em;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+}
+
+.val-run-timer-caption {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: rgba(148, 163, 184, 0.9);
+    margin-top: 2px;
+}
+
+.val-run-stats {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    gap: 0;
+    min-height: 0;
+    flex-shrink: 0;
+}
+
+.val-run-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 2px;
+    padding: 8px 0;
+    width: 100%;
+    max-width: 260px;
+}
+
+.val-run-stat + .val-run-stat {
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.val-run-stat-label {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
     color: var(--text-muted);
-    margin: 0 4px;
 }
 
-.validation-run-page .info-value:last-child {
+.val-run-stat-value {
+    font-size: 34px;
+    font-weight: 800;
+    color: var(--text-primary);
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+}
+
+.val-run-stat-hint {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.35;
+}
+
+.val-run-status-text.is-running {
+    color: #38bdf8;
+}
+
+.val-run-status-text.is-ready {
+    color: #94a3b8;
+}
+
+.val-run-result-strip {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 14px;
+    margin-top: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.val-run-result-strip[hidden] {
+    display: none !important;
+}
+
+.val-run-result-badge {
+    display: inline-flex;
+    align-self: center;
+    align-items: center;
+    justify-content: center;
+    min-width: 120px;
+    padding: 8px 22px;
+    border-radius: 999px;
     font-size: 28px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
 }
 
-.validation-run-controls {
-    margin: 20px 0;
-}
-
-.validation-run-controls .btn.danger {
-    background: linear-gradient(135deg, #ef4444, #dc2626);
+.val-run-result-badge.is-pass {
+    background: linear-gradient(135deg, #16a34a, #22c55e);
     color: #fff;
+    box-shadow: 0 6px 20px rgba(34, 197, 94, 0.35);
 }
 
-.validation-run-cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 16px;
-    margin: 24px 0;
+.val-run-result-badge.is-fail {
+    background: linear-gradient(135deg, #dc2626, #ef4444);
+    color: #fff;
+    box-shadow: 0 6px 20px rgba(239, 68, 68, 0.35);
 }
 
-#page-validation-run .section-title,
-#page-validation-run #validation-run-subtitle {
-    display: none;
+.val-run-result-detail {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 0;
+    line-height: 1.4;
+}
+
+.val-run-cta {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+    width: 100%;
+    padding: 0 0 4px;
+}
+
+.val-run-start-btn {
+    width: min(480px, 100%);
+    min-height: 52px;
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    border-radius: var(--radius-lg);
+    border: none;
+    box-shadow: 0 8px 24px rgba(0, 122, 255, 0.35);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+}
+
+.val-run-start-btn.is-abort {
+    background: linear-gradient(135deg, #ef4444, #dc2626) !important;
+    box-shadow: 0 8px 24px rgba(239, 68, 68, 0.4);
+}
+
+.val-run-start-btn .ctrl-icon {
+    font-size: 14px;
 }
 
 .val-run-timer-dial {
@@ -2040,7 +2284,7 @@ body {
 }
 
 .validation-run-actions {
-    margin-top: 24px;
+    display: none;
 }
 
 .validation-actions-row {
@@ -3404,14 +3648,9 @@ body {
     box-shadow: 0 4px 15px rgba(37, 99, 235, 0.45);
 }
 
-/* Add New Member / biometric / validation: scrollable full-height pages */
+/* Add New Member / biometric: scrollable full-height pages */
 .page-content:has(#page-add-member.active),
-.page-content:has(#page-member-biometric.active),
-.page-content:has(#page-validate.active),
-.page-content:has(#page-validate-type-select.active),
-.page-content:has(#page-usp1-detail.active),
-.page-content:has(#page-usp2-detail.active),
-.page-content:has(#page-validation-run.active) {
+.page-content:has(#page-member-biometric.active) {
     padding: 0;
     overflow: hidden;
     display: flex;
@@ -3419,77 +3658,42 @@ body {
 }
 
 .page-content:has(#page-add-member.active) > #page-add-member.active,
-.page-content:has(#page-member-biometric.active) > #page-member-biometric.active,
-.page-content:has(#page-validate.active) > #page-validate.active,
-.page-content:has(#page-validate-type-select.active) > #page-validate-type-select.active,
-.page-content:has(#page-usp1-detail.active) > #page-usp1-detail.active,
-.page-content:has(#page-usp2-detail.active) > #page-usp2-detail.active,
-.page-content:has(#page-validation-run.active) > #page-validation-run.active {
+.page-content:has(#page-member-biometric.active) > #page-member-biometric.active {
     flex: 1 1 0;
     min-height: 0;
     width: 100%;
-    overflow: hidden;
-    align-self: stretch;
-}
-
-/* Validation: scroll the inner content surface (reliable on 1024×600 touch kiosk) */
-#page-validate.active,
-#page-validate-type-select.active,
-#page-usp1-detail.active,
-#page-usp2-detail.active,
-#page-validation-run.active {
-    display: flex !important;
-    flex-direction: column !important;
-    align-items: stretch !important;
-    justify-content: flex-start !important;
-    flex: 1 1 0 !important;
-    min-height: 0 !important;
-    max-height: 100% !important;
-    height: 100% !important;
-    overflow: hidden !important;
-}
-
-#page-validate.active > .validation-main-container,
-#page-validate-type-select.active > .validation-type-page,
-#page-usp1-detail.active > .validation-type-page,
-#page-usp2-detail.active > .validation-type-page,
-#page-validation-run.active > .validation-test-page {
-    flex: 1 1 auto;
-    min-height: 0;
-    max-height: 100%;
-    width: 100%;
     overflow-x: hidden;
-    overflow-y: scroll;
+    overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     touch-action: pan-y;
     overscroll-behavior: contain;
+    align-self: stretch;
 }
 
 body.keyboard-open #page-add-member.active,
-body.keyboard-open #page-member-biometric.active,
-body.keyboard-open #page-validate.active,
-body.keyboard-open #page-validate-type-select.active,
-body.keyboard-open #page-usp1-detail.active,
-body.keyboard-open #page-usp2-detail.active,
-body.keyboard-open #page-validation-run.active {
-    overflow-y: auto !important;
+body.keyboard-open #page-member-biometric.active {
     scroll-padding-bottom: 280px;
 }
 
-body.keyboard-open #page-validate.active > .validation-main-container,
-body.keyboard-open #page-validate-type-select.active > .validation-type-page,
-body.keyboard-open #page-usp1-detail.active > .validation-type-page,
-body.keyboard-open #page-usp2-detail.active > .validation-type-page,
-body.keyboard-open #page-validation-run.active > .validation-test-page {
-    overflow-y: scroll !important;
-    scroll-padding-bottom: 280px;
+/* Validation sub-pages: page-level scroll if content overflows */
+#page-validate-type-select.active,
+#page-usp1-detail.active,
+#page-usp2-detail.active,
+#page-calibration-type-select.active,
+#page-load-calibration.active,
+#page-distance-zero-calibration.active {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
 }
 
 .add-member-container {
     max-width: 960px;
     width: 100%;
     margin: 0 auto;
-    padding: 24px 32px 48px;
+    padding: 24px 32px 72px;
     display: flex;
     flex-direction: column;
     gap: 16px;
@@ -3912,7 +4116,9 @@ body.keyboard-open {
 #page-create-recipe-step2.active,
 #page-create-recipe-step3.active,
 #page-quick-test-steps.active,
-#page-approval-verify.active {
+#page-approval-verify.active,
+#page-add-member.active,
+#page-member-biometric.active {
     display: flex;
     flex-direction: column;
     height: 100%;

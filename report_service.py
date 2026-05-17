@@ -3,6 +3,7 @@
 report_service.py - Tap Density report generation and context.
 """
 
+import html as html_module
 import json
 import pathlib
 from datetime import datetime
@@ -60,6 +61,71 @@ def enrich_factory_settings(factory_settings: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _parse_density_number(val: Any) -> Optional[float]:
+    if val is None or val == "" or val == "--":
+        return None
+    try:
+        return float(str(val).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _agg_mean_min_max(values: List[float]) -> Dict[str, float]:
+    if not values:
+        return {}
+    return {
+        "mean": round(sum(values) / len(values), 3),
+        "min": round(min(values), 3),
+        "max": round(max(values), 3),
+    }
+
+
+def compute_test_report_statistics(test_data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Option A: Hausner = tap/bulk; CI% = (tap-bulk)/tap*100; agg over completed steps; final-step CI/Hausner."""
+    if not isinstance(test_data, dict):
+        return None
+    if str(test_data.get("status") or "").strip().lower() == "aborted":
+        return None
+    results = test_data.get("stepResults") or []
+    if not isinstance(results, list) or not results:
+        return None
+
+    bulk_vals: List[float] = []
+    tap_vals: List[float] = []
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        b = _parse_density_number(row.get("bulkDensity"))
+        t = _parse_density_number(row.get("tapDensity"))
+        if b is not None:
+            bulk_vals.append(b)
+        if t is not None:
+            tap_vals.append(t)
+
+    stats: Dict[str, Any] = {}
+    bulk_agg = _agg_mean_min_max(bulk_vals)
+    tap_agg = _agg_mean_min_max(tap_vals)
+    if bulk_agg:
+        stats["Bulk density (g/mL)"] = bulk_agg
+    if tap_agg:
+        stats["Tap density (g/mL)"] = tap_agg
+
+    last = results[-1] if isinstance(results[-1], dict) else {}
+    bulk_f = _parse_density_number(last.get("bulkDensity"))
+    tap_f = _parse_density_number(last.get("tapDensity"))
+    if bulk_f is None and bulk_vals:
+        bulk_f = bulk_vals[0]
+    if tap_f is None and tap_vals:
+        tap_f = tap_vals[-1]
+    if bulk_f is not None and tap_f is not None and tap_f > 0 and bulk_f > 0:
+        stats["Compressibility index (%)"] = {
+            "value": round(((tap_f - bulk_f) / tap_f) * 100.0, 2)
+        }
+        stats["Hausner ratio"] = {"value": round(tap_f / bulk_f, 3)}
+
+    return stats if stats else None
+
+
 def enrich_report_context(report_data: Dict[str, Any]) -> Dict[str, Any]:
     if not report_data:
         return report_data
@@ -84,6 +150,13 @@ def enrich_report_context(report_data: Dict[str, Any]) -> Dict[str, Any]:
     if computed.get("nextValidationDate"):
         fs["nextValidationDate"] = computed["nextValidationDate"]
     report_data["factorySettings"] = fs
+    if str(report_data.get("type") or "").strip().lower() == "test":
+        td = report_data.get("testData") if isinstance(report_data.get("testData"), dict) else report_data
+        computed = compute_test_report_statistics(td if isinstance(td, dict) else None)
+        if computed:
+            report_data["statistics"] = computed
+            if isinstance(report_data.get("testData"), dict):
+                report_data["testData"]["statistics"] = computed
     return report_data
 
 
@@ -157,7 +230,10 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
         "recipe": report.get("recipe", {}),
         "factorySettings": report.get("factorySettings", {}),
         "testData": report.get("testData", report),
-        "statistics": report.get("statistics", {}),
+        "statistics": report.get("statistics")
+        or (td.get("statistics") if isinstance(td, dict) else {})
+        or compute_test_report_statistics(td if isinstance(td, dict) else None)
+        or {},
         "status": report.get("status", "PASS"),
         "remarks": remarks,
         "approvedBy": report.get("approvedBy"),
@@ -186,6 +262,299 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
         if runs:
             preview["validationRuns"] = runs
     return preview
+
+
+def _html_esc(value: Any) -> str:
+    if value is None or value == "":
+        return "N/A"
+    return html_module.escape(str(value))
+
+
+def _format_report_ts(value: Any) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return "--"
+    try:
+        clean = s.replace("Z", "").strip()
+        if "+" in clean:
+            clean = clean.split("+", 1)[0].strip()
+        if clean.count("-") > 2:
+            clean = clean.rsplit("-", 1)[0].strip()
+        dt = datetime.fromisoformat(clean)
+        return dt.strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        return s
+
+
+def _report_step_row_count(td: Dict[str, Any]) -> int:
+    if not isinstance(td, dict):
+        return 0
+    results = td.get("stepResults") or []
+    if isinstance(results, list) and results:
+        return len(results)
+    try:
+        cs = int(td.get("completedSteps") or 0)
+        return max(0, cs)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _statistics_table_html(preview: Dict[str, Any], td: Dict[str, Any]) -> str:
+    if str(td.get("status") or "").strip().lower() == "aborted":
+        return '<tr><td colspan="4">N/A</td></tr>'
+    stats = preview.get("statistics") or td.get("statistics") or {}
+    if not isinstance(stats, dict) or not stats:
+        return '<tr><td colspan="4">N/A</td></tr>'
+    rows = []
+    for key, val in stats.items():
+        if not isinstance(val, dict):
+            continue
+        if val.get("value") is not None:
+            rows.append(
+                "<tr><th>{}</th><td colspan=\"3\">{}</td></tr>".format(
+                    _html_esc(key), _html_esc(val.get("value"))
+                )
+            )
+            continue
+        mean = val.get("mean", val.get("Mean"))
+        min_v = val.get("min", val.get("Min"))
+        max_v = val.get("max", val.get("Max"))
+        if mean is not None or min_v is not None or max_v is not None:
+            rows.append(
+                "<tr><th>{}</th><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                    _html_esc(key),
+                    _html_esc(mean if mean is not None else "--"),
+                    _html_esc(min_v if min_v is not None else "--"),
+                    _html_esc(max_v if max_v is not None else "--"),
+                )
+            )
+    return "".join(rows) if rows else '<tr><td colspan="4">N/A</td></tr>'
+
+
+def _validation_details_table_html(preview: Dict[str, Any]) -> str:
+    td = preview.get("testData") if isinstance(preview.get("testData"), dict) else preview
+    runs = preview.get("validationRuns")
+    if not runs and isinstance(td, dict):
+        runs = td.get("validationRuns")
+    rows = []
+    if isinstance(runs, list) and runs:
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            usp = run.get("usp") or ("USP 2" if run.get("validationSubtype") == "load" else "USP 1")
+            date_str = _format_report_ts(run.get("completedAt") or preview.get("completedAt") or preview.get("createdAt"))
+            taps_min = run.get("tapsMin", "--")
+            drop_h = run.get("dropHeight", "--")
+            expected = run.get("expectedTapCount", "--")
+            tol = run.get("expectedTolerance")
+            expected_disp = (
+                "{} (+/- {})".format(expected, tol)
+                if tol is not None and expected not in (None, "", "--")
+                else expected
+            )
+            actual = run.get("actualTapCount", "--")
+            status = run.get("status", "--")
+            rows.append('<tr><th colspan="4" class="usp-hdr">{} validation</th></tr>'.format(_html_esc(usp)))
+            rows.append('<tr><th>Date / Time</th><td colspan="3">{}</td></tr>'.format(_html_esc(date_str)))
+            rows.append(
+                "<tr><th>USP</th><td>{}</td><th>Taps/Min</th><td>{}</td></tr>".format(
+                    _html_esc(usp), _html_esc(taps_min)
+                )
+            )
+            rows.append(
+                "<tr><th>Drop Height (mm)</th><td>{}</td><th>Status</th><td>{}</td></tr>".format(
+                    _html_esc(drop_h), _html_esc(status)
+                )
+            )
+            rows.append(
+                "<tr><th>Expected Tap Count</th><td>{}</td><th>Actual Tap Count</th><td>{}</td></tr>".format(
+                    _html_esc(expected_disp), _html_esc(actual)
+                )
+            )
+    elif isinstance(td, dict):
+        date_str = _format_report_ts(td.get("completedAt") or preview.get("completedAt") or preview.get("createdAt"))
+        usp = td.get("usp") or preview.get("usp") or "--"
+        taps_min = td.get("tapsMin", preview.get("tapsMin", "--"))
+        drop_h = td.get("dropHeight", preview.get("dropHeight", "--"))
+        expected = td.get("expectedTapCount", preview.get("expectedTapCount", "--"))
+        tol = td.get("expectedTolerance", preview.get("expectedTolerance"))
+        expected_disp = (
+            "{} (+/- {})".format(expected, tol)
+            if tol is not None and expected not in (None, "", "--")
+            else expected
+        )
+        actual = td.get("actualTapCount", preview.get("actualTapCount", "--"))
+        status = td.get("status") or preview.get("status") or "--"
+        rows.append('<tr><th>Date / Time</th><td colspan="3">{}</td></tr>'.format(_html_esc(date_str)))
+        rows.append(
+            "<tr><th>USP</th><td>{}</td><th>Taps/Min</th><td>{}</td></tr>".format(
+                _html_esc(usp), _html_esc(taps_min)
+            )
+        )
+        rows.append(
+            "<tr><th>Drop Height (mm)</th><td>{}</td><th>Status</th><td>{}</td></tr>".format(
+                _html_esc(drop_h), _html_esc(status)
+            )
+        )
+        rows.append(
+            "<tr><th>Expected Tap Count</th><td>{}</td><th>Actual Tap Count</th><td>{}</td></tr>".format(
+                _html_esc(expected_disp), _html_esc(actual)
+            )
+        )
+    return "".join(rows) if rows else '<tr><td colspan="4">No validation data</td></tr>'
+
+
+def build_report_pdf_html(report: Dict[str, Any]) -> str:
+    """Build a self-contained HTML document for PDF rendering (server-side)."""
+    preview = get_report_preview_data(report)
+    rtype = str(preview.get("type") or "test").strip().lower()
+    td = preview.get("testData") if isinstance(preview.get("testData"), dict) else {}
+    recipe = preview.get("recipe") if isinstance(preview.get("recipe"), dict) else {}
+    fs = preview.get("factorySettings") if isinstance(preview.get("factorySettings"), dict) else {}
+    approval_st = str(preview.get("reportApprovalStatus") or "").strip().lower()
+    is_aborted = (
+        approval_st == "aborted"
+        or str(td.get("status") or "").strip().lower() == "aborted"
+    )
+    is_approved = approval_st == "approved"
+
+    status_raw = str(td.get("status") or "").strip().lower()
+    status_label = "Aborted" if status_raw == "aborted" else "Completed"
+    start_ts = _format_report_ts(td.get("testStartTime") or preview.get("createdAt"))
+    end_ts = _format_report_ts(td.get("testEndTime") or preview.get("completedAt") or preview.get("createdAt"))
+    duration = td.get("durationSeconds")
+    duration_str = "{} s".format(duration) if duration is not None and duration >= 0 else "--"
+
+    remarks = preview.get("remarks") or td.get("remarks") or "N/A"
+    if is_approved:
+        appr_result = preview.get("approvalPassFail") or "--"
+        appr_by = preview.get("approvedBy") or "--"
+        appr_remarks = preview.get("approvalRemarks")
+        appr_remarks_disp = appr_remarks if appr_remarks not in (None, "") else "N/A"
+    else:
+        appr_result = "N/A"
+        appr_by = "N/A"
+        appr_remarks_disp = "N/A"
+
+    if rtype == "validation":
+        val_section = (
+            '<h3>VALIDATION DETAILS</h3>'
+            '<table class="ident"><tbody>{}</tbody></table>'
+        ).format(_validation_details_table_html(preview))
+        test_section = ""
+    else:
+        val_section = ""
+        row_count = _report_step_row_count(td)
+        results = td.get("stepResults") or []
+        step_rows = []
+        if row_count > 0:
+            for i in range(row_count):
+                row = results[i] if i < len(results) and isinstance(results[i], dict) else {}
+                vol = row.get("volumeMl", "__")
+                d_vol = row.get("volumeDeltaMl", "__")
+                bulk = row.get("bulkDensity", "__")
+                tap = row.get("tapDensity", "__")
+                step_rows.append(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                        i + 1,
+                        _html_esc(vol),
+                        _html_esc(d_vol),
+                        _html_esc(bulk),
+                        _html_esc(tap),
+                    )
+                )
+        else:
+            step_rows.append('<tr><td colspan="5">No test data</td></tr>')
+        test_data_rows = "".join(step_rows)
+        test_section = (
+            '<h3>TEST INFORMATION</h3>'
+            '<table class="ident">'
+            '<tr><th>Product Name</th><td>{prod}</td><th>Batch No</th><td>{batch}</td></tr>'
+            '<tr><th>Test Start</th><td colspan="3">{start}</td></tr>'
+            '<tr><th>Completed Date / Time</th><td colspan="3">{end}</td></tr>'
+            '<tr><th>Duration</th><td>{dur}</td><th>Test Status</th><td>{status}</td></tr>'
+            '</table>'
+            '<h3>TEST DATA</h3>'
+            '<table class="data">'
+            '<thead><tr><th>Step</th><th>Vol (ml)</th><th>Δ Vol</th><th>Bulk</th><th>Tap</th></tr></thead>'
+            '<tbody>{steps}</tbody></table>'
+            '<h3>STATISTICS</h3>'
+            '<table class="data">'
+            '<thead><tr><th>Parameter</th><th>Mean</th><th>Min</th><th>Max</th></tr></thead>'
+            '<tbody>{stats}</tbody></table>'
+            '<div class="remarks"><strong>Remarks:</strong> {remarks}</div>'
+        ).format(
+            prod=_html_esc(recipe.get("productName") or td.get("productName")),
+            batch=_html_esc(recipe.get("batchNumber") or td.get("batchNumber")),
+            start=_html_esc(start_ts),
+            end=_html_esc(end_ts),
+            dur=_html_esc(duration_str),
+            status=_html_esc(status_label),
+            steps=test_data_rows,
+            stats=_statistics_table_html(preview, td),
+            remarks=_html_esc(remarks),
+        )
+
+    title = "TAP DENSITY VALIDATION REPORT" if rtype == "validation" else "TAP DENSITY TEST REPORT"
+    if is_aborted:
+        title_note = " (ABORTED)"
+    elif is_approved:
+        title_note = ""
+    else:
+        title_note = ""
+
+    body = (
+        '<div class="doc">'
+        '<h1>{title}{note}</h1>'
+        '<h2>{company}</h2>'
+        '<table class="ident">'
+        '<tr><th>Model No</th><td>{model}</td><th>Serial No</th><td>{serial}</td></tr>'
+        '<tr><th>Location</th><td>{loc}</td><th>Instrument ID</th><td>{inst}</td></tr>'
+        '<tr><th>Last Validation</th><td>{lastv}</td><th>Next Validation</th><td>{nextv}</td></tr>'
+        '</table>'
+        '{val}'
+        '{test}'
+        '<h3>APPROVAL</h3>'
+        '<table class="ident">'
+        '<tr><th>Operated by</th><td>{op}</td><th>Employee ID</th><td>{emp}</td></tr>'
+        '<tr><th>Approval Result</th><td>{appr}</td><th>Approved By</th><td>{by}</td></tr>'
+        '<tr><th>Approval Remarks</th><td colspan="3">{appr_rem}</td></tr>'
+        '</table>'
+        '</div>'
+    ).format(
+        title=_html_esc(title),
+        note=title_note,
+        company=_html_esc(fs.get("companyName")),
+        model=_html_esc(fs.get("modelNo")),
+        serial=_html_esc(fs.get("serialNo")),
+        loc=_html_esc(fs.get("companyLocation") or fs.get("location")),
+        inst=_html_esc(fs.get("instrumentId")),
+        lastv=_html_esc(fs.get("lastValidationDate")),
+        nextv=_html_esc(fs.get("nextValidationDate")),
+        val=val_section,
+        test=test_section,
+        op=_html_esc(preview.get("operatorName") or td.get("operatorName")),
+        emp=_html_esc(preview.get("employeeId") or td.get("employeeId")),
+        appr=_html_esc(appr_result),
+        by=_html_esc(appr_by),
+        appr_rem=_html_esc(appr_remarks_disp),
+    )
+
+    css = (
+        "body{font-family:Arial,sans-serif;font-size:11pt;color:#000;margin:12px;}"
+        "h1{font-size:14pt;text-align:center;margin:0 0 8px;}"
+        "h2{font-size:12pt;text-align:center;margin:0 0 12px;}"
+        "h3{font-size:11pt;margin:14px 0 6px;border-bottom:1px solid #333;}"
+        "table{width:100%;border-collapse:collapse;margin-bottom:10px;}"
+        "th,td{border:1px solid #333;padding:4px 6px;text-align:left;vertical-align:top;}"
+        "th{background:#e8e8e8;}"
+        ".usp-hdr{background:#e8e8e8;font-weight:bold;}"
+        ".remarks{margin:12px 0;padding:8px;border:1px solid #333;}"
+    )
+    return (
+        '<!doctype html><html><head><meta charset="utf-8"><title>Report</title>'
+        '<style>{}</style></head><body>{}</body></html>'
+    ).format(css, body)
 
 
 def create_pdf_report(report_data: Dict[str, Any], template_type: str = "standard") -> Optional[pathlib.Path]:

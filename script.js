@@ -785,6 +785,7 @@ function startReportApprovalPollIfLocked() {
                 populateReportPreview(data.preview);
                 clearReportApprovalGate();
                 applyReportPreviewLockUi(data.preview);
+                _saveReportPdfSilent(rid);
                 showAppModal('Report has been approved. You may now print or leave this screen.', 'Report');
             }
         }).catch(function () {});
@@ -987,7 +988,6 @@ function reportActionsBlockedForPreview(preview) {
 function finishTestRunReportSaved(reportId) {
     resetQuickTestFormAfterRunIfPending();
     if (reportId) {
-        _saveReportPdfSilent(reportId);
         if (typeof openReportPreview === 'function') {
             openReportPreview(reportId, { setGate: true });
         } else {
@@ -1157,6 +1157,169 @@ var PAGE_TITLES = {
     'validation-run': 'Validation Test'
 };
 
+var _auditActivePage = null;
+var _auditSkipPages = { login: true, 'password-expired-reset': true };
+var _testRunAdapterInterruptAudited = false;
+
+var PAGE_AUDIT_LABELS = {
+    home: 'Home',
+    'quick-test': 'Quick Test',
+    'quick-test-steps': 'Quick Test — Steps',
+    'create-recipe-step1': 'Create Recipe',
+    'create-recipe-step2': 'Create Recipe — Steps',
+    'manage-recipes': 'Manage Recipes',
+    'manage-members': 'Manage Profiles',
+    'locked-members': 'Locked Members',
+    'disabled-members': 'Disabled Members',
+    'load-validation': 'USP 2 Validation',
+    'distance-validation': 'USP 1 Validation',
+    'add-member': 'Add New Member',
+    validate: 'Validation',
+    'validate-type-select': 'Select Validation Type',
+    'calibration-type-select': 'Select Calibration Type',
+    'load-calibration': 'Load Calibration',
+    'distance-zero-calibration': 'Distance Calibration',
+    settings: 'Settings',
+    datetime: 'Date and Time',
+    'factory-settings': 'Factory Settings',
+    reports: 'Reports',
+    'report-preview': 'Report Preview',
+    'user-profile': 'User Profile',
+    'view-recipes': 'View Recipe',
+    'recipe-print-preview': 'Recipe Print',
+    'usp1-detail': 'USP 1 validation',
+    'usp2-detail': 'USP 2 validation',
+    'test-run': 'Test Run',
+    'validation-run': 'Validation Test',
+    'disable-recipes': 'Disabled Recipes'
+};
+
+function logAuditEvent(action, details, options) {
+    options = options || {};
+    if (!window.currentUser) return Promise.resolve();
+    var body = {
+        action: action,
+        details: details || '',
+        outcome: options.outcome || 'success',
+        eventType: options.eventType || 'lifecycle',
+        entityType: options.entityType || '',
+        entityName: options.entityName || '',
+        entityId: options.entityId,
+        reason: options.reason || '',
+        extra: options.extra || {}
+    };
+    return apiRequest(API_BASE + '/api/data/audit-log/event', {
+        method: 'POST',
+        body: body
+    }).catch(function () {});
+}
+
+function auditPageLabel(pageName) {
+    if (pageName === 'manage-recipes') {
+        return (typeof recipeListMode !== 'undefined' && recipeListMode === 'load')
+            ? 'Load Recipe'
+            : 'Manage Recipes';
+    }
+    if (PAGE_AUDIT_LABELS[pageName]) return PAGE_AUDIT_LABELS[pageName];
+    if (PAGE_TITLES[pageName]) return PAGE_TITLES[pageName];
+    return pageName;
+}
+
+function auditNavPageChange(newPage) {
+    if (_auditSkipPages[newPage]) {
+        _auditActivePage = null;
+        return;
+    }
+    if (newPage === _auditActivePage) return;
+    var prev = _auditActivePage;
+    _auditActivePage = newPage;
+    if (prev && !_auditSkipPages[prev]) {
+        logAuditEvent('Exited screen', auditPageLabel(prev), { eventType: 'navigation' });
+    }
+    if (newPage === 'usp1-detail') {
+        logAuditEvent('Entered USP 1 validation', 'USP 1 validation screen', { eventType: 'navigation' });
+    } else if (newPage === 'usp2-detail') {
+        logAuditEvent('Entered USP 2 validation', 'USP 2 validation screen', { eventType: 'navigation' });
+    } else {
+        logAuditEvent('Entered screen', auditPageLabel(newPage), { eventType: 'navigation' });
+    }
+}
+
+function auditTestUspAdapterAction(recipe) {
+    var expected = recipeExpectedAdapterKind(recipe);
+    if (expected === 'usp2') return 'USP 2 adapter error';
+    return 'USP 1 adapter error';
+}
+
+function logTestAdapterError(recipe, extra) {
+    logAuditEvent(auditTestUspAdapterAction(recipe), 'Adapter check failed for test run', {
+        eventType: 'lifecycle',
+        entityType: 'hardware',
+        entityName: 'adapter',
+        outcome: 'failed',
+        extra: extra || {}
+    });
+}
+
+function logValidationAdapterError(extra) {
+    var action = lastValidationType === 'load' ? 'USP 2 adapter error' : 'USP 1 adapter error';
+    logAuditEvent(action, 'Adapter check failed for ' + validationAdapterLabel() + ' validation', {
+        eventType: 'lifecycle',
+        entityType: 'hardware',
+        entityName: 'adapter',
+        outcome: 'failed',
+        extra: extra || {}
+    });
+}
+
+function auditTestRunStarted(rec) {
+    var recipe = rec || lastTestRunRecipe;
+    if (!recipe) return;
+    var isQuick = String(recipe.productName || '').trim() === 'Quick Test';
+    var steps = (recipe.steps && recipe.steps.length) || recipe.stepCount || testRunTotalSteps || 0;
+    var action = isQuick ? 'Quick test started' : 'Test started';
+    var details = (recipe.productName || 'Test') + ', ' + (recipe.usp || recipe.uspMode || 'USP') + ', ' + steps + ' step(s)';
+    logAuditEvent(action, details, {
+        eventType: 'lifecycle',
+        entityType: 'test',
+        entityName: recipe.productName || '',
+        extra: {
+            productName: recipe.productName,
+            batchNumber: recipe.batchNumber,
+            usp: recipe.usp || recipe.uspMode,
+            stepCount: steps
+        }
+    });
+}
+
+function auditTestRunFinished(reportId) {
+    var completed = (testRunStepResults && testRunStepResults.length) ? testRunStepResults.length : 0;
+    logAuditEvent('Test finished', 'Test run completed, ' + completed + ' step(s) recorded', {
+        eventType: 'lifecycle',
+        entityType: 'report',
+        entityId: reportId || '',
+        extra: { reportId: reportId, completedSteps: completed }
+    });
+}
+
+function auditTestRunAborted(reason) {
+    var completed = (testRunStepResults && testRunStepResults.length) ? testRunStepResults.length : 0;
+    logAuditEvent('Test aborted', reason || ('User aborted test, ' + completed + ' step(s) recorded'), {
+        eventType: 'lifecycle',
+        entityType: 'test',
+        extra: { completedSteps: completed }
+    });
+}
+
+function auditTestRunAutoAborted(reason, stepIndex) {
+    logAuditEvent('Test auto-aborted', reason || 'Hardware stopped the test run', {
+        eventType: 'lifecycle',
+        entityType: 'test',
+        outcome: 'failed',
+        extra: { stepIndex: stepIndex != null ? stepIndex : testRunCurrentStepIndex, reason: reason }
+    });
+}
+
 async function fetchDateTimeFromBackend() {
     try {
         var r = await fetch((API_BASE || '') + '/api/get_datetime');
@@ -1255,6 +1418,7 @@ function updateDateTime() {
 }
 
 function showLoginScreen() {
+    _auditActivePage = null;
     var login = document.getElementById('page-login');
     var app = document.querySelector('.app-container');
     if (app) app.style.display = 'none';
@@ -1490,6 +1654,7 @@ function goToPage(pageName) {
         }, 50);
     }
     if (pageName === 'disable-recipes') {
+        logAuditEvent('Opened disabled recipes', 'Disabled recipes list opened', { eventType: 'navigation' });
         setTimeout(function () {
             if (typeof loadDisableRecipes === 'function') loadDisableRecipes();
         }, 50);
@@ -1537,12 +1702,13 @@ function goToPage(pageName) {
             if (typeof _refreshAddMemberPermissionsPanelVisibility === 'function') {
                 _refreshAddMemberPermissionsPanelVisibility();
             }
-            var page = document.getElementById('page-add-member');
-            if (page) page.scrollTop = 0;
+            if (typeof ensureAddMemberPageScroll === 'function') {
+                ensureAddMemberPageScroll();
+            }
         }, 50);
     }
-    if (pageName === 'validate' || pageName === 'validate-type-select' ||
-            pageName === 'usp1-detail' || pageName === 'usp2-detail' || pageName === 'validation-run') {
+    if (pageName === 'validate-type-select' || pageName === 'usp1-detail' ||
+            pageName === 'usp2-detail') {
         setTimeout(function () {
             if (typeof ensureValidationPageScroll === 'function') {
                 ensureValidationPageScroll(pageName);
@@ -1558,6 +1724,7 @@ function goToPage(pageName) {
     setTimeout(function () {
         if (typeof refreshShellAccessVisibility === 'function') refreshShellAccessVisibility();
     }, 0);
+    auditNavPageChange(pageName);
 }
 
 function goBack() {
@@ -1931,7 +2098,7 @@ function logout() {
         abortPendingReportOnLogout().then(function () {
             return stopActiveRunForLogout();
         }).finally(function () {
-            apiRequest(API_BASE + '/api/data/auth/logout', { method: 'POST' }).catch(function () {});
+            apiRequest(API_BASE + '/api/data/auth/logout', { method: 'POST', body: { reason: 'user' } }).catch(function () {});
             window.currentUser = null;
             try { localStorage.removeItem('currentUser'); } catch (e) {}
             if (typeof currentUser !== 'undefined') currentUser = null;
@@ -2067,7 +2234,7 @@ function performAutoLogoutDueToInactivity() {
     var pendingGate = window._reportApprovalGate && window._reportApprovalGate.reportId != null &&
         !(typeof isFactorySessionUser === 'function' && isFactorySessionUser());
     var finish = function () {
-        apiRequest(API_BASE + '/api/data/auth/logout', { method: 'POST' }).catch(function () {});
+        apiRequest(API_BASE + '/api/data/auth/logout', { method: 'POST', body: { reason: 'inactivity' } }).catch(function () {});
         window.currentUser = null;
         try { localStorage.removeItem('currentUser'); } catch (e) {}
         if (typeof currentUser !== 'undefined') currentUser = null;
@@ -2558,10 +2725,20 @@ function _populateAuditFilterDropdowns(userEl, actionEl, fullList) {
         if (a && actions.indexOf(a) === -1) actions.push(a);
     });
     var coreActions = [
-        'Login', 'Logout', 'User logged in', 'Test performed', 'Quick test performed',
+        'Login', 'Logout', 'Logout (inactivity timeout)', 'User logged in',
+        'Entered screen', 'Exited screen',
+        'Opened Quick Test', 'Opened Load Recipe', 'Opened Manage Recipe', 'Loaded recipe',
+        'Opened disabled recipes',
+        'Test started', 'Quick test started', 'Test finished', 'Test aborted', 'Test auto-aborted',
+        'Test performed', 'Quick test performed',
+        'Entered USP 1 validation', 'Entered USP 2 validation',
+        'Validation started', 'Validation finished', 'Validation aborted',
+        'USP 1 adapter error', 'USP 2 adapter error', 'Adapter check error',
         'Validation performed', 'Report saved', 'Report generated', 'Report approved',
+        'Report aborted', 'Report aborted (power loss)', 'Report PDF generated',
         'Recipe created', 'Recipe edited', 'Recipe approved', 'Power interruption',
-        'Approval verification', 'Disable Recipe', 'Recipe disabled'
+        'Approval verification', 'Disable Recipe', 'Recipe disabled',
+        'Added new user', 'Password changed', 'User create', 'User update'
     ];
     coreActions.forEach(function (a) {
         if (actions.indexOf(a) === -1) actions.push(a);
@@ -2974,10 +3151,15 @@ function _gatherPdfHtmlByIdSequentialWithProgress(ids, titleText) {
     return Promise.resolve().then(step);
 }
 
+/** Generate/overwrite report PDF from on-screen preview (approved or aborted reports only). */
 function _saveReportPdfSilent(reportId) {
     var id = parseInt(reportId, 10);
     if (isNaN(id) || id < 1) return Promise.resolve(false);
-    return buildReportPreviewHtmlById(id).then(function (html) {
+    return apiRequest(API_BASE + '/api/reports/' + id + '/preview').then(function (data) {
+        var st = String((data && data.preview && data.preview.reportApprovalStatus) || '').trim().toLowerCase();
+        if (st !== 'approved' && st !== 'aborted') return false;
+        return buildReportPreviewHtmlById(id);
+    }).then(function (html) {
         if (!html) return false;
         return apiRequest(API_BASE + '/api/reports/' + id + '/pdf', {
             method: 'POST',
@@ -2987,6 +3169,7 @@ function _saveReportPdfSilent(reportId) {
 }
 
 function startQuickTest() {
+    logAuditEvent('Opened Quick Test', 'Quick Test screen opened', { eventType: 'navigation' });
     goToPage('quick-test');
 }
 
@@ -3294,11 +3477,13 @@ function onCreateRecipeContinueClick() {
 
 function startRecipeTest() {
     recipeListMode = 'load';
+    logAuditEvent('Opened Load Recipe', 'Load Recipe list opened', { eventType: 'navigation' });
     goToPage('manage-recipes');
 }
 
 function manageRecipes() {
     recipeListMode = 'manage';
+    logAuditEvent('Opened Manage Recipe', 'Manage Recipe list opened', { eventType: 'navigation' });
     goToPage('manage-recipes');
 }
 
@@ -3368,12 +3553,32 @@ function setValRunEl(id, value) {
     if (el) el.textContent = value;
 }
 
+function _setValResultVisible(visible) {
+    var el = document.getElementById('val-result-card');
+    if (!el) return;
+    if (visible) el.removeAttribute('hidden');
+    else el.setAttribute('hidden', '');
+}
+
+function _setValRunStatusStyle(kind) {
+    var el = document.getElementById('val-run-status');
+    if (!el) return;
+    el.classList.remove('is-ready', 'is-running');
+    if (kind === 'ready') el.classList.add('is-ready');
+    else if (kind === 'running') el.classList.add('is-running');
+}
+
+function _setValRunResultBadge(isPass) {
+    var resultEl = document.getElementById('val-run-result');
+    if (!resultEl) return;
+    resultEl.textContent = isPass ? 'Pass' : 'Fail';
+    resultEl.className = 'val-run-result-badge ' + (isPass ? 'is-pass' : 'is-fail');
+}
+
 var VALIDATION_SCROLL_SURFACE = {
-    'validate': '.validation-main-container',
     'validate-type-select': '.validation-type-page',
     'usp1-detail': '.validation-type-page',
-    'usp2-detail': '.validation-type-page',
-    'validation-run': '.validation-test-page'
+    'usp2-detail': '.validation-type-page'
 };
 
 function getValidationScrollSurface(pageName) {
@@ -3416,8 +3621,14 @@ function ensureValidationPageScroll(pageName) {
     surface.scrollTop = 0;
 }
 
+function ensureAddMemberPageScroll() {
+    var page = document.getElementById('page-add-member');
+    if (!page) return;
+    bindTouchPanScroll(page);
+    page.scrollTop = 0;
+}
+
 function initValidationRunPage() {
-    ensureValidationPageScroll('validation-run');
     var type = lastValidationType || 'distance';
     var usp = type === 'load' ? 'USP 2' : 'USP 1';
     var tapsMin = type === 'load' ? 250 : 300;
@@ -3434,9 +3645,8 @@ function initValidationRunPage() {
     setValRunEl('val-run-tap-count', '0');
     setValRunEl('val-run-status', 'Ready');
     setValRunEl('val-run-status-sub', 'Press Start to begin');
-
-    var resultCard = document.getElementById('val-result-card');
-    if (resultCard) resultCard.style.display = 'none';
+    _setValRunStatusStyle('ready');
+    _setValResultVisible(false);
 
     validationRunCurrentCount = 0;
     validationRunState = 'idle';
@@ -3450,8 +3660,9 @@ function initValidationRunPage() {
     var btn = document.getElementById('btn-validation-start-abort');
     var label = document.getElementById('btn-validation-label');
     if (btn) {
-        btn.className = 'btn btn-primary validation-action-btn';
-        btn.innerHTML = '<span class="ctrl-icon">&#9654;</span><span id="btn-validation-label">Start Validation</span>';
+        btn.className = 'btn btn-primary val-run-start-btn';
+        btn.disabled = false;
+        btn.innerHTML = '<span class="ctrl-icon" aria-hidden="true">&#9654;</span><span id="btn-validation-label">Start Validation</span>';
     }
     if (label) label.textContent = 'Start Validation';
 }
@@ -4323,11 +4534,17 @@ function populateReportPreview(preview) {
     var statBody = document.getElementById('report-statistics-body');
     if (statBody) {
         var stats = preview.statistics || td.statistics || {};
-        if (stats && Object.keys(stats).length) {
+        if (String(td.status || '').trim().toLowerCase() === 'aborted') {
+            statBody.innerHTML = '<tr><td colspan="4">N/A</td></tr>';
+        } else if (stats && Object.keys(stats).length) {
             var rows = [];
             for (var k in stats) {
                 if (stats.hasOwnProperty(k) && typeof stats[k] === 'object' && stats[k] !== null) {
                     var v = stats[k];
+                    if (v.value != null) {
+                        rows.push('<tr><th>' + k + '</th><td colspan="3">' + v.value + '</td></tr>');
+                        continue;
+                    }
                     var mean = v.mean != null ? v.mean : v.Mean;
                     var min = v.min != null ? v.min : v.Min;
                     var max = v.max != null ? v.max : v.Max;
@@ -4488,12 +4705,13 @@ function submitReportApprove() {
             showAppModal('Report approved.', 'Report');
             openReportPreview(id, { setGate: true });
             setTimeout(function () {
+                _saveReportPdfSilent(id);
                 var row = document.getElementById('report-approved-by');
                 if (row) {
                     try { row.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { row.scrollIntoView(true); }
                 }
                 scrollReportPreviewActionsIntoView();
-            }, 400);
+            }, 600);
         }
     }).catch(function (err) {
         setReportApproveVerifyError('Approval failed: ' + (err && err.message ? err.message : 'Error'));
@@ -4522,12 +4740,13 @@ function submitReportApproveBiometric() {
             showAppModal('Report approved.', 'Report');
             openReportPreview(id, { setGate: true });
             setTimeout(function () {
+                _saveReportPdfSilent(id);
                 var row = document.getElementById('report-approved-by');
                 if (row) {
                     try { row.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { row.scrollIntoView(true); }
                 }
                 scrollReportPreviewActionsIntoView();
-            }, 400);
+            }, 600);
         }
     }).catch(function (err) {
         setReportApproveVerifyError('Approval failed: ' + (err && err.message ? err.message : 'Error'));
@@ -4711,7 +4930,8 @@ function verifyValidationAdapter() {
     });
 }
 
-function showValidationAdapterCheckModal() {
+function showValidationAdapterCheckModal(extra) {
+    logValidationAdapterError(extra);
     showAppModal(
         'Please check the adapter. Fit the correct ' + validationAdapterLabel() + ' adapter on the instrument, then try again.',
         'Validation'
@@ -4849,6 +5069,11 @@ function pauseTestRunForAdapterInterrupt() {
 
     if (testRunAdapterWaitActive) return;
 
+    if (!_testRunAdapterInterruptAudited) {
+        _testRunAdapterInterruptAudited = true;
+        auditTestRunAutoAborted('Adapter removed during test run', testRunCurrentStepIndex);
+    }
+
     testRunAdapterWaitActive = true;
     _adapterPollOkStreak = 0;
     testRunAdapterPollTimerId = setInterval(function () {
@@ -4884,6 +5109,7 @@ function resumeTestRunAfterAdapter() {
     }).catch(function (err) {
         if (err && err.message === 'adapter_interrupt') return;
         var msg = err && err.message ? String(err.message) : 'Hardware error';
+        auditTestRunAutoAborted(msg, testRunCurrentStepIndex);
         showAppModal('Test run failed: ' + msg, 'Test Run');
         hardwareTapStopSilently();
         _closeTestRunHardwareEs();
@@ -5118,6 +5344,7 @@ function runTestRunHardwareOrchestration() {
         _closeTestRunHardwareEs();
         if (err && err.message === 'adapter') return;
         var msg = err && err.message ? String(err.message) : 'Hardware error';
+        auditTestRunAutoAborted(msg, testRunCurrentStepIndex);
         showAppModal('Test run failed: ' + msg, 'Test Run');
         _testRunRevertUiToStartAfterHardwareFail();
     });
@@ -5137,6 +5364,47 @@ function getMaxSampleVolumeMl(recipe) {
     return null;
 }
 
+/** Allow digits and a single decimal point while the operator is typing (e.g. "12."). */
+function sanitizeDecimalInputString(raw) {
+    var s = String(raw == null ? '' : raw).replace(/,/g, '.');
+    var cleaned = '';
+    var seenDot = false;
+    for (var i = 0; i < s.length; i++) {
+        var c = s[i];
+        if (c >= '0' && c <= '9') {
+            cleaned += c;
+        } else if (c === '.' && !seenDot) {
+            cleaned += '.';
+            seenDot = true;
+        }
+    }
+    return cleaned;
+}
+
+function attachDecimalInputHandlers(input) {
+    if (!input || input._decimalInputBound) return;
+    input._decimalInputBound = true;
+    input.addEventListener('input', function () {
+        var el = input;
+        var before = el.value;
+        var after = sanitizeDecimalInputString(before);
+        if (after === before) return;
+        var pos = (typeof el.selectionStart === 'number') ? el.selectionStart : after.length;
+        el.value = after;
+        var nextPos = Math.min(pos, after.length);
+        try {
+            el.setSelectionRange(nextPos, nextPos);
+        } catch (e) {}
+    });
+}
+
+function bindTestRunDecimalInputs() {
+    ['test-run-volume-input', 'test-run-initial-weight-input'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) attachDecimalInputHandlers(el);
+    });
+}
+
 function _formatDensity(n) {
     if (n == null || isNaN(n)) return '--';
     return String(Math.round(n * 1000) / 1000);
@@ -5154,6 +5422,66 @@ function computeTapDensityGPerMl(weightG, finalTappedVolMl) {
     var v = parseFloat(finalTappedVolMl);
     if (isNaN(w) || isNaN(v) || v <= 0) return null;
     return w / v;
+}
+
+function _parseReportDensityNumber(val) {
+    if (val == null || val === '' || val === '--') return null;
+    var n = parseFloat(String(val).replace(/,/g, ''));
+    return isNaN(n) ? null : n;
+}
+
+function _aggMeanMinMax(values) {
+    if (!values || !values.length) return null;
+    var sum = 0;
+    var min = values[0];
+    var max = values[0];
+    for (var i = 0; i < values.length; i++) {
+        sum += values[i];
+        if (values[i] < min) min = values[i];
+        if (values[i] > max) max = values[i];
+    }
+    return {
+        mean: Math.round((sum / values.length) * 1000) / 1000,
+        min: Math.round(min * 1000) / 1000,
+        max: Math.round(max * 1000) / 1000
+    };
+}
+
+/** Option A statistics for completed test reports; null if aborted or no step data. */
+function computeTestReportStatistics(testData) {
+    if (!testData || typeof testData !== 'object') return null;
+    if (String(testData.status || '').trim().toLowerCase() === 'aborted') return null;
+    var results = testData.stepResults || [];
+    if (!results.length) return null;
+
+    var bulkVals = [];
+    var tapVals = [];
+    for (var i = 0; i < results.length; i++) {
+        var r = results[i] || {};
+        var b = _parseReportDensityNumber(r.bulkDensity);
+        var t = _parseReportDensityNumber(r.tapDensity);
+        if (b != null) bulkVals.push(b);
+        if (t != null) tapVals.push(t);
+    }
+
+    var stats = {};
+    var bulkAgg = _aggMeanMinMax(bulkVals);
+    var tapAgg = _aggMeanMinMax(tapVals);
+    if (bulkAgg) stats['Bulk density (g/mL)'] = bulkAgg;
+    if (tapAgg) stats['Tap density (g/mL)'] = tapAgg;
+
+    var last = results[results.length - 1] || {};
+    var bulkF = _parseReportDensityNumber(last.bulkDensity);
+    var tapF = _parseReportDensityNumber(last.tapDensity);
+    if (bulkF == null && bulkVals.length) bulkF = bulkVals[0];
+    if (tapF == null && tapVals.length) tapF = tapVals[tapVals.length - 1];
+    if (bulkF != null && tapF != null && tapF > 0 && bulkF > 0) {
+        stats['Compressibility index (%)'] = {
+            value: Math.round(((tapF - bulkF) / tapF) * 10000) / 100
+        };
+        stats['Hausner ratio'] = { value: Math.round((tapF / bulkF) * 1000) / 1000 };
+    }
+    return Object.keys(stats).length ? stats : null;
 }
 
 function isTestRunInitialVolumeEntry() {
@@ -5215,6 +5543,7 @@ function openTestRunInitialWeightModal() {
         }
 
         input.value = '';
+        attachDecimalInputHandlers(input);
         overlay.style.display = 'flex';
         setTimeout(function () {
             try {
@@ -5262,7 +5591,7 @@ function confirmTestRunInitialWeight() {
     if (!_testRunInitialWeightResolve) return;
     var r = _testRunInitialWeightResolve;
     _testRunInitialWeightResolve = null;
-    r(String(num));
+    r(val);
 }
 
 function cancelTestRunInitialWeight() {
@@ -5325,13 +5654,7 @@ function openTestRunVolumeModal(stepIndex) {
         titleEl.textContent = 'VOLUME IN ML - STEP ' + (stepIndex + 1);
         msgEl.textContent = message;
         input.value = '';
-        if (maxMl != null) {
-            input.setAttribute('max', String(maxMl));
-            input.setAttribute('min', '0');
-        } else {
-            input.removeAttribute('max');
-            input.setAttribute('min', '0');
-        }
+        attachDecimalInputHandlers(input);
         overlay.style.display = 'flex';
 
         setTimeout(function () {
@@ -5415,6 +5738,19 @@ function cancelTestRunVolume() {
 function startTestRun(recipe) {
     if (!recipe) return;
     lastTestRunRecipe = recipe;
+    var recipeId = recipe.id || recipe.recipeId || '';
+    logAuditEvent('Loaded recipe', (recipe.productName || 'Recipe') + ', batch ' + (recipe.batchNumber || '--'), {
+        eventType: 'lifecycle',
+        entityType: 'recipe',
+        entityName: recipe.productName || '',
+        entityId: recipeId,
+        extra: {
+            productName: recipe.productName,
+            batchNumber: recipe.batchNumber,
+            recipeId: recipeId,
+            usp: recipe.usp || recipe.uspMode
+        }
+    });
     resetTestRunPageForNewLoad();
 
     function setText(id, value) {
@@ -5450,6 +5786,14 @@ function startTestRun(recipe) {
 function startQuickTestRun() {
     var productName = (document.getElementById('quick-product-name') && document.getElementById('quick-product-name').value) || '';
     var batchNumber = (document.getElementById('quick-batch-number') && document.getElementById('quick-batch-number').value) || '';
+    if (!String(productName).trim()) {
+        showAppModal('Product name is required before starting a quick test.', 'Quick Test');
+        return;
+    }
+    if (!String(batchNumber).trim()) {
+        showAppModal('Batch number is required before starting a quick test.', 'Quick Test');
+        return;
+    }
     var qmode = getQuickUspMode();
     var speed = 300;
     var dropHeight = 14;
@@ -5512,8 +5856,8 @@ function startQuickTestRun() {
         steps.push({ speed: speed, dropHeight: dropHeight, tapCount: taps[s] });
     }
     var recipe = {
-        productName: productName || 'Quick Test',
-        batchNumber: batchNumber || '--',
+        productName: String(productName).trim(),
+        batchNumber: String(batchNumber).trim(),
         speed: speed,
         dropHeight: dropHeight,
         stepCount: stepCount,
@@ -5590,6 +5934,7 @@ function resetTestRunPageForNewLoad() {
     _pendingStepVolumeDeltaMl = null;
     _testRunStepResumeInFlight = false;
     _adapterPollOkStreak = 0;
+    _testRunAdapterInterruptAudited = false;
 
     if (_testRunVolumeResolve) {
         var rv = _testRunVolumeResolve;
@@ -5764,6 +6109,11 @@ function buildTestRunReportPayload() {
         createdAt: startIso,
         completedAt: now
     };
+    var stats = computeTestReportStatistics(testData);
+    if (stats) {
+        testData.statistics = stats;
+    }
+
     var payload = {
         name: 'Test Report - ' + (recipe.productName || 'Tap Density Apparatus Test'),
         type: 'test',
@@ -5772,6 +6122,7 @@ function buildTestRunReportPayload() {
         createdAt: startIso,
         completedAt: now
     };
+    if (stats) payload.statistics = stats;
     return stampOperatorOnTestReportPayload(payload);
 }
 
@@ -5779,6 +6130,7 @@ var _abortSaveInFlight = false;
 function abortTestRunAndSave() {
     if (_abortSaveInFlight) return Promise.resolve();
     _abortSaveInFlight = true;
+    auditTestRunAborted('User aborted test run');
 
     // Stop any ongoing tick immediately
     if (testRunIntervalId != null) {
@@ -5873,6 +6225,7 @@ function saveTestRunReportAndGoToReportPreview() {
             }
             testRunButtonState = 'start';
             var reportId = (result && result.id) ? result.id : null;
+            auditTestRunFinished(reportId);
             finishTestRunReportSaved(reportId);
         })
         .catch(function (err) {
@@ -5913,6 +6266,7 @@ function saveTestRunReportAndGoToReports() {
             }
             testRunButtonState = 'start';
             var reportId = (result && result.id) ? result.id : null;
+            auditTestRunFinished(reportId);
             finishTestRunReportSaved(reportId);
         })
         .catch(function (err) {
@@ -5979,10 +6333,17 @@ function toggleTestRunState() {
 
             return verifyTestRunAdapter().then(function (ok) {
                 if (!ok) {
-                    showAppModal('Please fit the correct USP adapter for this recipe and try again.', 'Test Run');
-                    throw new Error('adapter');
+                    return apiRequest(API_BASE + '/api/hardware/adapter/check', { method: 'POST' }).then(function (checkRes) {
+                        logTestAdapterError(lastTestRunRecipe, {
+                            expected: recipeExpectedAdapterKind(lastTestRunRecipe),
+                            detected: detectedAdapterKindFromCheckResult(checkRes)
+                        });
+                        showAppModal('Please fit the correct USP adapter for this recipe and try again.', 'Test Run');
+                        throw new Error('adapter');
+                    });
                 }
             }).then(function () {
+                auditTestRunStarted(lastTestRunRecipe);
                 testRunStartTime = new Date().toISOString();
                 testRunButtonState = 'abort';
                 if (btn) {
@@ -6675,8 +7036,9 @@ function _resetValidationRunActionButtonToStart() {
     var btn = document.getElementById('btn-validation-start-abort');
     var label = document.getElementById('btn-validation-label');
     if (btn) {
-        btn.className = 'btn btn-primary validation-action-btn';
-        btn.innerHTML = '<span class="ctrl-icon">&#9654;</span><span id="btn-validation-label">Start Validation</span>';
+        btn.className = 'btn btn-primary val-run-start-btn';
+        btn.disabled = false;
+        btn.innerHTML = '<span class="ctrl-icon" aria-hidden="true">&#9654;</span><span id="btn-validation-label">Start Validation</span>';
     }
     if (label) label.textContent = 'Start Validation';
 }
@@ -6712,7 +7074,11 @@ function validationRunHardwareMessage(ev) {
             _resetValidationRunActionButtonToStart();
             updateValidationRunTimerUi(VALIDATION_RUN_DURATION_SEC);
             if (kind === 'adapter_error' || _validationErrorIsAdapterRelated(lineStr) || _validationErrorIsAdapterRelated(norm)) {
-                showValidationAdapterCheckModal();
+                showValidationAdapterCheckModal({
+                    source: 'sse',
+                    line: lineStr,
+                    normalized: norm
+                });
             } else {
                 showAppModal(
                     'Hardware error during validation: ' + (lineStr || norm || 'Unknown'),
@@ -6821,7 +7187,6 @@ function saveCombinedValidationReport() {
             var reportId = result && result.id;
             currentReportFilter = 'validation';
             if (reportId) {
-                _saveReportPdfSilent(reportId);
                 if (typeof openReportPreview === 'function') openReportPreview(reportId, { setGate: true });
                 else goToPage('reports');
             } else {
@@ -6892,12 +7257,10 @@ function completeValidationRunAfterDuration() {
     _closeValidationRunHardwareEs();
     setValRunEl('val-run-status', 'Completed');
     setValRunEl('val-run-status-sub', 'Validation run finished');
-    var resultCard = document.getElementById('val-result-card');
-    var resultEl = document.getElementById('val-run-result');
     var detailEl = document.getElementById('val-run-result-detail');
     var isPass = validationRunCurrentCount >= validationRunMin && validationRunCurrentCount <= validationRunMax;
-    if (resultCard) resultCard.style.display = '';
-    if (resultEl) resultEl.textContent = isPass ? 'Pass' : 'Fail';
+    _setValResultVisible(true);
+    _setValRunResultBadge(isPass);
     if (detailEl) {
         detailEl.textContent =
             'After ' +
@@ -6911,6 +7274,17 @@ function completeValidationRunAfterDuration() {
             '.';
     }
     _resetValidationRunActionButtonToStart();
+
+    logAuditEvent('Validation finished', (lastValidationType === 'load' ? 'USP 2' : 'USP 1') + ' validation: ' + (isPass ? 'Pass' : 'Fail'), {
+        eventType: 'lifecycle',
+        entityType: 'validation',
+        extra: {
+            validationType: lastValidationType,
+            status: isPass ? 'Pass' : 'Fail',
+            actualTapCount: validationRunCurrentCount,
+            expectedTapCount: validationRunTarget
+        }
+    });
 
     if (lastValidationType === 'distance' || lastValidationType === 'load') {
         validationSessionResults[lastValidationType] = buildValidationRunSnapshot(isPass);
@@ -6956,8 +7330,9 @@ function toggleValidationRunState() {
             _closeValidationRunHardwareEs();
             setValRunEl('val-run-status', 'Ready');
             setValRunEl('val-run-status-sub', 'Press Start to begin');
+            _setValRunStatusStyle('ready');
             if (err && err.message === 'adapter_check') {
-                showValidationAdapterCheckModal();
+                showValidationAdapterCheckModal({ source: 'start' });
             } else {
                 showAppModal('Failed to start validation: ' + (err && err.message ? err.message : 'Unknown error'), 'Validation');
             }
@@ -6981,17 +7356,23 @@ function toggleValidationRunState() {
                     return Promise.reject(new Error(errText));
                 }
                 validationRunState = 'running';
+                logAuditEvent('Validation started', validationAdapterLabel() + ' validation run started', {
+                    eventType: 'lifecycle',
+                    entityType: 'validation',
+                    extra: { validationType: lastValidationType }
+                });
                 validationRunCurrentCount = 0;
                 setValRunEl('val-run-tap-count', '0');
                 validationRunSecondsRemaining = VALIDATION_RUN_DURATION_SEC;
                 updateValidationRunTimerUi(validationRunSecondsRemaining);
                 setValRunEl('val-run-status', 'Running');
                 setValRunEl('val-run-status-sub', String(VALIDATION_RUN_DURATION_SEC) + 's run — tap count from device');
-                var resultCard = document.getElementById('val-result-card');
-                if (resultCard) resultCard.style.display = 'none';
+                _setValRunStatusStyle('running');
+                _setValResultVisible(false);
                 if (btn) {
-                    btn.className = 'btn btn-primary validation-action-btn danger';
-                    btn.innerHTML = '<span class="ctrl-icon">&#9726;</span><span id="btn-validation-label">Abort</span>';
+                    btn.className = 'btn btn-primary val-run-start-btn is-abort';
+                    btn.disabled = false;
+                    btn.innerHTML = '<span class="ctrl-icon" aria-hidden="true">&#9726;</span><span id="btn-validation-label">Abort</span>';
                 }
                 if (label) label.textContent = 'Abort';
                 validationRunIntervalId = setInterval(validationRunTimerTick, 1000);
@@ -7029,7 +7410,17 @@ function toggleValidationRunState() {
             updateValidationRunTimerUi(VALIDATION_RUN_DURATION_SEC);
             setValRunEl('val-run-status', 'Aborted');
             setValRunEl('val-run-status-sub', 'Tap count: ' + validationRunCurrentCount);
+            _setValRunStatusStyle('ready');
+            _setValResultVisible(false);
             _resetValidationRunActionButtonToStart();
+            logAuditEvent('Validation aborted', validationAdapterLabel() + ' validation aborted by user', {
+                eventType: 'lifecycle',
+                entityType: 'validation',
+                extra: {
+                    validationType: lastValidationType,
+                    actualTapCount: validationRunCurrentCount
+                }
+            });
             if (btn) btn.disabled = false;
             validationRunBackendPending = false;
         });
@@ -7055,8 +7446,13 @@ function selectRole(roleName) {
         });
     }
     var permPanel = document.getElementById('add-member-permissions-panel');
-    if (permPanel && !permPanel.classList.contains('is-hidden') && typeof renderAddMemberPermissionCards === 'function') {
+    if (typeof _refreshAddMemberPermissionsPanelVisibility === 'function') {
+        _refreshAddMemberPermissionsPanelVisibility();
+    } else if (permPanel && !permPanel.classList.contains('is-hidden') && typeof renderAddMemberPermissionCards === 'function') {
         renderAddMemberPermissionCards();
+    }
+    if (typeof ensureAddMemberPageScroll === 'function') {
+        ensureAddMemberPageScroll();
     }
 }
 
@@ -7264,6 +7660,9 @@ function _refreshAddMemberPermissionsPanelVisibility() {
     panel.classList.toggle('is-hidden', !show);
     panel.setAttribute('aria-hidden', show ? 'false' : 'true');
     if (show) renderAddMemberPermissionCards();
+    if (show && typeof ensureAddMemberPageScroll === 'function') {
+        setTimeout(ensureAddMemberPageScroll, 0);
+    }
 }
 
 function renderAddMemberPermissionCards() {
@@ -7337,8 +7736,7 @@ function openAddMember() {
     _refreshAddMemberPermissionsPanelVisibility();
     goToPage('add-member');
     setTimeout(function () {
-        var page = document.getElementById('page-add-member');
-        if (page) page.scrollTop = 0;
+        if (typeof ensureAddMemberPageScroll === 'function') ensureAddMemberPageScroll();
         var f = document.getElementById('add-fullname');
         if (f) f.focus();
     }, 60);
@@ -7827,6 +8225,7 @@ function attachKeyboardToInputs() {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
+    bindTestRunDecimalInputs();
     attachKeyboardToInputs();
     loadBiometricSetting();
     loadLoginFactorySettingsDisplay();

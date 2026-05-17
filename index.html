@@ -7,7 +7,7 @@
     <meta name="viewport"
         content="width=1024, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Tap Density Apparatus</title>
-    <link rel="stylesheet" href="styles.css?v=10">
+    <link rel="stylesheet" href="styles.css?v=17">
 </head>
 
 <body>
@@ -238,7 +238,7 @@
                                 </svg>
                             </div>
                             <h2>Load Recipe</h2>
-                            <p>Test with saved recipe and tolerance checks</p>
+                            <p>Run a tap density test using a saved recipe</p>
                         </div>
 
                         <div class="test-card" data-rbac-nav="recipe-list" onclick="manageRecipes()" style="cursor: pointer;">
@@ -578,7 +578,8 @@
                     <div class="role-modal">
                         <h3 id="test-run-volume-title">VOLUME IN ML - STEP</h3>
                         <p id="test-run-volume-message">Enter volume in ml for this step:</p>
-                        <input type="number" id="test-run-volume-input" class="input-field" placeholder="Volume in ml"
+                        <input type="text" id="test-run-volume-input" class="input-field" placeholder="Volume in ml"
+                            inputmode="decimal" data-decimal-input="true" autocomplete="off"
                             style="width: 180px; margin: 10px auto 0; text-align: center;"
                             onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                         <div class="role-modal-buttons" style="margin-top: 14px;">
@@ -592,7 +593,8 @@
                     <div class="role-modal">
                         <h3>Initial Weight (gm)</h3>
                         <p>Enter initial weight (gm) before starting the test:</p>
-                        <input type="number" id="test-run-initial-weight-input" class="input-field" placeholder="Initial weight in gm"
+                        <input type="text" id="test-run-initial-weight-input" class="input-field" placeholder="Initial weight in gm"
+                            inputmode="decimal" data-decimal-input="true" autocomplete="off"
                             style="width: 220px; margin: 10px auto 0; text-align: center;"
                             onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                         <div class="role-modal-buttons" style="margin-top: 14px;">
@@ -1317,57 +1319,62 @@
 
                 <!-- Validation Test Run Page -->
                 <div class="page" id="page-validation-run">
-                    <div class="validation-test-page validation-run-page">
-                        <h2 class="section-title" id="validation-run-title"></h2>
-                        <p class="section-subtitle" id="validation-run-subtitle"></p>
-                        <div class="validation-run-info-row">
-                            <span class="info-label">USP:</span>
-                            <span class="info-value" id="val-run-usp">--</span>
-                            <span class="info-separator">|</span>
-                            <span class="info-label">Taps/Min:</span>
-                            <span class="info-value" id="val-run-taps-min">--</span>
-                            <span class="info-separator">|</span>
-                            <span class="info-label">Drop Height:</span>
-                            <span class="info-value" id="val-run-height">--</span>
-                            <span class="info-value"> mm</span>
+                    <div class="validation-run-page">
+                        <div class="val-run-params" aria-label="Validation parameters">
+                            <div class="val-run-param">
+                                <span class="val-run-param-label">USP</span>
+                                <span class="val-run-param-value" id="val-run-usp">--</span>
+                            </div>
+                            <span class="val-run-param-dot" aria-hidden="true"></span>
+                            <div class="val-run-param">
+                                <span class="val-run-param-label">Taps / min</span>
+                                <span class="val-run-param-value" id="val-run-taps-min">--</span>
+                            </div>
+                            <span class="val-run-param-dot" aria-hidden="true"></span>
+                            <div class="val-run-param">
+                                <span class="val-run-param-label">Drop height</span>
+                                <span class="val-run-param-value"><span id="val-run-height">--</span> mm</span>
+                            </div>
                         </div>
-                        <div class="validation-run-controls">
-                            <button type="button" id="btn-validation-start-abort" class="btn btn-primary validation-action-btn" onclick="toggleValidationRunState()">
-                                <span class="ctrl-icon">&#9654;</span>
-                                <span id="btn-validation-label">Start Validation</span>
-                            </button>
-                        </div>
-                        <div class="validation-run-cards">
-                            <div class="validation-card validation-run-card">
-                                <div class="validation-card-label">Timer</div>
-                                <div style="display:flex;flex-direction:column;align-items:center;gap:8px;">
-                                    <div id="val-run-timer-dial" class="val-run-timer-dial" aria-label="Validation countdown dial">
+
+                        <div class="val-run-panel">
+                            <div class="val-run-panel-inner">
+                                <div class="val-run-timer-zone">
+                                    <div id="val-run-timer-dial" class="val-run-timer-dial" aria-label="Validation countdown">
                                         <div id="val-run-timer-fill" class="val-run-timer-fill"></div>
                                         <div id="val-run-timer-hand" class="val-run-timer-hand"></div>
                                         <div class="val-run-timer-center"></div>
+                                        <div class="val-run-timer-core">
+                                            <span id="val-run-timer-digital" class="val-run-timer-digital">60</span>
+                                            <span class="val-run-timer-caption">sec</span>
+                                        </div>
                                     </div>
-                                    <div class="validation-card-value" id="val-run-timer-digital">60</div>
-                                    <div class="validation-card-unit">seconds remaining</div>
+                                </div>
+                                <div class="val-run-stats">
+                                    <div class="val-run-stat">
+                                        <span class="val-run-stat-label">Tap count</span>
+                                        <span class="val-run-stat-value" id="val-run-tap-count">0</span>
+                                        <span class="val-run-stat-hint">Target <span id="val-run-expected">--</span></span>
+                                    </div>
+                                    <div class="val-run-stat">
+                                        <span class="val-run-stat-label">Status</span>
+                                        <span class="val-run-stat-value val-run-status-text" id="val-run-status">Ready</span>
+                                        <span class="val-run-stat-hint" id="val-run-status-sub">Press Start to begin</span>
+                                    </div>
+                                    <div class="val-run-result-strip" id="val-result-card" hidden>
+                                        <span class="val-run-stat-label">Result</span>
+                                        <span class="val-run-result-badge" id="val-run-result">--</span>
+                                        <p class="val-run-result-detail" id="val-run-result-detail">--</p>
+                                    </div>
                                 </div>
                             </div>
-                            <div class="validation-card validation-run-card">
-                                <div class="validation-card-label">Tap Count</div>
-                                <div class="validation-card-value" id="val-run-tap-count">0</div>
-                                <div class="validation-card-unit">expected: <span id="val-run-expected">--</span></div>
-                            </div>
-                            <div class="validation-card validation-run-card">
-                                <div class="validation-card-label">Status</div>
-                                <div class="validation-card-value" id="val-run-status">Ready</div>
-                                <div class="validation-card-unit" id="val-run-status-sub">Press Start to begin</div>
-                            </div>
-                            <div class="validation-card validation-run-card validation-result-card" id="val-result-card" style="display: none;">
-                                <div class="validation-card-label">Result</div>
-                                <div class="validation-card-value" id="val-run-result">--</div>
-                                <div class="validation-card-unit" id="val-run-result-detail">--</div>
-                            </div>
                         </div>
-                        <div class="validation-run-actions">
-                            <button type="button" class="btn btn-secondary" onclick="goBackFromValidationRun()">Back</button>
+
+                        <div class="val-run-cta">
+                            <button type="button" id="btn-validation-start-abort" class="btn btn-primary val-run-start-btn" onclick="toggleValidationRunState()">
+                                <span class="ctrl-icon" aria-hidden="true">&#9654;</span>
+                                <span id="btn-validation-label">Start Validation</span>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -1946,7 +1953,7 @@
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=2"></script>
     <script src="rbac.js?v=3"></script>
-    <script src="script.js?v=26"></script>
+    <script src="script.js?v=35"></script>
 </body>
 
 </html>
