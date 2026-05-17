@@ -7,7 +7,7 @@
     <meta name="viewport"
         content="width=1024, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Tap Density Apparatus</title>
-    <link rel="stylesheet" href="styles.css?v=8">
+    <link rel="stylesheet" href="styles.css?v=10">
 </head>
 
 <body>
@@ -96,6 +96,7 @@
             <p id="biometric-progress-hint" class="bio-enroll-hint"></p>
             <div id="biometric-progress-spinner" class="biometric-progress-spinner" aria-hidden="true" style="display: none;"></div>
             <div class="role-modal-buttons">
+                <button type="button" id="biometric-progress-retry-btn" class="btn-role-select btn-role-user" style="display: none;" onclick="retryBiometricProgress()">Try again</button>
                 <button type="button" class="btn-role-select btn-role-cancel" onclick="cancelBiometricProgress()">Cancel</button>
             </div>
         </div>
@@ -343,7 +344,7 @@
                                 </div>
                             </div>
                             </div>
-                            <div class="create-recipe-section">
+                            <div id="quick-recipe-steps-section" class="create-recipe-section" style="display: none;">
                                 <h3 class="create-recipe-section-title">Number of steps</h3>
                                 <div class="validation-type-grid create-recipe-grid create-recipe-grid--single">
                                     <button type="button" class="validation-type-settings-card create-recipe-card quick-step-select-card"
@@ -393,8 +394,9 @@
                             <label class="validation-type-settings-card create-recipe-card" data-quick-step="9"><input type="radio" name="quick-step-card" value="9"><h3>9</h3><p>steps</p></label>
                             <label class="validation-type-settings-card create-recipe-card" data-quick-step="10"><input type="radio" name="quick-step-card" value="10"><h3>10</h3><p>steps</p></label>
                         </div>
+                        <p id="quick-usp-taps-readonly" class="section-subtitle usp-taps-readonly" style="display: none;"></p>
                         <div class="form-group full-width" id="quick-steps-taps-wrap">
-                            <label>Taps per step</label>
+                            <label>Taps per step (Custom only)</label>
                             <div id="quick-step-tap-inputs" class="form-grid"></div>
                         </div>
                         <div class="quick-test-actions">
@@ -709,8 +711,9 @@
                             <label class="validation-type-settings-card create-recipe-card" data-quick-step="9"><input type="radio" name="create-step-card" value="9"><h3>9</h3><p>steps</p></label>
                             <label class="validation-type-settings-card create-recipe-card" data-quick-step="10"><input type="radio" name="create-step-card" value="10"><h3>10</h3><p>steps</p></label>
                         </div>
+                        <p id="create-usp-taps-readonly" class="section-subtitle usp-taps-readonly" style="display: none;"></p>
                         <div class="form-group full-width" id="create-steps-taps-wrap">
-                            <label>Taps per step</label>
+                            <label>Taps per step (Custom only)</label>
                             <div id="create-step-tap-inputs" class="form-grid"></div>
                         </div>
                         <div class="quick-test-actions">
@@ -920,7 +923,7 @@
                 <!-- Report Preview Page -->
                 <div class="page" id="page-report-preview">
                     <div class="reports-container" style="overflow-y: auto;">
-                        <div id="report-pending-lock-banner" class="report-pending-lock-banner" style="display: none;"><strong>Awaiting approval.</strong> A Reviewer or Admin must complete Pass/Fail and sign in the section below (User ID and password or fingerprint). You cannot leave, log out, or open Profile until the report is approved.</div>
+                        <div id="report-pending-lock-banner" class="report-pending-lock-banner" style="display: none;"><strong>Awaiting approval.</strong> A Reviewer or Admin must complete Pass/Fail and sign below. You cannot leave, log out, or open Profile until the report is approved.</div>
                         <div class="report-preview-container report-print-template" id="report-content">
                             <h1>RAISE LAB EQUIPMENT</h1>
                             <h2>TAP DENSITY - TEST REPORT</h2>
@@ -964,14 +967,18 @@
                                     <tr>
                                         <th>REPORT/TEST START</th>
                                         <td id="report-test-start"></td>
-                                        <th>GENERATED</th>
-                                        <td id="report-generated"></td>
+                                        <th>COMPLETED DATE</th>
+                                        <td id="report-completed-date"></td>
                                     </tr>
                                     <tr>
+                                        <th>COMPLETED TIME</th>
+                                        <td id="report-completed-time"></td>
                                         <th>TEST DURATION</th>
                                         <td id="report-test-duration"></td>
+                                    </tr>
+                                    <tr>
                                         <th>TEST STATUS</th>
-                                        <td id="report-test-status"></td>
+                                        <td id="report-test-status" colspan="3"></td>
                                     </tr>
                                 </table>
                                 <h3>TEST DATA</h3>
@@ -983,7 +990,6 @@
                                             <th>Δ VOL (ml)</th>
                                             <th>BULK DENSITY</th>
                                             <th>TAP DENSITY</th>
-                                            <th>RESULT</th>
                                         </tr>
                                     </thead>
                                     <tbody id="report-test-data-body"></tbody>
@@ -1020,7 +1026,6 @@
                             </table>
                             <div id="report-approve-panel" class="report-approve-panel" style="display: none;">
                                 <h3 id="report-approve-panel-title">Test report approval</h3>
-                                <p id="report-approve-panel-subtitle" class="section-subtitle report-approve-panel-subtitle">Reviewer or Admin: select Pass or Fail, add approval remarks, then sign with your User ID and password or fingerprint. You do not need to log in.</p>
                                 <p id="report-approve-operator-hint" class="report-approve-operator-hint" style="display: none;">You cannot approve your own report. Ask a Reviewer or Admin to sign below.</p>
                                 <div class="form-group report-approve-passfail-group">
                                     <span class="report-approve-passfail-label">Outcome</span>
@@ -1041,9 +1046,7 @@
                                         onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)"></textarea>
                                 </div>
                                 <h4 class="report-approve-signature-heading">Electronic signature (Reviewer / Admin)</h4>
-                                <p class="section-subtitle report-approve-signature-help">Approve using <strong>credentials</strong> or <strong>fingerprint</strong>. The reviewer does not need to log in; either method acts as electronic sign-off.</p>
                                 <div id="report-approve-credentials-block" class="report-approve-credentials-block">
-                                    <p class="report-approve-method-label">Option 1 — Credentials</p>
                                     <div class="report-approve-signature-fields form-grid">
                                         <div class="form-group full-width">
                                             <label for="report-approve-verifier-username">Verifier User ID</label>
@@ -1056,14 +1059,29 @@
                                                 onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                                         </div>
                                     </div>
-                                    <button type="button" id="btn-report-approve-submit" class="btn btn-primary report-approve-submit-credentials" onclick="submitReportApprove()">Submit approval (credentials)</button>
+                                    <button type="button" id="btn-report-approve-submit" class="btn btn-primary report-approve-submit-credentials" onclick="submitReportApprove()">Submit approval</button>
                                 </div>
-                                <p class="report-approve-sign-or" aria-hidden="true">— or —</p>
                                 <div id="report-approve-biometric-wrap" class="report-approve-biometric-wrap">
-                                    <p class="report-approve-method-label">Option 2 — Fingerprint</p>
-                                    <button type="button" id="btn-report-approve-biometric" class="btn btn-secondary report-approve-submit-biometric" onclick="submitReportApproveBiometric()">Approve with fingerprint</button>
+                                    <button type="button" id="btn-report-approve-biometric" class="report-approve-biometric-btn" onclick="submitReportApproveBiometric()">
+                                        <div class="biometric-icon report-approve-biometric-icon" aria-hidden="true">
+                                            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M18.9 7a8 8 0 0 0-5.3-3.8A8 8 0 0 0 4 12"></path>
+                                                <path d="M12 20a8 8 0 0 0 8-8 4.5 4.5 0 0 0-1-2.8"></path>
+                                                <path d="M9.1 4.6A8 8 0 0 0 4.5 9.4"></path>
+                                                <path d="M12 12a4 4 0 0 0-4 4"></path>
+                                                <path d="M16 12a4 4 0 0 1-4 4"></path>
+                                                <path d="M12 16v4"></path>
+                                                <path d="M12 8a4 4 0 0 1 4 4"></path>
+                                                <path d="M8 12a4 4 0 0 1 4-4"></path>
+                                            </svg>
+                                        </div>
+                                        <span>Use fingerprint</span>
+                                    </button>
                                 </div>
-                                <p id="report-approve-verify-error" class="report-approve-verify-error" style="display: none;"></p>                                </div>
+                                <p id="report-approve-verify-error" class="report-approve-verify-error" style="display: none;"></p>
+                                <button type="button" id="btn-report-approve-biometric-retry" class="btn btn-secondary report-approve-biometric-retry" style="display: none;" onclick="submitReportApproveBiometric()">Try again</button>
+                                </div>
                             </div>
                         </div>
                         <div class="report-preview-actions" id="report-preview-actions">
@@ -1722,10 +1740,10 @@
                             <input type="hidden" id="selected-role" value="User">
                         </div>
 
-                        <div id="add-member-permissions-panel" class="permissions-panel" style="display:none;">
+                        <div id="add-member-permissions-panel" class="permissions-panel is-hidden">
                             <div class="permissions-panel-header">
-                                <label></label>
-                                <span class="permissions-panel-subtitle">Select the user functionalities to continue.</span>
+                                <label>User functionalities</label>
+                                <span class="permissions-panel-subtitle">Select the permissions for this member.</span>
                             </div>
                             <div id="permission-cards-grid" class="permission-cards-grid"></div>
                         </div>
@@ -1928,7 +1946,7 @@
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=2"></script>
     <script src="rbac.js?v=3"></script>
-    <script src="script.js?v=24"></script>
+    <script src="script.js?v=26"></script>
 </body>
 
 </html>

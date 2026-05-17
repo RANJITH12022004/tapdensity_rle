@@ -385,15 +385,15 @@ function submitApprovalVerifyBiometricModal() {
         errEl.textContent = '';
         errEl.style.display = 'none';
     }
-    showBiometricProgressOverlay('Verify Fingerprint', 'Place an Admin/QA fingerprint on the scanner to authorize this action.');
-    apiRequest(API_BASE + '/api/data/auth/approval-verify', {
-        method: 'POST',
-        body: { method: 'biometric', purpose: _approvalVerifyPurpose }
-    }).then(function (data) {
-        hideBiometricProgressOverlay();
-        if (!data || !data.ok || !data.token) {
-            if (errEl) {
-                errEl.textContent = (data && data.error) ? String(data.error) : 'Fingerprint verification failed.';
+    runBiometricVerifyWithRetry({
+        purpose: _approvalVerifyPurpose,
+        title: 'Verify Fingerprint',
+        message: 'Place an Admin/QA fingerprint on the scanner to authorize this action.',
+        failureHint: 'Place your finger on the scanner and tap Try again.'
+    }).then(function (result) {
+        if (!result || !result.ok) {
+            if (result && result.error !== 'cancelled' && errEl) {
+                errEl.textContent = result.message || result.error || 'Fingerprint verification failed.';
                 errEl.style.display = 'block';
             }
             return;
@@ -401,16 +401,10 @@ function submitApprovalVerifyBiometricModal() {
         closeApprovalVerifyModal();
         _restoreApprovalVerifyModalOriginalUi();
         if (approvalVerifyResolve) {
-            approvalVerifyResolve(String(data.token));
+            approvalVerifyResolve(String(result.token));
             approvalVerifyResolve = null;
         }
         if (approvalVerifyReject) approvalVerifyReject = null;
-    }).catch(function (err) {
-        hideBiometricProgressOverlay();
-        if (errEl) {
-            errEl.textContent = 'Fingerprint verification failed: ' + (err && err.message ? err.message : 'Error');
-            errEl.style.display = 'block';
-        }
     });
 }
 
@@ -591,6 +585,36 @@ function computeStandardUspTaps(stepCount) {
     return taps;
 }
 
+var USP_DEFAULT_STEP_COUNT = 10;
+
+function isUspStandardProcedureMode(mode) {
+    mode = String(mode || '').toUpperCase();
+    return mode === 'USP1' || mode === 'USP2';
+}
+
+function applyStandardUspStepDefaults(target) {
+    var n = USP_DEFAULT_STEP_COUNT;
+    var taps = computeStandardUspTaps(n);
+    if (target === 'quick' || target === 'both') {
+        window._quickStepCount = n;
+        window._quickStepTaps = taps.slice();
+    }
+    if (target === 'create' || target === 'both') {
+        window._createRecipeStepCount = n;
+        window._createRecipeStepTaps = taps.slice();
+    }
+}
+
+function formatUspStandardTapsSummary(stepCount) {
+    var n = Math.max(1, Math.min(10, parseInt(stepCount, 10) || 1));
+    var taps = computeStandardUspTaps(n);
+    var parts = [];
+    for (var i = 0; i < n; i++) {
+        parts.push('Step ' + (i + 1) + ': ' + taps[i]);
+    }
+    return parts.join('  |  ');
+}
+
 function computeCreateRecipeStepTapsForStepCount(stepCount) {
     var n = Math.max(1, Math.min(10, parseInt(stepCount, 10) || 10));
     if (getCreateUspMode() === 'CUSTOM') {
@@ -767,18 +791,40 @@ function startReportApprovalPollIfLocked() {
     }, 5000);
 }
 
+function setReportApproveBiometricRetryVisible(visible) {
+    var btn = document.getElementById('btn-report-approve-biometric-retry');
+    if (btn) btn.style.display = visible ? '' : 'none';
+}
+
 function clearReportApproveVerifyError() {
     var errEl = document.getElementById('report-approve-verify-error');
     if (!errEl) return;
     errEl.textContent = '';
     errEl.style.display = 'none';
+    setReportApproveBiometricRetryVisible(false);
 }
 
-function setReportApproveVerifyError(message) {
+function resetReportApproveForm() {
+    var ta = document.getElementById('report-approve-remarks-input');
+    if (ta) ta.value = '';
+    var userEl = document.getElementById('report-approve-verifier-username');
+    var passEl = document.getElementById('report-approve-verifier-password');
+    if (userEl) userEl.value = '';
+    if (passEl) passEl.value = '';
+    var passRadio = document.querySelector('input[name="report-approve-pass-fail"][value="PASS"]');
+    if (passRadio) passRadio.checked = true;
+    clearReportApproveVerifyError();
+}
+
+function setReportApproveVerifyError(message, options) {
+    options = options || {};
     var errEl = document.getElementById('report-approve-verify-error');
     if (!errEl) return;
     errEl.textContent = message ? String(message) : '';
     errEl.style.display = message ? 'block' : 'none';
+    if (options.showBiometricRetry) {
+        setReportApproveBiometricRetryVisible(true);
+    }
 }
 
 function wireReportApproveVerifierListeners() {
@@ -809,8 +855,6 @@ function setReportApprovePanelInteractionState(preview) {
     apprPanel.classList.toggle('is-operator-view', !!(pending && isOp && !isFactory));
     var hintEl = document.getElementById('report-approve-operator-hint');
     if (hintEl) hintEl.style.display = (pending && isOp && !isFactory) ? 'block' : 'none';
-    var subtitleEl = document.getElementById('report-approve-panel-subtitle');
-    if (subtitleEl) subtitleEl.style.display = '';
     ['#report-approve-remarks-input', 'input[name="report-approve-pass-fail"]',
         '#report-approve-verifier-username', '#report-approve-verifier-password'].forEach(function (sel) {
         apprPanel.querySelectorAll(sel).forEach(function (el) { el.disabled = !fieldsEnabled; });
@@ -828,6 +872,15 @@ function setReportApprovePanelInteractionState(preview) {
 function updateReportApprovePanelForPreview(preview) {
     var apprPanel = document.getElementById('report-approve-panel');
     if (!apprPanel) return;
+    var pending = isReportPendingApproval(preview);
+    var rid = currentReportId;
+    if (pending && rid != null && rid !== window._reportApproveFormReportId) {
+        resetReportApproveForm();
+        window._reportApproveFormReportId = rid;
+    }
+    if (!pending) {
+        window._reportApproveFormReportId = null;
+    }
     var reportTypeNorm = String((preview || {}).type || 'test').trim().toLowerCase();
     var titleEl = document.getElementById('report-approve-panel-title') || apprPanel.querySelector('h3');
     if (titleEl) {
@@ -835,7 +888,6 @@ function updateReportApprovePanelForPreview(preview) {
             ? 'Validation report approval'
             : 'Test report approval';
     }
-    var pending = isReportPendingApproval(preview);
     apprPanel.style.display = pending ? 'block' : 'none';
     if (!pending) clearReportApproveVerifyError();
     setReportApprovePanelInteractionState(preview);
@@ -996,6 +1048,10 @@ function applyCreateUspModeToSpeedHeight() {
     if (speedWrap) speedWrap.style.display = mode === 'CUSTOM' ? '' : 'none';
     var stepsSec = document.getElementById('create-recipe-steps-section');
     if (stepsSec) stepsSec.style.display = mode === 'CUSTOM' ? '' : 'none';
+    if (isUspStandardProcedureMode(mode)) {
+        applyStandardUspStepDefaults('create');
+        if (typeof _refreshCreateStepSummary === 'function') _refreshCreateStepSummary();
+    }
     if (mode === 'USP1') {
         var s1 = document.querySelector('input[name="create-speed"][value="300"]');
         var h1 = document.querySelector('input[name="create-height"][value="14"]');
@@ -1008,6 +1064,7 @@ function applyCreateUspModeToSpeedHeight() {
         if (h2) h2.checked = true;
     }
     if (typeof updateCreateRecipeContinueButton === 'function') updateCreateRecipeContinueButton();
+    if (typeof _updateCreateStepsPageUspUi === 'function') _updateCreateStepsPageUspUi();
 }
 
 function applyQuickUspModeToSpeedHeight() {
@@ -1016,6 +1073,12 @@ function applyQuickUspModeToSpeedHeight() {
     if (speedWrap) speedWrap.style.display = mode === 'CUSTOM' ? '' : 'none';
     var totalWrap = document.getElementById('quick-custom-total-wrap');
     if (totalWrap) totalWrap.style.display = mode === 'CUSTOM' ? '' : 'none';
+    var quickStepsSec = document.getElementById('quick-recipe-steps-section');
+    if (quickStepsSec) quickStepsSec.style.display = mode === 'CUSTOM' ? '' : 'none';
+    if (isUspStandardProcedureMode(mode)) {
+        applyStandardUspStepDefaults('quick');
+        if (typeof _refreshQuickStepSummary === 'function') _refreshQuickStepSummary();
+    }
     if (mode === 'USP1') {
         var s1 = document.querySelector('input[name="quick-speed"][value="300"]');
         var h1 = document.querySelector('input[name="quick-height"][value="14"]');
@@ -1026,6 +1089,41 @@ function applyQuickUspModeToSpeedHeight() {
         var h2 = document.querySelector('input[name="quick-height"][value="3"]');
         if (s2) s2.checked = true;
         if (h2) h2.checked = true;
+    }
+    if (typeof _updateQuickStepsPageUspUi === 'function') _updateQuickStepsPageUspUi();
+}
+
+function _updateQuickStepsPageUspUi() {
+    var standard = isUspStandardProcedureMode(getQuickUspMode());
+    var tapsWrap = document.getElementById('quick-steps-taps-wrap');
+    var infoEl = document.getElementById('quick-usp-taps-readonly');
+    if (tapsWrap) tapsWrap.style.display = standard ? 'none' : '';
+    if (infoEl) {
+        if (standard) {
+            var radio = document.querySelector('input[name="quick-step-card"]:checked');
+            var n = radio ? parseInt(radio.value, 10) : (window._quickStepCount || 10);
+            infoEl.textContent = 'Taps per step are fixed for USP (not editable): ' + formatUspStandardTapsSummary(n);
+            infoEl.style.display = '';
+        } else {
+            infoEl.style.display = 'none';
+        }
+    }
+}
+
+function _updateCreateStepsPageUspUi() {
+    var standard = isUspStandardProcedureMode(getCreateUspMode());
+    var tapsWrap = document.getElementById('create-steps-taps-wrap');
+    var infoEl = document.getElementById('create-usp-taps-readonly');
+    if (tapsWrap) tapsWrap.style.display = standard ? 'none' : '';
+    if (infoEl) {
+        if (standard) {
+            var radio = document.querySelector('input[name="create-step-card"]:checked');
+            var n = radio ? parseInt(radio.value, 10) : (window._createRecipeStepCount || 10);
+            infoEl.textContent = 'Taps per step are fixed for USP (not editable): ' + formatUspStandardTapsSummary(n);
+            infoEl.style.display = '';
+        } else {
+            infoEl.style.display = 'none';
+        }
     }
 }
 
@@ -1307,6 +1405,14 @@ function goToPage(pageName) {
             return;
         }
     }
+    if (pageName === 'quick-test-steps' && typeof isUspStandardProcedureMode === 'function' &&
+            isUspStandardProcedureMode(getQuickUspMode())) {
+        pageName = 'quick-test';
+    }
+    if (pageName === 'create-recipe-step2' && typeof isUspStandardProcedureMode === 'function' &&
+            isUspStandardProcedureMode(getCreateUspMode())) {
+        pageName = 'create-recipe-step1';
+    }
     document.querySelectorAll('.page').forEach(function (p) {
         p.classList.remove('active');
     });
@@ -1404,6 +1510,10 @@ function goToPage(pageName) {
     }
     if (pageName === 'create-recipe-step2') {
         setTimeout(function () {
+            if (typeof isUspStandardProcedureMode === 'function' && isUspStandardProcedureMode(getCreateUspMode())) {
+                goToPage('create-recipe-step1');
+                return;
+            }
             if (typeof initCreateRecipeStepsPage === 'function') initCreateRecipeStepsPage();
         }, 50);
     }
@@ -1420,6 +1530,23 @@ function goToPage(pageName) {
     if (pageName === 'datetime') {
         setTimeout(function () {
             if (typeof initializeDatetime === 'function') initializeDatetime();
+        }, 50);
+    }
+    if (pageName === 'add-member') {
+        setTimeout(function () {
+            if (typeof _refreshAddMemberPermissionsPanelVisibility === 'function') {
+                _refreshAddMemberPermissionsPanelVisibility();
+            }
+            var page = document.getElementById('page-add-member');
+            if (page) page.scrollTop = 0;
+        }, 50);
+    }
+    if (pageName === 'validate' || pageName === 'validate-type-select' ||
+            pageName === 'usp1-detail' || pageName === 'usp2-detail' || pageName === 'validation-run') {
+        setTimeout(function () {
+            if (typeof ensureValidationPageScroll === 'function') {
+                ensureValidationPageScroll(pageName);
+            }
         }, 50);
     }
     if (pageName === 'user-profile') {
@@ -1966,11 +2093,23 @@ function loginBiometric() {
         showAppModal('Biometric login is disabled by Factory Settings.', 'Biometric Disabled');
         return;
     }
-    fetch((API_BASE || '') + '/api/data/auth/login-biometric', {
+    if (window._loginBiometricInFlight) return;
+    window._loginBiometricInFlight = true;
+    var abortCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    window._loginBiometricAbort = function () {
+        if (abortCtrl) abortCtrl.abort();
+    };
+    showBiometricProgressOverlay(
+        'Biometric Login',
+        'Activating fingerprint scanner. Place your finger on the sensor.'
+    );
+    var fetchOpts = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({})
-    }).then(function (res) {
+    };
+    if (abortCtrl) fetchOpts.signal = abortCtrl.signal;
+    fetch((API_BASE || '') + '/api/data/auth/login-biometric', fetchOpts).then(function (res) {
         var ct = res.headers.get('content-type') || '';
         var isJson = ct.indexOf('json') !== -1;
         if (isJson) {
@@ -2000,7 +2139,12 @@ function loginBiometric() {
         var msg = (data && data.error) ? String(data.error) : 'Biometric login failed.';
         showAppModal(msg, 'Biometric Login');
     }).catch(function (err) {
+        if (err && err.name === 'AbortError') return;
         showAppModal('Biometric login failed: ' + (err && err.message ? err.message : 'Network error'), 'Biometric Login');
+    }).finally(function () {
+        hideBiometricProgressOverlay();
+        window._loginBiometricInFlight = false;
+        window._loginBiometricAbort = null;
     });
 }
 
@@ -2034,6 +2178,11 @@ function _setBioFingerAnimState(state) {
     if (state) stage.classList.add('state-' + state);
 }
 
+function setBiometricOverlayRetryVisible(visible) {
+    var retryBtn = document.getElementById('biometric-progress-retry-btn');
+    if (retryBtn) retryBtn.style.display = visible ? '' : 'none';
+}
+
 function showBiometricEnrollUi(opts) {
     opts = opts || {};
     var overlay = document.getElementById('biometric-progress-overlay');
@@ -2044,19 +2193,42 @@ function showBiometricEnrollUi(opts) {
     var stepsWrap = document.getElementById('bio-enroll-steps');
     var fingerStage = document.getElementById('bio-finger-stage');
     var enrollMode = !!opts.enrollMode;
+    var verifyMode = !!opts.verifyMode;
     if (stepsWrap) stepsWrap.style.display = enrollMode ? 'flex' : 'none';
-    if (fingerStage) fingerStage.style.display = enrollMode ? 'block' : 'none';
+    if (fingerStage) fingerStage.style.display = (enrollMode || verifyMode) ? 'block' : 'none';
     if (titleEl && opts.title) titleEl.textContent = opts.title;
     if (msgEl && opts.message !== undefined) msgEl.textContent = opts.message || '';
     if (hintEl) hintEl.textContent = opts.hint || '';
     if (spinner) spinner.style.display = opts.scanning ? 'block' : 'none';
     if (opts.step) _setBioEnrollStepActive(opts.step);
     if (opts.fingerState) _setBioFingerAnimState(opts.fingerState);
+    else if (verifyMode && opts.scanning) _setBioFingerAnimState('scan');
+    else if (verifyMode && !opts.scanning) _setBioFingerAnimState('place');
     if (overlay) overlay.style.display = 'flex';
 }
 
 function showBiometricProgressOverlay(title, message) {
-    showBiometricEnrollUi({ title: title, message: message, enrollMode: false, scanning: true });
+    setBiometricOverlayRetryVisible(false);
+    showBiometricEnrollUi({
+        title: title,
+        message: message,
+        enrollMode: false,
+        verifyMode: true,
+        scanning: true
+    });
+}
+
+function showBiometricVerifyFailedOverlay(message, hint) {
+    showBiometricEnrollUi({
+        title: 'Fingerprint not recognized',
+        message: message || 'Fingerprint verification failed.',
+        hint: hint || 'Place your finger on the scanner and tap Try again.',
+        enrollMode: false,
+        verifyMode: true,
+        scanning: false,
+        fingerState: 'place'
+    });
+    setBiometricOverlayRetryVisible(true);
 }
 
 function hideBiometricProgressOverlay() {
@@ -2065,6 +2237,76 @@ function hideBiometricProgressOverlay() {
     _setBioFingerAnimState('');
     _biometricEnrollUsername = null;
     _biometricEnrollCancelled = false;
+    setBiometricOverlayRetryVisible(false);
+    window._biometricVerifyRetryFn = null;
+    window._biometricVerifyCancelResolve = null;
+    window._biometricVerifyActive = false;
+}
+
+function retryBiometricProgress() {
+    setBiometricOverlayRetryVisible(false);
+    if (typeof window._biometricVerifyRetryFn === 'function') {
+        window._biometricVerifyRetryFn();
+    }
+}
+
+function runBiometricVerifyWithRetry(opts) {
+    opts = opts || {};
+    var purpose = opts.purpose || 'report';
+    if (window._biometricVerifyActive) {
+        return Promise.resolve({ ok: false, error: 'cancelled', message: '' });
+    }
+    return new Promise(function (resolve) {
+        if (!biometricEnabledSetting) {
+            resolve({ ok: false, error: 'Biometric verification is disabled by Factory Settings.' });
+            return;
+        }
+        window._biometricVerifyActive = true;
+        var cancelled = false;
+        var lastError = 'Fingerprint verification failed.';
+
+        function finish(result) {
+            window._biometricVerifyActive = false;
+            resolve(result);
+        }
+
+        function finishCancel() {
+            cancelled = true;
+            hideBiometricProgressOverlay();
+            finish({ ok: false, error: 'cancelled', message: lastError });
+        }
+
+        function attempt() {
+            if (cancelled) return;
+            showBiometricProgressOverlay(
+                opts.title || 'Verify Fingerprint',
+                opts.message || 'Place your finger on the scanner.'
+            );
+            apiRequest(API_BASE + '/api/data/auth/approval-verify', {
+                method: 'POST',
+                body: { method: 'biometric', purpose: purpose }
+            }).then(function (data) {
+                if (cancelled) return;
+                if (data && data.ok && data.token) {
+                    hideBiometricProgressOverlay();
+                    finish({ ok: true, token: String(data.token) });
+                    return;
+                }
+                lastError = (data && data.error) ? String(data.error) : 'Fingerprint verification failed.';
+                showBiometricVerifyFailedOverlay(lastError, opts.failureHint);
+                window._biometricVerifyRetryFn = attempt;
+            }).catch(function (err) {
+                if (cancelled) return;
+                lastError = 'Fingerprint verification failed: ' + (err && err.message ? err.message : 'Error');
+                showBiometricVerifyFailedOverlay(lastError, opts.failureHint);
+                window._biometricVerifyRetryFn = attempt;
+            });
+        }
+
+        window._biometricVerifyCancelResolve = finishCancel;
+        window._biometricVerifyRetryFn = attempt;
+        attempt();
+    });
 }
 
 function _cancelBiometricEnrollSession() {
@@ -2078,6 +2320,19 @@ function _cancelBiometricEnrollSession() {
 
 function cancelBiometricProgress() {
     _biometricEnrollCancelled = true;
+    if (typeof window._loginBiometricAbort === 'function') {
+        window._loginBiometricAbort();
+        hideBiometricProgressOverlay();
+        window._loginBiometricInFlight = false;
+        window._loginBiometricAbort = null;
+        return;
+    }
+    if (typeof window._biometricVerifyCancelResolve === 'function') {
+        var cancelVerify = window._biometricVerifyCancelResolve;
+        window._biometricVerifyCancelResolve = null;
+        cancelVerify();
+        return;
+    }
     _cancelBiometricEnrollSession().finally(function () {
         hideBiometricProgressOverlay();
     });
@@ -2743,25 +2998,40 @@ function _refreshQuickStepSummary() {
         : 10;
     if (summaryEl) summaryEl.textContent = String(n);
     if (subEl) {
-        if (window._quickStepTaps && window._quickStepTaps.length === n) {
+        if (isUspStandardProcedureMode(getQuickUspMode())) {
+            window._quickStepTaps = computeStandardUspTaps(n);
+            var totalU = 0;
+            for (var u = 0; u < window._quickStepTaps.length; u++) {
+                totalU += parseInt(window._quickStepTaps[u], 10) || 0;
+            }
+            subEl.textContent = n + ' step' + (n === 1 ? '' : 's') + ', USP taps (' + totalU + ' total)';
+        } else if (window._quickStepTaps && window._quickStepTaps.length === n) {
             var total = 0;
             for (var i = 0; i < n; i++) total += parseInt(window._quickStepTaps[i], 10) || 0;
             subEl.textContent = n + ' step' + (n === 1 ? '' : 's') + ', total ' + total + ' taps';
         } else {
-            subEl.textContent = 'Tap to select steps';
+            subEl.textContent = 'Tap to select steps and taps';
         }
     }
 }
 
 function goToQuickTestStepsPage() {
+    if (isUspStandardProcedureMode(getQuickUspMode())) {
+        return;
+    }
     var current = (typeof window._quickStepCount === 'number' && window._quickStepCount > 0)
         ? window._quickStepCount
-        : 10;
+        : USP_DEFAULT_STEP_COUNT;
     goToPage('quick-test-steps');
     setTimeout(function () {
         var radio = document.querySelector('input[name="quick-step-card"][value="' + current + '"]');
         if (radio) radio.checked = true;
-        _renderQuickStepTapInputs(current);
+        if (isUspStandardProcedureMode(getQuickUspMode())) {
+            window._quickStepTaps = computeStandardUspTaps(current);
+            _updateQuickStepsPageUspUi();
+        } else {
+            _renderQuickStepTapInputs(current);
+        }
         var cards = document.querySelectorAll('#quick-step-cards-grid label.create-recipe-card');
         cards.forEach(function (label) {
             label.removeEventListener('click', _onQuickStepCardClick);
@@ -2777,10 +3047,23 @@ function _onQuickStepCardClick(ev) {
     if (!input) return;
     var n = parseInt(input.value, 10);
     if (isNaN(n) || n < 1) return;
+    if (isUspStandardProcedureMode(getQuickUspMode())) {
+        window._quickStepCount = n;
+        window._quickStepTaps = computeStandardUspTaps(n);
+        _updateQuickStepsPageUspUi();
+        _refreshQuickStepSummary();
+        return;
+    }
     setTimeout(function () { _renderQuickStepTapInputs(n); }, 0);
 }
 
 function _renderQuickStepTapInputs(stepCount) {
+    if (isUspStandardProcedureMode(getQuickUspMode())) {
+        var n = Math.max(1, Math.min(10, parseInt(stepCount, 10) || 10));
+        window._quickStepTaps = computeStandardUspTaps(n);
+        _updateQuickStepsPageUspUi();
+        return;
+    }
     var container = document.getElementById('quick-step-tap-inputs');
     if (!container) return;
     var n = Math.max(1, Math.min(10, parseInt(stepCount, 10) || 10));
@@ -2815,20 +3098,25 @@ function confirmQuickTestStepSetup() {
         showAppModal('Please choose a valid step count (1\u201310).', 'Quick Test');
         return;
     }
-    var inputs = document.querySelectorAll('#quick-step-tap-inputs input.quick-step-tap');
-    var taps = [];
-    for (var i = 0; i < inputs.length && taps.length < stepCount; i++) {
-        var v = parseInt(inputs[i].value, 10);
-        if (isNaN(v) || v < 1) {
-            showAppModal('Step ' + (i + 1) + ' must have at least 1 tap.', 'Quick Test');
-            inputs[i].focus();
+    var taps;
+    if (isUspStandardProcedureMode(getQuickUspMode())) {
+        taps = computeStandardUspTaps(stepCount);
+    } else {
+        var inputs = document.querySelectorAll('#quick-step-tap-inputs input.quick-step-tap');
+        taps = [];
+        for (var i = 0; i < inputs.length && taps.length < stepCount; i++) {
+            var v = parseInt(inputs[i].value, 10);
+            if (isNaN(v) || v < 1) {
+                showAppModal('Step ' + (i + 1) + ' must have at least 1 tap.', 'Quick Test');
+                inputs[i].focus();
+                return;
+            }
+            taps.push(v);
+        }
+        if (taps.length !== stepCount) {
+            showAppModal('Please configure taps for all ' + stepCount + ' steps before continuing.', 'Quick Test');
             return;
         }
-        taps.push(v);
-    }
-    if (taps.length !== stepCount) {
-        showAppModal('Please configure taps for all ' + stepCount + ' steps before continuing.', 'Quick Test');
-        return;
     }
     window._quickStepCount = stepCount;
     window._quickStepTaps = taps;
@@ -2845,21 +3133,30 @@ function _refreshCreateStepSummary() {
         : 10;
     if (summaryEl) summaryEl.textContent = String(n);
     if (subEl) {
-        if (window._createRecipeStepTaps && window._createRecipeStepTaps.length === n) {
+        if (isUspStandardProcedureMode(getCreateUspMode())) {
+            window._createRecipeStepTaps = computeStandardUspTaps(n);
+            var totalU = 0;
+            for (var u = 0; u < window._createRecipeStepTaps.length; u++) {
+                totalU += parseInt(window._createRecipeStepTaps[u], 10) || 0;
+            }
+            subEl.textContent = n + ' step' + (n === 1 ? '' : 's') + ', USP taps (' + totalU + ' total)';
+        } else if (window._createRecipeStepTaps && window._createRecipeStepTaps.length === n) {
             var total = 0;
             for (var i = 0; i < n; i++) total += parseInt(window._createRecipeStepTaps[i], 10) || 0;
             subEl.textContent = n + ' step' + (n === 1 ? '' : 's') + ', total ' + total + ' taps';
         } else {
-            subEl.textContent = 'Tap to select steps';
+            subEl.textContent = 'Tap to select steps and taps';
         }
     }
 }
 
 function openCreateRecipeStepsPage() {
-    if (getCreateUspMode() !== 'CUSTOM') return;
+    if (isUspStandardProcedureMode(getCreateUspMode())) {
+        return;
+    }
     var current = (typeof window._createRecipeStepCount === 'number' && window._createRecipeStepCount > 0)
         ? window._createRecipeStepCount
-        : 10;
+        : USP_DEFAULT_STEP_COUNT;
     goToPage('create-recipe-step2');
     setTimeout(function () {
         initCreateRecipeStepsPage();
@@ -2872,7 +3169,12 @@ function initCreateRecipeStepsPage() {
         : 10;
     var radio = document.querySelector('input[name="create-step-card"][value="' + current + '"]');
     if (radio) radio.checked = true;
-    _renderCreateStepTapInputs(current);
+    if (isUspStandardProcedureMode(getCreateUspMode())) {
+        window._createRecipeStepTaps = computeStandardUspTaps(current);
+        _updateCreateStepsPageUspUi();
+    } else {
+        _renderCreateStepTapInputs(current);
+    }
     var cards = document.querySelectorAll('#create-step-cards-grid label.create-recipe-card');
     cards.forEach(function (label) {
         label.removeEventListener('click', _onCreateStepCardClick);
@@ -2887,10 +3189,23 @@ function _onCreateStepCardClick(ev) {
     if (!input) return;
     var n = parseInt(input.value, 10);
     if (isNaN(n) || n < 1) return;
+    if (isUspStandardProcedureMode(getCreateUspMode())) {
+        window._createRecipeStepCount = n;
+        window._createRecipeStepTaps = computeStandardUspTaps(n);
+        _updateCreateStepsPageUspUi();
+        _refreshCreateStepSummary();
+        return;
+    }
     setTimeout(function () { _renderCreateStepTapInputs(n); }, 0);
 }
 
 function _renderCreateStepTapInputs(stepCount) {
+    if (isUspStandardProcedureMode(getCreateUspMode())) {
+        var n = Math.max(1, Math.min(10, parseInt(stepCount, 10) || 10));
+        window._createRecipeStepTaps = computeStandardUspTaps(n);
+        _updateCreateStepsPageUspUi();
+        return;
+    }
     var container = document.getElementById('create-step-tap-inputs');
     if (!container) return;
     var n = Math.max(1, Math.min(10, parseInt(stepCount, 10) || 10));
@@ -2925,20 +3240,25 @@ function confirmCreateRecipeStepSetup() {
         showAppModal('Please choose a valid step count (1\u201310).', 'Create Recipe');
         return;
     }
-    var inputs = document.querySelectorAll('#create-step-tap-inputs input.create-step-tap');
-    var taps = [];
-    for (var i = 0; i < inputs.length && taps.length < stepCount; i++) {
-        var v = parseInt(inputs[i].value, 10);
-        if (isNaN(v) || v < 1) {
-            showAppModal('Step ' + (i + 1) + ' must have at least 1 tap.', 'Create Recipe');
-            inputs[i].focus();
+    var taps;
+    if (isUspStandardProcedureMode(getCreateUspMode())) {
+        taps = computeStandardUspTaps(stepCount);
+    } else {
+        var inputs = document.querySelectorAll('#create-step-tap-inputs input.create-step-tap');
+        taps = [];
+        for (var i = 0; i < inputs.length && taps.length < stepCount; i++) {
+            var v = parseInt(inputs[i].value, 10);
+            if (isNaN(v) || v < 1) {
+                showAppModal('Step ' + (i + 1) + ' must have at least 1 tap.', 'Create Recipe');
+                inputs[i].focus();
+                return;
+            }
+            taps.push(v);
+        }
+        if (taps.length !== stepCount) {
+            showAppModal('Please configure taps for all ' + stepCount + ' steps before continuing.', 'Create Recipe');
             return;
         }
-        taps.push(v);
-    }
-    if (taps.length !== stepCount) {
-        showAppModal('Please configure taps for all ' + stepCount + ' steps before continuing.', 'Create Recipe');
-        return;
     }
     window._createRecipeStepCount = stepCount;
     window._createRecipeStepTaps = taps;
@@ -2956,15 +3276,18 @@ function onCreateRecipeContinueClick() {
         return;
     }
     var mode = getCreateUspMode();
-    if (mode === 'CUSTOM') {
+    if (isUspStandardProcedureMode(mode)) {
+        applyStandardUspStepDefaults('create');
+    } else {
         var n = window._createRecipeStepCount;
-        if (!n || !window._createRecipeStepTaps || window._createRecipeStepTaps.length !== n) {
-            showAppModal('Tap Number of steps to configure steps and taps for each step.', 'Create Recipe');
+        if (!n || n < 1 || n > 10) {
+            showAppModal('Tap Number of steps to choose how many steps (1\u201310).', 'Create Recipe');
             return;
         }
-    } else {
-        window._createRecipeStepCount = 10;
-        window._createRecipeStepTaps = computeStandardUspTaps(10);
+        if (!window._createRecipeStepTaps || window._createRecipeStepTaps.length !== n) {
+            showAppModal('Tap Number of steps to configure taps for each step.', 'Create Recipe');
+            return;
+        }
     }
     completeRecipeFromStep2();
 }
@@ -2985,8 +3308,10 @@ function resetCreateRecipeStep1Form() {
     var um = document.querySelector('input[name="create-usp-mode"][value="USP1"]');
     if (um) um.checked = true;
     if (typeof applyCreateUspModeToSpeedHeight === 'function') applyCreateUspModeToSpeedHeight();
-    window._createRecipeStepCount = 10;
-    window._createRecipeStepTaps = null;
+    if (getCreateUspMode() === 'CUSTOM') {
+        window._createRecipeStepCount = null;
+        window._createRecipeStepTaps = null;
+    }
     if (typeof _refreshCreateStepSummary === 'function') _refreshCreateStepSummary();
     if (typeof updateCreateRecipeContinueButton === 'function') updateCreateRecipeContinueButton();
 }
@@ -3043,7 +3368,56 @@ function setValRunEl(id, value) {
     if (el) el.textContent = value;
 }
 
+var VALIDATION_SCROLL_SURFACE = {
+    'validate': '.validation-main-container',
+    'validate-type-select': '.validation-type-page',
+    'usp1-detail': '.validation-type-page',
+    'usp2-detail': '.validation-type-page',
+    'validation-run': '.validation-test-page'
+};
+
+function getValidationScrollSurface(pageName) {
+    var page = document.getElementById('page-' + pageName);
+    if (!page) return null;
+    var sel = VALIDATION_SCROLL_SURFACE[pageName];
+    if (!sel) return page;
+    return page.querySelector(sel) || page;
+}
+
+function bindTouchPanScroll(el) {
+    if (!el || el._touchPanScrollBound) return;
+    el._touchPanScrollBound = true;
+    var startY = 0;
+    var startScroll = 0;
+    var tracking = false;
+    el.addEventListener('touchstart', function (e) {
+        if (e.touches.length !== 1) return;
+        tracking = true;
+        startY = e.touches[0].clientY;
+        startScroll = el.scrollTop;
+    }, { passive: true });
+    el.addEventListener('touchmove', function (e) {
+        if (!tracking || e.touches.length !== 1) return;
+        var dy = startY - e.touches[0].clientY;
+        var next = startScroll + dy;
+        var max = Math.max(0, el.scrollHeight - el.clientHeight);
+        if (next < 0) next = 0;
+        if (next > max) next = max;
+        el.scrollTop = next;
+    }, { passive: true });
+    el.addEventListener('touchend', function () { tracking = false; }, { passive: true });
+    el.addEventListener('touchcancel', function () { tracking = false; }, { passive: true });
+}
+
+function ensureValidationPageScroll(pageName) {
+    var surface = getValidationScrollSurface(pageName);
+    if (!surface) return;
+    bindTouchPanScroll(surface);
+    surface.scrollTop = 0;
+}
+
 function initValidationRunPage() {
+    ensureValidationPageScroll('validation-run');
     var type = lastValidationType || 'distance';
     var usp = type === 'load' ? 'USP 2' : 'USP 1';
     var tapsMin = type === 'load' ? 250 : 300;
@@ -3850,6 +4224,28 @@ function formatReportDate(isoStr) {
     return dd + '/' + mm + '/' + yy + ' ' + h + ':' + m + ':' + s;
 }
 
+/** Rows in TEST DATA table: only steps that actually ran (not recipe stepCount). */
+function getReportStepRowCount(td) {
+    if (!td || typeof td !== 'object') return 0;
+    var results = td.stepResults || [];
+    if (results.length > 0) return results.length;
+    var cs = td.completedSteps;
+    if (cs != null && cs !== '' && !isNaN(parseInt(cs, 10))) {
+        return Math.max(0, parseInt(cs, 10));
+    }
+    return 0;
+}
+
+function formatReportDateAndTimeParts(isoOrDateStr) {
+    var full = formatReportDate(isoOrDateStr);
+    if (!full || full === '--') return { date: '--', time: '--' };
+    var parts = full.split(' ');
+    if (parts.length >= 2) {
+        return { date: parts[0], time: parts.slice(1).join(' ') };
+    }
+    return { date: full, time: '--' };
+}
+
 function populateReportPreview(preview) {
     if (!preview) return;
     var reportType = preview.type || 'test';
@@ -3878,33 +4274,27 @@ function populateReportPreview(preview) {
     setReportEl('report-product-name', recipe.productName || td.productName);
 
     var startStr = formatReportDate(td.testStartTime || preview.createdAt);
-    var endStr = formatReportDate(td.testEndTime || preview.completedAt || preview.createdAt);
+    var completedParts = formatReportDateAndTimeParts(
+        td.testEndTime || preview.completedAt || preview.createdAt
+    );
     setReportEl('report-test-start', startStr);
-    setReportEl('report-generated', endStr);
+    setReportEl('report-completed-date', completedParts.date);
+    setReportEl('report-completed-time', completedParts.time);
 
     var durationSec = td.durationSeconds;
     var durationStr = (durationSec != null && durationSec >= 0) ? (durationSec + ' s') : '--';
     setReportEl('report-test-duration', durationStr);
-    var sc = (td.stepCount != null ? td.stepCount : (td.steps && td.steps.length ? td.steps.length : null));
-    var cs = (td.completedSteps != null ? td.completedSteps : null);
     var statusLabel = (td.status === 'aborted' ? 'Aborted' : 'Completed');
-    if (cs != null && sc != null) statusLabel = statusLabel + ' (' + cs + '/' + sc + ' steps)';
     setReportEl('report-test-status', statusLabel);
 
     var tbody = document.getElementById('report-test-data-body');
     if (tbody) {
-        // Determine how many steps to show
-        var stepCount =
-            (td.stepCount != null ? td.stepCount : null) ||
-            (td.steps && td.steps.length) ||
-            (td.stepResults && td.stepResults.length) ||
-            0;
-
+        var rowCount = getReportStepRowCount(td);
         var results = td.stepResults || [];
         var rows = [];
 
-        if (stepCount > 0) {
-            for (var i = 0; i < stepCount; i++) {
+        if (rowCount > 0) {
+            for (var i = 0; i < rowCount; i++) {
                 var r = results[i] || {};
                 var vol = (r.volumeMl != null && r.volumeMl !== '') ? r.volumeMl : '__';
                 var dVol = '__';
@@ -3913,7 +4303,6 @@ function populateReportPreview(preview) {
                 }
                 var bulk = (r.bulkDensity != null && r.bulkDensity !== '') ? r.bulkDensity : '__';
                 var tap = (r.tapDensity != null && r.tapDensity !== '') ? r.tapDensity : '__';
-                var resText = (r.resultText != null && r.resultText !== '') ? r.resultText : '__';
 
                 rows.push(
                     '<tr>' +
@@ -3922,13 +4311,12 @@ function populateReportPreview(preview) {
                         '<td>' + dVol + '</td>' +
                         '<td>' + bulk + '</td>' +
                         '<td>' + tap + '</td>' +
-                        '<td>' + resText + '</td>' +
                     '</tr>'
                 );
             }
             tbody.innerHTML = rows.join('');
         } else {
-            tbody.innerHTML = '<tr><td colspan="6">No test data</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="5">No test data</td></tr>';
         }
     }
 
@@ -3996,25 +4384,25 @@ function verifyReportApproverInline(method) {
     method = method === 'biometric' ? 'biometric' : 'credentials';
     clearReportApproveVerifyError();
     if (method === 'biometric') {
-        if (!biometricEnabledSetting) {
-            setReportApproveVerifyError('Biometric verification is disabled by Factory Settings.');
-            return Promise.resolve(null);
-        }
-        showBiometricProgressOverlay('Verify Fingerprint', 'Place a Reviewer or Admin fingerprint on the scanner to approve this report.');
-        return apiRequest(API_BASE + '/api/data/auth/approval-verify', {
-            method: 'POST',
-            body: { method: 'biometric', purpose: 'report' }
-        }).then(function (data) {
-            hideBiometricProgressOverlay();
-            if (!data || !data.ok || !data.token) {
-                setReportApproveVerifyError((data && data.error) ? String(data.error) : 'Fingerprint verification failed.');
+        return runBiometricVerifyWithRetry({
+            purpose: 'report',
+            title: 'Verify Fingerprint',
+            message: 'Place a Reviewer or Admin fingerprint on the scanner to approve this report.',
+            failureHint: 'Place your finger on the scanner and tap Try again.'
+        }).then(function (result) {
+            if (!result || !result.ok) {
+                if (result && result.error !== 'cancelled') {
+                    setReportApproveVerifyError(
+                        result.message || result.error || 'Fingerprint verification failed.',
+                        { showBiometricRetry: true }
+                    );
+                } else if (result && result.error === 'cancelled' && result.message) {
+                    setReportApproveVerifyError(result.message, { showBiometricRetry: true });
+                }
                 return null;
             }
-            return String(data.token);
-        }).catch(function (err) {
-            hideBiometricProgressOverlay();
-            setReportApproveVerifyError('Fingerprint verification failed: ' + (err && err.message ? err.message : 'Error'));
-            return null;
+            setReportApproveBiometricRetryVisible(false);
+            return result.token;
         });
     }
     var usernameEl = document.getElementById('report-approve-verifier-username');
@@ -4094,6 +4482,8 @@ function submitReportApprove() {
     clearReportApproveVerifyError();
     approveReportWithVerifier(id, pf, remarks, 'credentials').then(function (ok) {
         if (ok === true) {
+            resetReportApproveForm();
+            window._reportApproveFormReportId = null;
             clearReportApprovalGate();
             showAppModal('Report approved.', 'Report');
             openReportPreview(id, { setGate: true });
@@ -4123,8 +4513,11 @@ function submitReportApproveBiometric() {
     var ta = document.getElementById('report-approve-remarks-input');
     var remarks = ta ? ta.value.trim() : '';
     clearReportApproveVerifyError();
+    setReportApproveBiometricRetryVisible(false);
     approveReportWithVerifier(id, pf, remarks, 'biometric').then(function (ok) {
         if (ok === true) {
+            resetReportApproveForm();
+            window._reportApproveFormReportId = null;
             clearReportApprovalGate();
             showAppModal('Report approved.', 'Report');
             openReportPreview(id, { setGate: true });
@@ -4207,6 +4600,8 @@ var lastTestRunRecipe = null;
 /** Set when starting a test from Quick Test; cleared after report save so the form resets. */
 var _quickTestRunPendingFormReset = false;
 var testRunButtonState = 'start'; // 'start' | 'abort'
+/** ISO timestamp when the operator presses START (after weight/volume entry). */
+var testRunStartTime = null;
 var testRunIntervalId = null;
 var testRunCurrentStepIndex = 0;
 var testRunCurrentTapCount = 0;
@@ -4507,6 +4902,11 @@ function _testRunFinishStepVolumeAndResults(stepIndex) {
         if (isNaN(curr) || curr <= 0) {
             return runTestRunHardwareStep(stepIndex);
         }
+        var volDecreaseCheck = validateTestRunVolumeNotIncreasing(curr);
+        if (!volDecreaseCheck.ok) {
+            showAppModal(volDecreaseCheck.message, 'Volume');
+            return _testRunFinishStepVolumeAndResults(stepIndex);
+        }
 
         var prev = testRunPreviousVolumeMl;
         testRunLastStepPreviousMl = prev;
@@ -4756,6 +5156,31 @@ function computeTapDensityGPerMl(weightG, finalTappedVolMl) {
     return w / v;
 }
 
+function isTestRunInitialVolumeEntry() {
+    return testRunButtonState === 'start';
+}
+
+function validateTestRunVolumeNotIncreasing(volumeMl) {
+    if (isTestRunInitialVolumeEntry()) {
+        return { ok: true };
+    }
+    var prev = testRunPreviousVolumeMl;
+    if (prev == null || isNaN(prev)) {
+        return { ok: true };
+    }
+    var num = parseFloat(volumeMl);
+    if (isNaN(num)) {
+        return { ok: true };
+    }
+    if (num > prev) {
+        return {
+            ok: false,
+            message: 'Please check the value entered. The volume cannot increase.'
+        };
+    }
+    return { ok: true };
+}
+
 function askVolumeForStep(stepIndex) {
     return openTestRunVolumeModal(stepIndex).then(function (vol) {
         if (vol === null || vol === '') return null;
@@ -4887,6 +5312,11 @@ function openTestRunVolumeModal(stepIndex) {
                     window.alert('Volume in ml cannot exceed cylinder size (' + maxMl + ' ml).');
                     continue;
                 }
+                var volCheck = validateTestRunVolumeNotIncreasing(num);
+                if (!volCheck.ok) {
+                    window.alert(volCheck.message);
+                    continue;
+                }
                 resolve(String(vol).trim());
                 return;
             }
@@ -4953,6 +5383,13 @@ function confirmTestRunVolume() {
     var maxMl = getMaxSampleVolumeMl(lastTestRunRecipe);
     if (maxMl != null && num > maxMl) {
         showAppModal('Volume in ml cannot exceed cylinder size (' + maxMl + ' ml).', 'Volume');
+        if (input) input.select();
+        return;
+    }
+
+    var decreasingCheck = validateTestRunVolumeNotIncreasing(num);
+    if (!decreasingCheck.ok) {
+        showAppModal(decreasingCheck.message, 'Volume');
         if (input) input.select();
         return;
     }
@@ -5039,11 +5476,14 @@ function startQuickTestRun() {
         }
     }
     var stepCount;
-    if (typeof window._quickStepCount === 'number' && window._quickStepCount >= 1) {
+    if (isUspStandardProcedureMode(qmode)) {
+        stepCount = USP_DEFAULT_STEP_COUNT;
+        applyStandardUspStepDefaults('quick');
+    } else if (typeof window._quickStepCount === 'number' && window._quickStepCount >= 1) {
         stepCount = window._quickStepCount;
     } else {
         var stepCountEl = document.getElementById('quick-step-count');
-        stepCount = stepCountEl ? (parseInt(stepCountEl.value, 10) || 10) : 10;
+        stepCount = stepCountEl ? (parseInt(stepCountEl.value, 10) || USP_DEFAULT_STEP_COUNT) : USP_DEFAULT_STEP_COUNT;
     }
     var cylinderRadios = document.querySelectorAll('input[name="quick-cylinder"]');
     var sampleVolumeMl = null;
@@ -5058,18 +5498,13 @@ function startQuickTestRun() {
         return;
     }
     var taps;
-    if (window._quickStepTaps && window._quickStepTaps.length === stepCount) {
+    if (isUspStandardProcedureMode(qmode)) {
+        taps = computeStandardUspTaps(USP_DEFAULT_STEP_COUNT);
+    } else if (window._quickStepTaps && window._quickStepTaps.length === stepCount) {
         taps = window._quickStepTaps.slice();
-    } else if (qmode === 'CUSTOM') {
-        var qtotalEl2 = document.getElementById('quick-custom-total-taps');
-        var qtotal2 = qtotalEl2 ? parseInt(qtotalEl2.value, 10) : 0;
-        taps = distributeTotalTaps(qtotal2, stepCount);
-        if (!taps) {
-            showAppModal('Enter total taps (at least ' + stepCount + ', one tap per step).', 'Quick Test');
-            return;
-        }
     } else {
-        taps = computeStandardUspTaps(stepCount);
+        showAppModal('Tap Number of steps to configure steps and taps for each step.', 'Quick Test');
+        return;
     }
     var uspLabel = qmode === 'USP1' ? 'USP 1' : (qmode === 'USP2' ? 'USP 2' : 'Custom');
     var steps = [];
@@ -5106,6 +5541,7 @@ function resetQuickTestFormAfterRunIfPending() {
     window._quickStepCount = null;
     var qtot = document.getElementById('quick-custom-total-taps');
     if (qtot) qtot.value = '';
+    if (typeof applyQuickUspModeToSpeedHeight === 'function') applyQuickUspModeToSpeedHeight();
     if (typeof _refreshQuickStepSummary === 'function') {
         _refreshQuickStepSummary();
     }
@@ -5137,6 +5573,7 @@ function resetTestRunPageForNewLoad() {
     if (typeof _closeTestRunHardwareEs === 'function') _closeTestRunHardwareEs();
 
     testRunButtonState = 'start';
+    testRunStartTime = null;
     testRunCurrentStepIndex = 0;
     testRunCurrentTapCount = 0;
     testRunStepTapsBase = 0;
@@ -5299,8 +5736,16 @@ function renderTestRunResultsTable() {
 function buildTestRunReportPayload() {
     var recipe = lastTestRunRecipe;
     if (!recipe) return null;
-    var completedSteps = Math.min(testRunCurrentStepIndex + 1, testRunTotalSteps);
+    var completedSteps = (testRunStepResults && testRunStepResults.length)
+        ? testRunStepResults.length
+        : Math.min(testRunCurrentStepIndex + 1, testRunTotalSteps);
     var now = new Date().toISOString();
+    var startIso = testRunStartTime || now;
+    var durationSec = null;
+    if (testRunStartTime) {
+        var durMs = new Date(now).getTime() - new Date(testRunStartTime).getTime();
+        if (durMs >= 0) durationSec = Math.floor(durMs / 1000);
+    }
     var testData = {
         recipe: recipe,
         productName: recipe.productName,
@@ -5308,12 +5753,15 @@ function buildTestRunReportPayload() {
         status: 'completed',
         completedSteps: completedSteps,
         steps: recipe.steps || testRunSteps,
-        stepCount: recipe.stepCount || testRunTotalSteps,
+        stepCount: completedSteps,
         stepResults: testRunStepResults,
         sampleVolumeMl: recipe.sampleVolumeMl,
         initialWeightG: testRunInitialWeightG,
         usp: recipe.usp,
-        createdAt: now,
+        testStartTime: startIso,
+        testEndTime: now,
+        durationSeconds: durationSec,
+        createdAt: startIso,
         completedAt: now
     };
     var payload = {
@@ -5321,7 +5769,7 @@ function buildTestRunReportPayload() {
         type: 'test',
         recipe: recipe,
         testData: testData,
-        createdAt: now,
+        createdAt: startIso,
         completedAt: now
     };
     return stampOperatorOnTestReportPayload(payload);
@@ -5368,6 +5816,7 @@ function abortTestRunAndSave() {
     payload.testData = payload.testData || {};
     payload.testData.status = 'aborted';
     payload.testData.completedSteps = completedSteps;
+    payload.testData.stepCount = completedSteps;
     payload.completedAt = new Date().toISOString();
     payload.testData.completedAt = payload.completedAt;
     stampOperatorOnTestReportPayload(payload);
@@ -5534,6 +5983,7 @@ function toggleTestRunState() {
                     throw new Error('adapter');
                 }
             }).then(function () {
+                testRunStartTime = new Date().toISOString();
                 testRunButtonState = 'abort';
                 if (btn) {
                     btn.disabled = false;
@@ -5708,15 +6158,19 @@ function loadRecipeForEdit() {
         var heightVal = dropHeight <= 5 ? '3' : '14';
         var heightRadio = document.querySelector('input[name="create-height"][value="' + heightVal + '"]');
         if (heightRadio) heightRadio.checked = true;
-        var stepCount = Math.max(1, parseInt(r.stepCount, 10) || (r.steps && r.steps.length) || 10);
-        window._createRecipeStepCount = stepCount;
-        if (r.steps && r.steps.length) {
-            window._createRecipeStepTaps = [];
-            for (var si = 0; si < r.steps.length; si++) {
-                window._createRecipeStepTaps.push(parseInt(r.steps[si].tapCount, 10) || 0);
-            }
+        if (isUspStandardProcedureMode(mode)) {
+            applyStandardUspStepDefaults('create');
         } else {
-            window._createRecipeStepTaps = computeStandardUspTaps(stepCount);
+            var stepCount = Math.max(1, parseInt(r.stepCount, 10) || (r.steps && r.steps.length) || USP_DEFAULT_STEP_COUNT);
+            window._createRecipeStepCount = stepCount;
+            if (r.steps && r.steps.length) {
+                window._createRecipeStepTaps = [];
+                for (var si = 0; si < r.steps.length; si++) {
+                    window._createRecipeStepTaps.push(parseInt(r.steps[si].tapCount, 10) || 0);
+                }
+            } else {
+                window._createRecipeStepTaps = computeStandardUspTaps(stepCount);
+            }
         }
         if (typeof _refreshCreateStepSummary === 'function') _refreshCreateStepSummary();
         updateCreateRecipeContinueButton();
@@ -5820,10 +6274,12 @@ function updateCreateRecipeContinueButton() {
     var needSpeedHeight = mode === 'CUSTOM';
     var speedOk = needSpeedHeight ? !!speedRadio : true;
     var heightOk = needSpeedHeight ? !!heightRadio : true;
+    var n = window._createRecipeStepCount;
     var customOk = true;
     if (mode === 'CUSTOM') {
-        var n = window._createRecipeStepCount;
         customOk = !!(n && window._createRecipeStepTaps && window._createRecipeStepTaps.length === n);
+    } else if (isUspStandardProcedureMode(mode)) {
+        customOk = true;
     }
     var canContinue = !!(recipeName && speedOk && heightOk && customOk);
     if (btn) {
@@ -5833,9 +6289,9 @@ function updateCreateRecipeContinueButton() {
     var summaryEl = document.getElementById('create-recipe-continue-summary');
     if (summaryEl) {
         if (mode === 'USP1') {
-            summaryEl.textContent = 'USP 1 — 300 Taps/Min, 14 mm drop height';
+            summaryEl.textContent = 'USP 1 — 300 Taps/Min, 14 mm — 10 steps (fixed)';
         } else if (mode === 'USP2') {
-            summaryEl.textContent = 'USP 2 — 250 Taps/Min, 3 mm drop height';
+            summaryEl.textContent = 'USP 2 — 250 Taps/Min, 3 mm — 10 steps (fixed)';
         } else if (speedRadio && heightRadio) {
             summaryEl.textContent =
                 'Custom — Speed: ' + speedRadio.value + ' Taps/Min, Height: ' + heightRadio.value + ' mm';
@@ -6095,25 +6551,34 @@ function completeRecipeFromStep2() {
     var cylinderRadio = document.querySelector('input[name="create-cylinder"]:checked');
     var cylinderVolume = cylinderRadio ? parseFloat(cylinderRadio.value) || 100 : 100;
 
-    var stepCount = (typeof window._createRecipeStepCount === 'number' && window._createRecipeStepCount > 0)
-        ? window._createRecipeStepCount
-        : 10;
+    var stepCount;
+    var taps;
+    if (isUspStandardProcedureMode(mode)) {
+        applyStandardUspStepDefaults('create');
+        stepCount = USP_DEFAULT_STEP_COUNT;
+        taps = computeStandardUspTaps(stepCount);
+    } else {
+        stepCount = (typeof window._createRecipeStepCount === 'number' && window._createRecipeStepCount > 0)
+            ? window._createRecipeStepCount
+            : 0;
+        taps = window._createRecipeStepTaps;
+        if (!taps || taps.length !== stepCount) {
+            taps = computeCreateRecipeStepTapsForStepCount(stepCount);
+        }
+    }
 
     if (!productName || speed == null || dropHeight == null) {
         showAppModal('Please complete recipe name, speed and height before saving.', 'Save Recipe');
         return;
     }
 
-    var taps = window._createRecipeStepTaps;
-    if (!taps || taps.length !== stepCount) {
-        taps = computeCreateRecipeStepTapsForStepCount(stepCount);
-    }
-    if (mode === 'CUSTOM' && !taps) {
-        showAppModal('Invalid custom tap total for this step count.', 'Save Recipe');
+    if (mode === 'CUSTOM' && (!stepCount || stepCount < 1)) {
+        showAppModal('Tap Number of steps to configure steps and taps for each step.', 'Save Recipe');
         return;
     }
-    if (!taps || taps.length !== stepCount) {
-        taps = computeStandardUspTaps(stepCount);
+    if (mode === 'CUSTOM' && !taps) {
+        showAppModal('Tap Number of steps to configure taps for each step.', 'Save Recipe');
+        return;
     }
 
     var steps = [];
@@ -6590,7 +7055,7 @@ function selectRole(roleName) {
         });
     }
     var permPanel = document.getElementById('add-member-permissions-panel');
-    if (permPanel && permPanel.style.display !== 'none' && typeof renderAddMemberPermissionCards === 'function') {
+    if (permPanel && !permPanel.classList.contains('is-hidden') && typeof renderAddMemberPermissionCards === 'function') {
         renderAddMemberPermissionCards();
     }
 }
@@ -6796,7 +7261,8 @@ function _refreshAddMemberPermissionsPanelVisibility() {
     var panel = document.getElementById('add-member-permissions-panel');
     if (!panel) return;
     var show = _addMemberPermissionsPanelShouldShow();
-    panel.style.display = show ? '' : 'none';
+    panel.classList.toggle('is-hidden', !show);
+    panel.setAttribute('aria-hidden', show ? 'false' : 'true');
     if (show) renderAddMemberPermissionCards();
 }
 
@@ -6871,6 +7337,8 @@ function openAddMember() {
     _refreshAddMemberPermissionsPanelVisibility();
     goToPage('add-member');
     setTimeout(function () {
+        var page = document.getElementById('page-add-member');
+        if (page) page.scrollTop = 0;
         var f = document.getElementById('add-fullname');
         if (f) f.focus();
     }, 60);
@@ -7078,34 +7546,24 @@ function applyDateTime() {
     minutes = Math.max(0, Math.min(59, minutes));
     var pad = function (n) { return String(n).padStart(2, '0'); };
     var dtStr = year + '-' + pad(month) + '-' + pad(day) + 'T' + pad(hours) + ':' + pad(minutes) + ':00';
-    var headers = {};
-    if (typeof window.currentUser !== 'undefined' && window.currentUser && window.currentUser.role) {
-        headers['X-User-Role'] = window.currentUser.role;
-    }
-    fetch((API_BASE || '') + '/api/set_datetime', {
+    apiRequest((API_BASE || '') + '/api/set_datetime', {
         method: 'POST',
-        headers: Object.assign({ 'Content-Type': 'application/json' }, headers),
-        body: JSON.stringify({ datetime: dtStr })
-    }).then(function (r) {
-        return r.json().catch(function () { return {}; }).then(function (data) {
-            if (r.ok) {
-                if (data && data.datetime) {
-                    var parts = parseWallDatetimeIso(data.datetime);
-                    if (parts) {
-                        _wallClockAnchor = { parts: parts, at: Date.now() };
-                        applyWallClockToTopBar(parts);
-                    }
-                }
-                updateDateTime();
-                showAppModal('Date and time updated.', 'Success', function () {
-                    goBack();
-                });
-                return;
+        body: { datetime: dtStr }
+    }).then(function (data) {
+        if (data && data.datetime) {
+            var parts = parseWallDatetimeIso(data.datetime);
+            if (parts) {
+                _wallClockAnchor = { parts: parts, at: Date.now() };
+                applyWallClockToTopBar(parts);
             }
-            showAppModal((data && data.error) ? data.error : 'Failed to set date and time.', 'Error');
+        }
+        updateDateTime();
+        showAppModal('Date and time updated.', 'Success', function () {
+            goBack();
         });
     }).catch(function (err) {
-        showAppModal('Failed to update date and time: ' + (err && err.message ? err.message : 'Network error'), 'Error');
+        var msg = (err && err.message) ? err.message : 'Network error';
+        showAppModal('Failed to update date and time: ' + msg, 'Error');
     });
 }
 
@@ -7276,18 +7734,32 @@ function saveFactorySettings() {
     });
 }
 
+function clearClientStateAfterFactoryReset() {
+    window.currentUser = null;
+    if (typeof currentUser !== 'undefined') currentUser = null;
+    try {
+        localStorage.removeItem('currentUser');
+        localStorage.removeItem('disabledRecipes');
+    } catch (e) {}
+    validationCompletion = { distance: false, load: false };
+    validationSessionResults = { distance: null, load: null };
+    if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+}
+
 function showFactoryResetConfirm() {
     showConfirmModal(
-        'Are you sure you want to factory reset? This will permanently delete all reports, recipes, and users. This action cannot be undone.',
+        'Are you sure you want to factory reset? This will permanently delete all reports, recipes, users, audit trails, and fingerprint enrollments. Factory settings (company/model/serial) are kept. This cannot be undone.',
         'Factory Reset'
     ).then(function (ok) {
         if (!ok) return;
         apiRequest((API_BASE || '') + '/api/data/factory-reset', { method: 'POST', body: {} })
             .then(function (result) {
-                showAppModal('Factory reset completed. All reports, recipes, and users have been deleted.', 'Factory Reset');
-                if (typeof loadManageRecipes === 'function') loadManageRecipes();
-                if (typeof loadReports === 'function') loadReports();
-                if (typeof loadMembersAndRender === 'function') loadMembersAndRender();
+                clearClientStateAfterFactoryReset();
+                showAppModal(
+                    'Factory reset completed. All reports, recipes, users, and audit trails have been erased.',
+                    'Factory Reset'
+                );
+                if (typeof showLoginScreen === 'function') showLoginScreen();
             })
             .catch(function (err) {
                 var msg = (err && err.message) ? err.message : 'Factory reset failed.';

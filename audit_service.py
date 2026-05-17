@@ -502,6 +502,94 @@ def prune_power_interruption_overflow(keep: int = 50) -> int:
         conn.close()
 
 
+def entry_count() -> int:
+    """Return the number of rows in the audit database (0 if missing or unreadable)."""
+    if not _audit_db_path or not _audit_db_path.exists():
+        return 0
+    conn = _db_connect()
+    if not conn:
+        return 0
+    try:
+        row = conn.execute("SELECT COUNT(*) AS c FROM audit_entries").fetchone()
+        return int(row["c"] if row else 0)
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
+
+def _remove_audit_legacy_files() -> None:
+    for path in (
+        _legacy_audit_log_path,
+        _storage_dir / "audit_log.json" if _storage_dir else None,
+        _storage_dir / "audit_entries.json" if _storage_dir else None,
+        _storage_dir / "audit_export.json" if _storage_dir else None,
+    ):
+        if path and path.exists():
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+
+def _remove_audit_db_artifacts() -> None:
+    """Remove SQLite DB file, WAL/SHM sidecars, and timestamped backups."""
+    if not _audit_db_path:
+        return
+    base = _audit_db_path.name
+    if _db_dir and _db_dir.exists():
+        for path in _db_dir.iterdir():
+            if not path.is_file():
+                continue
+            name = path.name
+            if name == base or name.startswith(base + "-") or name.startswith(base + "."):
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+        for backup in _db_dir.glob("audit_log.db.bak*"):
+            try:
+                backup.unlink()
+            except Exception:
+                pass
+
+
+def _destroy_audit_database() -> None:
+    """Delete the on-disk audit database so the next open recreates an empty schema."""
+    _remove_audit_db_artifacts()
+    _ensure_db_schema()
+
+
+def clear_all_entries() -> int:
+    """Delete the entire audit trail (DB + legacy/export files). Used by factory reset."""
+    before = entry_count()
+    _remove_audit_legacy_files()
+
+    if _audit_db_path and _audit_db_path.exists():
+        conn = _db_connect()
+        if conn:
+            try:
+                conn.execute("DELETE FROM audit_entries")
+                conn.commit()
+                try:
+                    conn.execute("VACUUM")
+                    conn.commit()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            finally:
+                conn.close()
+
+    if entry_count() > 0:
+        _destroy_audit_database()
+
+    _remove_audit_legacy_files()
+    _remove_audit_db_artifacts()
+    _ensure_db_schema()
+    return before
+
+
 def clear_entries_before(cutoff_ms: Optional[int]) -> int:
     """Delete every audit row strictly older than cutoff_ms.
 
@@ -515,26 +603,42 @@ def clear_entries_before(cutoff_ms: Optional[int]) -> int:
     if not conn:
         return 0
     try:
+        if cutoff_ms is None or int(cutoff_ms) <= 0:
+            before = entry_count()
+            try:
+                conn.execute("DELETE FROM audit_entries")
+                conn.commit()
+                try:
+                    conn.execute("VACUUM")
+                    conn.commit()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            finally:
+                conn.close()
+                conn = None
+            if entry_count() > 0:
+                _destroy_audit_database()
+            return before
         try:
-            if cutoff_ms is None or int(cutoff_ms) <= 0:
-                with conn:
-                    cur = conn.execute("DELETE FROM audit_entries")
-            else:
-                with conn:
-                    cur = conn.execute(
-                        "DELETE FROM audit_entries WHERE COALESCE(timestamp, 0) < ?",
-                        (int(cutoff_ms),),
-                    )
-            removed = cur.rowcount if cur.rowcount is not None else 0
+            cur = conn.execute(
+                "DELETE FROM audit_entries WHERE COALESCE(timestamp, 0) < ?",
+                (int(cutoff_ms),),
+            )
+            conn.commit()
+            removed = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
         except Exception:
             return 0
         try:
             conn.execute("VACUUM")
+            conn.commit()
         except Exception:
             pass
         return int(removed)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def list_entries(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:

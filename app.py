@@ -48,7 +48,6 @@ BIOMETRIC_ENROLL_TIMEOUT_SEC = float(os.environ.get("BIOMETRIC_ENROLL_TIMEOUT_SE
 BIOMETRIC_LOGIN_TIMEOUT_SEC = float(os.environ.get("BIOMETRIC_LOGIN_TIMEOUT_SEC", "30"))
 FLASK_HOST = os.environ.get("FLASK_HOST", "127.0.0.1")
 FLASK_PORT = int(os.environ.get("FLASK_PORT", "5000"))
-ALLOWED_DATETIME_ROLES = ("factory", "admin")
 EXPORT_SUBFOLDER = "TapDensity-Reports-Exported"
 DATETIME_STORAGE = STORAGE_DIR / "datetime.json"
 APPROVAL_VERIFY_TTL_SECONDS = int(os.environ.get("APPROVAL_VERIFY_TTL_SECONDS", "180"))
@@ -472,6 +471,32 @@ def _session_has_internal(internal_key: str) -> bool:
     if not m:
         return False
     return rbac_service.member_has_internal(m, internal_key)
+
+
+def _session_can_edit_datetime() -> bool:
+    """True when the logged-in user may change system date/time (RBAC, not role name alone)."""
+    data_service.refresh_current_user_from_member()
+    m = _rbac_member_from_session()
+    if not m:
+        return False
+    return rbac_service.member_has_internal(m, "edit-datetime")
+
+
+def _require_edit_datetime():
+    """Return a Flask error response if the session may not change date/time, else None."""
+    if not data_service.get_current_user():
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    if not _session_can_edit_datetime():
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "Forbidden. You do not have permission to change date and time.",
+                }
+            ),
+            403,
+        )
+    return None
 
 
 def _verifier_payload_has_internal(verified, internal_key: str) -> bool:
@@ -1314,68 +1339,36 @@ def factory_reset():
         if not user or (user.get("role") or "").strip().lower() != "factory":
             return jsonify({"error": "Forbidden. Factory role required."}), 403
 
-        # Find when the current login session began so we can keep its rows.
-        # write_session_power_audit_pending is set on every successful login
-        # (password, biometric, password-expired-reset), so ts_ms is reliable.
-        pending = data_service.read_session_power_audit_pending() or {}
-        try:
-            session_start_ms = int(pending.get("ts_ms") or 0)
-        except (TypeError, ValueError):
-            session_start_ms = 0
-
-        # Delete recipes, reports, members, report files (existing behaviour;
-        # does NOT touch current_user.json or session_power_audit_pending.json,
-        # so the user stays signed in).
+        data_service.delete_session_power_audit_pending()
         result = data_service.factory_reset()
+        data_service.touch_app_clean_stop_flag()
 
-        # Wipe audit rows older than the current session start.
-        # If session_start_ms is missing/zero we wipe EVERYTHING per the
-        # 'delete the rest' directive.
-        audit_removed = audit_service.clear_entries_before(session_start_ms)
+        audit_removed = audit_service.clear_all_entries()
+        audit_remaining = audit_service.entry_count()
+        if audit_remaining > 0:
+            audit_removed += audit_service.clear_all_entries()
+            audit_remaining = audit_service.entry_count()
 
-        # Write the post-reset audit row AFTER the wipe so it survives.
-        # If the actor is the hidden factory user, write an anonymised row so
-        # it is not stripped by the RLERLT/Factory suppression filter.
-        un = (user.get("username") or user.get("name") or "").strip()
-        role = (user.get("role") or "").strip()
-        audit_time = _audit_time_fields()
-        if audit_service.is_hidden_factory_actor(un, role):
-            audit_service.log_structured_event(
-                user="--",
-                role="--",
-                action="Factory reset performed",
-                outcome="success",
-                entity_type="system",
-                entity_name="factory-reset",
-                details="Factory reset performed; audit history older than the current session was erased.",
-                event_type="compliance",
-                request_source=_audit_request_source(),
-                extra={
-                    "deleted": result.get("deleted") or {},
-                    "auditRowsRemoved": audit_removed,
-                    "sessionStartMs": session_start_ms,
-                },
-                timestamp_ms=audit_time.get("timestamp_ms"),
-                date_time=audit_time.get("date_time"),
-            )
-        else:
-            _audit_event(
-                action="Factory reset performed",
-                outcome="success",
-                entity_type="system",
-                entity_name="factory-reset",
-                details="Factory reset performed; audit history older than the current session was erased.",
-                extra={
-                    "deleted": result.get("deleted") or {},
-                    "auditRowsRemoved": audit_removed,
-                    "sessionStartMs": session_start_ms,
-                },
-            )
+        biometric_cleared = False
+        try:
+            bio_result = biometric_service.clear_templates()
+            biometric_cleared = bool(bio_result and bio_result.get("ok"))
+        except Exception as bio_err:
+            app.logger.warning("Factory reset: biometric clear skipped: %s", bio_err)
+
+        if DATETIME_STORAGE.exists():
+            try:
+                DATETIME_STORAGE.unlink()
+            except Exception:
+                pass
 
         return jsonify({
             "success": True,
             "deleted": result["deleted"],
             "auditRowsRemoved": audit_removed,
+            "auditRowsRemaining": audit_remaining,
+            "biometricTemplatesCleared": biometric_cleared,
+            "requiresLogin": True,
         }), 200
     except Exception as e:
         app.logger.exception("Error during factory reset")
@@ -3231,9 +3224,9 @@ def get_datetime():
 
 
 def _set_datetime_common():
-    role = (request.headers.get("X-User-Role") or "").strip().lower()
-    if role not in ALLOWED_DATETIME_ROLES:
-        return jsonify({"ok": False, "error": "forbidden"}), 403
+    denied = _require_edit_datetime()
+    if denied:
+        return denied
     data = request.get_json(force=True, silent=True) or {}
     dt_str = data.get("datetime", "")
     if not dt_str:
@@ -3288,9 +3281,9 @@ def get_rtc_date():
 
 @app.route("/api/rtc/date", methods=["POST"])
 def set_rtc_date_route():
-    role = (request.headers.get("X-User-Role") or "").strip().lower()
-    if role not in ALLOWED_DATETIME_ROLES:
-        return jsonify({"ok": False, "error": "forbidden"}), 403
+    denied = _require_edit_datetime()
+    if denied:
+        return denied
     data = request.get_json(force=True, silent=True) or {}
     dt_str = data.get("datetime", "")
     if not dt_str:

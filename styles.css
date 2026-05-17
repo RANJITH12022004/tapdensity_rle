@@ -264,6 +264,13 @@ body {
     border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 12px;
     background: rgba(0, 0, 0, 0.18);
+    flex: 0 0 auto;
+    width: 100%;
+    overflow: visible;
+}
+
+.permissions-panel.is-hidden {
+    display: none !important;
 }
 
 .permissions-panel-header {
@@ -292,8 +299,10 @@ body {
 
 .permission-cards-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+    width: 100%;
+    min-height: 80px;
 }
 
 /* Generic loading overlay (export progress, long-running ops) */
@@ -400,12 +409,14 @@ body {
 }
 
 .permission-card {
-    border: 1px solid rgba(255, 255, 255, 0.14);
+    border: 1px solid rgba(148, 163, 184, 0.45);
     border-radius: 10px;
-    padding: 10px;
-    background: rgba(255, 255, 255, 0.03);
+    padding: 12px;
+    background: rgba(30, 41, 59, 0.92);
+    color: var(--text-primary);
     cursor: pointer;
     transition: transform 0.12s ease, border-color 0.16s ease, background 0.16s ease;
+    min-height: 72px;
 }
 
 .permission-card:hover {
@@ -470,12 +481,14 @@ body {
     font-size: 0.92rem;
     font-weight: 700;
     margin-bottom: 4px;
+    color: var(--text-primary);
 }
 
 .permission-card-desc {
     font-size: 0.78rem;
-    opacity: 0.86;
+    color: var(--text-secondary);
     min-height: 30px;
+    line-height: 1.35;
 }
 
 .permission-card-desc.permission-card-state {
@@ -821,10 +834,11 @@ body {
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    justify-content: center;
+    justify-content: flex-start;
     width: 100%;
     height: 100%;
     min-height: 0;
+    overflow: hidden;
 }
 
 .placeholder-page {
@@ -1536,13 +1550,15 @@ body {
 }
 
 #page-validate .validation-main-container {
-    flex: 1;
+    flex: 0 0 auto;
     display: flex;
     flex-direction: column;
-    justify-content: center;
+    justify-content: flex-start;
     align-items: center;
-    padding: 24px 20px;
-    min-height: 0;
+    padding: 24px 20px 48px;
+    min-height: min-content;
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .section-title {
@@ -1649,12 +1665,15 @@ body {
 }
 
 .validation-type-page {
-    position: relative; 
-    padding: 56px 24px 24px;
+    position: relative;
+    padding: 56px 24px 48px;
     width: 100%;
     max-width: 100%;
     margin: 0 auto;
     text-align: center;
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    min-height: min-content;
 }
 
 .validation-type-page .section-subtitle {
@@ -1797,12 +1816,15 @@ body {
 /* Validation test pages */
 .validation-test-page {
     position: relative;
-    padding: 56px 24px 24px;
+    padding: 56px 24px 48px;
     max-width: 100%;
     margin: 0 auto;
     width: 100%;
     background: var(--bg-primary);
     border-radius: 18px;
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    min-height: min-content;
 }
 
 .validation-test-page.calibration-page {
@@ -2478,6 +2500,30 @@ body {
     background: #fff;
 }
 
+.report-test-data-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.report-test-data-table th,
+.report-test-data-table td {
+    padding: 10px 14px;
+    text-align: center;
+    vertical-align: middle;
+}
+
+.report-test-data-table th:first-child,
+.report-test-data-table td:first-child {
+    text-align: center;
+    min-width: 3.5rem;
+}
+
+.report-test-data-table th:nth-child(n+2),
+.report-test-data-table td:nth-child(n+2) {
+    min-width: 5.5rem;
+}
+
 .report-remarks-box {
     border: 1px solid #000;
     padding: 12px;
@@ -2672,28 +2718,83 @@ body {
     font-size: 11pt;
 }
 
-.report-approve-credentials-block,
-.report-approve-biometric-wrap {
+.report-approve-credentials-block {
     margin-top: 8px;
 }
 
-.report-approve-sign-or {
-    text-align: center;
-    color: #6b7280;
-    font-weight: 600;
-    margin: 14px 0;
-    font-size: 11pt;
-}
-
-.report-approve-submit-credentials,
-.report-approve-submit-biometric {
+.report-approve-submit-credentials {
     margin-top: 10px;
     width: 100%;
     max-width: 360px;
 }
 
-.report-approve-biometric-wrap .report-approve-submit-biometric {
-    max-width: 100%;
+.report-approve-biometric-wrap {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid #e5e7eb;
+    display: flex;
+    justify-content: center;
+}
+
+.report-approve-biometric-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 10px 16px;
+    width: 100%;
+    max-width: 280px;
+    transition: opacity 0.2s ease;
+}
+
+.report-approve-biometric-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.report-approve-biometric-btn:disabled .report-approve-biometric-icon {
+    animation: none;
+}
+
+.report-approve-biometric-btn:not(:disabled):hover .report-approve-biometric-icon {
+    transform: scale(1.06);
+    border-color: #9ca3af;
+    background: #f3f4f6;
+}
+
+.report-approve-biometric-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: var(--radius-md);
+    background: #f9fafb;
+    border: 1px solid #d1d5db;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #374151;
+    transition: transform 0.25s ease, background 0.25s ease, border-color 0.25s ease;
+    animation: reportApproveBiometricPulse 2.2s ease-in-out infinite;
+}
+
+.report-approve-biometric-btn span {
+    color: #111827;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+@keyframes reportApproveBiometricPulse {
+    0%, 100% {
+        box-shadow: 0 0 0 0 rgba(55, 65, 81, 0.15);
+        transform: scale(1);
+    }
+    50% {
+        box-shadow: 0 0 0 6px rgba(55, 65, 81, 0.08);
+        transform: scale(1.04);
+    }
 }
 
 .report-approve-actions-row {
@@ -2701,6 +2802,12 @@ body {
     flex-wrap: wrap;
     gap: 10px;
     margin-top: 14px;
+}
+
+.report-approve-biometric-retry {
+    margin-top: 10px;
+    width: 100%;
+    max-width: 280px;
 }
 
 .report-approve-verify-error {
@@ -3297,14 +3404,111 @@ body {
     box-shadow: 0 4px 15px rgba(37, 99, 235, 0.45);
 }
 
+/* Add New Member / biometric / validation: scrollable full-height pages */
+.page-content:has(#page-add-member.active),
+.page-content:has(#page-member-biometric.active),
+.page-content:has(#page-validate.active),
+.page-content:has(#page-validate-type-select.active),
+.page-content:has(#page-usp1-detail.active),
+.page-content:has(#page-usp2-detail.active),
+.page-content:has(#page-validation-run.active) {
+    padding: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.page-content:has(#page-add-member.active) > #page-add-member.active,
+.page-content:has(#page-member-biometric.active) > #page-member-biometric.active,
+.page-content:has(#page-validate.active) > #page-validate.active,
+.page-content:has(#page-validate-type-select.active) > #page-validate-type-select.active,
+.page-content:has(#page-usp1-detail.active) > #page-usp1-detail.active,
+.page-content:has(#page-usp2-detail.active) > #page-usp2-detail.active,
+.page-content:has(#page-validation-run.active) > #page-validation-run.active {
+    flex: 1 1 0;
+    min-height: 0;
+    width: 100%;
+    overflow: hidden;
+    align-self: stretch;
+}
+
+/* Validation: scroll the inner content surface (reliable on 1024×600 touch kiosk) */
+#page-validate.active,
+#page-validate-type-select.active,
+#page-usp1-detail.active,
+#page-usp2-detail.active,
+#page-validation-run.active {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    justify-content: flex-start !important;
+    flex: 1 1 0 !important;
+    min-height: 0 !important;
+    max-height: 100% !important;
+    height: 100% !important;
+    overflow: hidden !important;
+}
+
+#page-validate.active > .validation-main-container,
+#page-validate-type-select.active > .validation-type-page,
+#page-usp1-detail.active > .validation-type-page,
+#page-usp2-detail.active > .validation-type-page,
+#page-validation-run.active > .validation-test-page {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: 100%;
+    width: 100%;
+    overflow-x: hidden;
+    overflow-y: scroll;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+    overscroll-behavior: contain;
+}
+
+body.keyboard-open #page-add-member.active,
+body.keyboard-open #page-member-biometric.active,
+body.keyboard-open #page-validate.active,
+body.keyboard-open #page-validate-type-select.active,
+body.keyboard-open #page-usp1-detail.active,
+body.keyboard-open #page-usp2-detail.active,
+body.keyboard-open #page-validation-run.active {
+    overflow-y: auto !important;
+    scroll-padding-bottom: 280px;
+}
+
+body.keyboard-open #page-validate.active > .validation-main-container,
+body.keyboard-open #page-validate-type-select.active > .validation-type-page,
+body.keyboard-open #page-usp1-detail.active > .validation-type-page,
+body.keyboard-open #page-usp2-detail.active > .validation-type-page,
+body.keyboard-open #page-validation-run.active > .validation-test-page {
+    overflow-y: scroll !important;
+    scroll-padding-bottom: 280px;
+}
+
 .add-member-container {
     max-width: 960px;
     width: 100%;
     margin: 0 auto;
-    padding: 24px 32px;
+    padding: 24px 32px 48px;
     display: flex;
     flex-direction: column;
     gap: 16px;
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    min-height: min-content;
+}
+
+.role-selection-container {
+    width: 100%;
+    flex: 0 0 auto;
+}
+
+.role-selection-container > label {
+    display: block;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
 }
 
 .add-member-form.form-grid {
@@ -3700,8 +3904,7 @@ body.keyboard-open {
     background: rgba(255, 255, 255, 0.25);
 }
 
-/* Validation/calibration/type pages need block display */
-#page-validate-type-select.active,
+/* Scrollable form/wizard pages (validation uses page-content:has scroll above) */
 #page-calibration-type-select.active,
 #page-load-calibration.active,
 #page-distance-zero-calibration.active,
@@ -3715,6 +3918,9 @@ body.keyboard-open {
     height: 100%;
     overflow-x: hidden;
     overflow-y: auto;
+    min-height: 0;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
 }
 
 /* Allow vertical scrolling on Configure Steps page */

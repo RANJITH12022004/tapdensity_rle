@@ -914,10 +914,11 @@ def enable_member(member_id: int) -> Dict[str, Any]:
 
 
 def factory_reset() -> Dict[str, Any]:
-    """Delete all reports, recipes, and members. Preserves factory settings and factory user."""
+    """Delete all operational data. Preserves factorySettings.json only."""
     recipes_path = _get_storage_path("recipes.json")
     reports_path = _get_storage_path("reports.json")
     members_path = _get_storage_path("members.json")
+    test_run_path = _get_storage_path("test_run.json")
     recipes = _load_json_file(recipes_path, default=[])
     reports = _load_json_file(reports_path, default=[])
     members = _load_json_file(members_path, default=[])
@@ -930,18 +931,42 @@ def factory_reset() -> Dict[str, Any]:
     n_report_files = 0
     if _reports_dir and _reports_dir.exists():
         for f in list(_reports_dir.iterdir()):
-            if f.is_file() and f.suffix.lower() in (".pdf", ".json", ".txt"):
+            if f.is_file():
                 try:
                     f.unlink()
                     n_report_files += 1
                 except Exception:
                     pass
+    n_storage_files = 0
+    for extra_name in ("test_run.json", "datetime.json", "audit_entries.json", "audit_log.json", "audit_export.json"):
+        extra_path = _get_storage_path(extra_name)
+        if extra_path.exists():
+            try:
+                extra_path.unlink()
+                n_storage_files += 1
+            except Exception:
+                pass
+    clear_current_user()
+    delete_session_power_audit_pending()
+    clean_flag = _get_storage_path(_APP_CLEAN_STOP_FLAG)
+    if clean_flag.exists():
+        try:
+            clean_flag.unlink()
+        except Exception:
+            pass
+    if test_run_path.exists():
+        try:
+            test_run_path.unlink()
+            n_storage_files += 1
+        except Exception:
+            pass
     return {
         "deleted": {
             "recipes": n_recipes,
             "reports": n_reports,
             "members": n_members,
             "reportFiles": n_report_files,
+            "storageFiles": n_storage_files,
         }
     }
 
@@ -1023,6 +1048,27 @@ def get_current_user() -> Optional[Dict[str, Any]]:
     session_path = _get_storage_path("current_user.json")
     _current_user = _load_json_file(session_path, default=None)
     return _current_user
+
+
+def refresh_current_user_from_member() -> Optional[Dict[str, Any]]:
+    """Reload role/permissions on the session from members.json (e.g. after admin grants access)."""
+    cur = get_current_user()
+    if not cur:
+        return None
+    username = str(cur.get("username") or "").strip()
+    if not username:
+        return cur
+    if username.upper() == FACTORY_USERNAME.upper():
+        return cur
+    member = get_member_by_username(username)
+    if not member:
+        return cur
+    updated = dict(cur)
+    updated["role"] = member.get("role", cur.get("role"))
+    updated["featureOverrides"] = member.get("featureOverrides")
+    updated["permissionsVersion"] = member.get("permissionsVersion")
+    save_current_user(updated)
+    return updated
 
 
 def clear_current_user():
