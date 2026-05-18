@@ -326,6 +326,42 @@ def _format_thermal_test_data_table(row_count: int, results: list, width: int = 
     return lines
 
 
+def _stat_display_value(val: dict) -> Any:
+    """Single statistic value for print (value field, else mean)."""
+    if val.get("value") is not None:
+        return val.get("value")
+    if val.get("mean") is not None:
+        return val.get("mean")
+    if val.get("Mean") is not None:
+        return val.get("Mean")
+    return None
+
+
+def _recipe_total_tap_count(recipe: Dict[str, Any]) -> Optional[int]:
+    if not isinstance(recipe, dict):
+        return None
+    ct = recipe.get("customTotalTaps")
+    if ct is not None and ct != "":
+        try:
+            n = int(ct)
+            if n > 0:
+                return n
+        except (TypeError, ValueError):
+            pass
+    steps = recipe.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None
+    total = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        try:
+            total += int(step.get("tapCount") or 0)
+        except (TypeError, ValueError):
+            pass
+    return total if total > 0 else None
+
+
 def _append_test_statistics_block(
     lines: list, stats: dict, width: int, thermal: bool, status_raw: str
 ) -> None:
@@ -342,26 +378,10 @@ def _append_test_statistics_block(
         if not isinstance(val, dict):
             continue
         label = str(key)
-        if val.get("value") is not None:
-            lines.append(f"{label}:")
-            lines.append(f"  final {_fmt_density_val(val.get('value'))}")
+        display = _stat_display_value(val)
+        if display is None:
             continue
-        mean = val.get("mean", val.get("Mean", "--"))
-        mn = val.get("min", val.get("Min", "--"))
-        mx = val.get("max", val.get("Max", "--"))
-        if thermal:
-            lines.append(label + ":")
-            lines.append(f" mean {_fmt_density_val(mean)}")
-            lines.append(f" min  {_fmt_density_val(mn)}")
-            lines.append(f" max  {_fmt_density_val(mx)}")
-        else:
-            lines.append(f"{label}:")
-            lines.append(
-                f"  {'Mean':<8} {'Min':<8} {'Max':<8}"
-            )
-            lines.append(
-                f"  {str(_fmt_density_val(mean)):<8} {str(_fmt_density_val(mn)):<8} {str(_fmt_density_val(mx)):<8}"
-            )
+        lines.append(f"{label}: {_fmt_density_val(display)}")
     lines.extend(["", star, ""])
 
 
@@ -603,6 +623,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
             recipe = {}
         status_raw = str(td.get("status", "")).lower() if isinstance(td, dict) else ""
         status_label = "Aborted" if status_raw == "aborted" else "Completed"
+        total_taps = _recipe_total_tap_count(recipe)
+        total_taps_str = str(total_taps) if total_taps is not None else "N/A"
         ts_start = td.get("testStartTime") or report_data.get("createdAt")
         ts_end = (
             td.get("testEndTime")
@@ -618,6 +640,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
                     "TEST INFORMATION",
                     f"Product: {recipe.get('productName', td.get('productName', 'N/A'))}",
                     f"Batch: {recipe.get('batchNumber', td.get('batchNumber', 'N/A'))}",
+                    f"Total Taps: {total_taps_str}",
                     f"Test Start Date: {start_date}",
                     f"Test Start Time: {start_time}",
                     f"Completed Date: {end_date}",
@@ -631,6 +654,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
                 [
                     f"Product: {recipe.get('productName', td.get('productName', 'N/A'))}",
                     f"Batch: {recipe.get('batchNumber', td.get('batchNumber', 'N/A'))}",
+                    f"Total Taps: {total_taps_str}",
                     f"Test Start: {_format_ts_readable(ts_start)}",
                     f"Completed: {_format_ts_readable(ts_end)}",
                     f"Test Status: {status_label}",

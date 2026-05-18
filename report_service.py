@@ -70,6 +70,41 @@ def _parse_density_number(val: Any) -> Optional[float]:
         return None
 
 
+def _stat_display_value(val: Dict[str, Any]) -> Any:
+    if val.get("value") is not None:
+        return val.get("value")
+    if val.get("mean") is not None:
+        return val.get("mean")
+    if val.get("Mean") is not None:
+        return val.get("Mean")
+    return None
+
+
+def _recipe_total_tap_count(recipe: Dict[str, Any]) -> Optional[int]:
+    if not isinstance(recipe, dict):
+        return None
+    ct = recipe.get("customTotalTaps")
+    if ct is not None and ct != "":
+        try:
+            n = int(ct)
+            if n > 0:
+                return n
+        except (TypeError, ValueError):
+            pass
+    steps = recipe.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None
+    total = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        try:
+            total += int(step.get("tapCount") or 0)
+        except (TypeError, ValueError):
+            pass
+    return total if total > 0 else None
+
+
 def _agg_mean_min_max(values: List[float]) -> Dict[str, float]:
     if not values:
         return {}
@@ -301,34 +336,23 @@ def _report_step_row_count(td: Dict[str, Any]) -> int:
 
 def _statistics_table_html(preview: Dict[str, Any], td: Dict[str, Any]) -> str:
     if str(td.get("status") or "").strip().lower() == "aborted":
-        return '<tr><td colspan="4">N/A</td></tr>'
+        return '<tr><td colspan="2">N/A</td></tr>'
     stats = preview.get("statistics") or td.get("statistics") or {}
     if not isinstance(stats, dict) or not stats:
-        return '<tr><td colspan="4">N/A</td></tr>'
+        return '<tr><td colspan="2">N/A</td></tr>'
     rows = []
     for key, val in stats.items():
         if not isinstance(val, dict):
             continue
-        if val.get("value") is not None:
-            rows.append(
-                "<tr><th>{}</th><td colspan=\"3\">{}</td></tr>".format(
-                    _html_esc(key), _html_esc(val.get("value"))
-                )
-            )
+        display = _stat_display_value(val)
+        if display is None:
             continue
-        mean = val.get("mean", val.get("Mean"))
-        min_v = val.get("min", val.get("Min"))
-        max_v = val.get("max", val.get("Max"))
-        if mean is not None or min_v is not None or max_v is not None:
-            rows.append(
-                "<tr><th>{}</th><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-                    _html_esc(key),
-                    _html_esc(mean if mean is not None else "--"),
-                    _html_esc(min_v if min_v is not None else "--"),
-                    _html_esc(max_v if max_v is not None else "--"),
-                )
+        rows.append(
+            "<tr><th>{}</th><td>{}</td></tr>".format(
+                _html_esc(key), _html_esc(display)
             )
-    return "".join(rows) if rows else '<tr><td colspan="4">N/A</td></tr>'
+        )
+    return "".join(rows) if rows else '<tr><td colspan="2">N/A</td></tr>'
 
 
 def _validation_details_table_html(preview: Dict[str, Any]) -> str:
@@ -466,11 +490,13 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
         else:
             step_rows.append('<tr><td colspan="5">No test data</td></tr>')
         test_data_rows = "".join(step_rows)
+        total_taps = _recipe_total_tap_count(recipe)
+        total_taps_str = str(total_taps) if total_taps is not None else "N/A"
         test_section = (
             '<h3>TEST INFORMATION</h3>'
             '<table class="ident">'
             '<tr><th>Product Name</th><td>{prod}</td><th>Batch No</th><td>{batch}</td></tr>'
-            '<tr><th>Test Start</th><td colspan="3">{start}</td></tr>'
+            '<tr><th>Total Taps</th><td>{total_taps}</td><th>Test Start</th><td>{start}</td></tr>'
             '<tr><th>Completed Date / Time</th><td colspan="3">{end}</td></tr>'
             '<tr><th>Duration</th><td>{dur}</td><th>Test Status</th><td>{status}</td></tr>'
             '</table>'
@@ -480,12 +506,13 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
             '<tbody>{steps}</tbody></table>'
             '<h3>STATISTICS</h3>'
             '<table class="data">'
-            '<thead><tr><th>Parameter</th><th>Mean</th><th>Min</th><th>Max</th></tr></thead>'
+            '<thead><tr><th>Parameter</th><th>Value</th></tr></thead>'
             '<tbody>{stats}</tbody></table>'
             '<div class="remarks"><strong>Remarks:</strong> {remarks}</div>'
         ).format(
             prod=_html_esc(recipe.get("productName") or td.get("productName")),
             batch=_html_esc(recipe.get("batchNumber") or td.get("batchNumber")),
+            total_taps=_html_esc(total_taps_str),
             start=_html_esc(start_ts),
             end=_html_esc(end_ts),
             dur=_html_esc(duration_str),

@@ -4483,6 +4483,9 @@ function populateReportPreview(preview) {
     }
 
     setReportEl('report-product-name', recipe.productName || td.productName);
+    setReportEl('report-batch-no', recipe.batchNumber || td.batchNumber || '--');
+    var totalTaps = recipeTotalTapCount(recipe);
+    setReportEl('report-total-taps', totalTaps != null ? String(totalTaps) : 'N/A');
 
     var startStr = formatReportDate(td.testStartTime || preview.createdAt);
     var completedParts = formatReportDateAndTimeParts(
@@ -4535,27 +4538,23 @@ function populateReportPreview(preview) {
     if (statBody) {
         var stats = preview.statistics || td.statistics || {};
         if (String(td.status || '').trim().toLowerCase() === 'aborted') {
-            statBody.innerHTML = '<tr><td colspan="4">N/A</td></tr>';
+            statBody.innerHTML = '<tr><td colspan="2">N/A</td></tr>';
         } else if (stats && Object.keys(stats).length) {
             var rows = [];
             for (var k in stats) {
                 if (stats.hasOwnProperty(k) && typeof stats[k] === 'object' && stats[k] !== null) {
                     var v = stats[k];
-                    if (v.value != null) {
-                        rows.push('<tr><th>' + k + '</th><td colspan="3">' + v.value + '</td></tr>');
-                        continue;
-                    }
-                    var mean = v.mean != null ? v.mean : v.Mean;
-                    var min = v.min != null ? v.min : v.Min;
-                    var max = v.max != null ? v.max : v.Max;
-                    if (mean != null || min != null || max != null) {
-                        rows.push('<tr><th>' + k + '</th><td>' + (mean != null ? mean : '--') + '</td><td>' + (min != null ? min : '--') + '</td><td>' + (max != null ? max : '--') + '</td></tr>');
-                    }
+                    var display = v.value != null ? v.value : (v.mean != null ? v.mean : v.Mean);
+                    if (display == null) continue;
+                    var displayStr = display;
+                    var num = parseFloat(display);
+                    if (!isNaN(num)) displayStr = _formatDensity(num);
+                    rows.push('<tr><th>' + k + '</th><td>' + displayStr + '</td></tr>');
                 }
             }
-            statBody.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="4">N/A</td></tr>';
+            statBody.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="2">N/A</td></tr>';
         } else {
-            statBody.innerHTML = '<tr><td colspan="4">N/A</td></tr>';
+            statBody.innerHTML = '<tr><td colspan="2">N/A</td></tr>';
         }
     }
 
@@ -6726,12 +6725,17 @@ function recipeDropHeightMm(r) {
 }
 
 function recipeTotalTapCount(r) {
-    if (!r || !r.steps || !r.steps.length) return null;
+    if (!r) return null;
+    if (r.customTotalTaps != null && r.customTotalTaps !== '') {
+        var ct = parseInt(r.customTotalTaps, 10);
+        if (!isNaN(ct) && ct > 0) return ct;
+    }
+    if (!r.steps || !r.steps.length) return null;
     var total = 0;
     for (var i = 0; i < r.steps.length; i++) {
         total += parseInt(r.steps[i].tapCount, 10) || 0;
     }
-    return total;
+    return total > 0 ? total : null;
 }
 
 function recipeTapSpeed(r) {
