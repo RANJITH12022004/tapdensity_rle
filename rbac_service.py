@@ -42,8 +42,8 @@ PERM_CARD_EXPAND: Dict[str, List[str]] = {
     "perm_validation_report_approve": ["validation-report-approve"],
     "perm_datetime": ["edit-datetime", "settings"],
     "perm_reports_view": ["reports-view"],
-    "perm_audit_view": ["reports-view", "audit-view"],
-    "perm_export_usb": ["reports-view", "audit-view", "export-usb"],
+    "perm_audit_view": ["audit-view"],
+    "perm_export_usb": ["export-usb"],
     "perm_export_approve": ["export-approve"],
 }
 
@@ -216,12 +216,6 @@ def migrate_member_permissions_v1_to_v2(member: Dict[str, Any]) -> None:
     allow_old = [str(x).strip() for x in (raw.get("allow") or []) if str(x or "").strip()]
     deny_old = {str(x).strip() for x in (raw.get("deny") or []) if str(x or "").strip()}
     internal: Set[str] = set()
-    for key in MASTER_INTERNAL_MIGRATION:
-        if _legacy_key_allowed(role_l, key):
-            internal.add(key)
-    if "validate-menu" in internal:
-        internal.discard("validate-menu")
-        internal.update({"validation-test", "calibration-menu"})
     for k in allow_old:
         if k == "validate-menu":
             internal.add("validation-test")

@@ -50,15 +50,22 @@ def generate_report(
 
 
 def enrich_factory_settings(factory_settings: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "companyName": factory_settings.get("companyName") or "N/A",
-        "modelNo": factory_settings.get("modelNo") or "N/A",
-        "serialNo": factory_settings.get("serialNo") or "N/A",
-        "companyLocation": factory_settings.get("companyLocation") or factory_settings.get("location") or "N/A",
-        "instrumentId": factory_settings.get("instrumentId") or "N/A",
-        "lastValidationDate": factory_settings.get("lastValidationDate") or "N/A",
-        "nextValidationDate": factory_settings.get("nextValidationDate") or "N/A",
+    fs_in = factory_settings or {}
+    enriched = {
+        "companyName": fs_in.get("companyName") or "N/A",
+        "modelNo": fs_in.get("modelNo") or "N/A",
+        "serialNo": fs_in.get("serialNo") or "N/A",
+        "companyLocation": fs_in.get("companyLocation") or fs_in.get("location") or "N/A",
+        "instrumentId": fs_in.get("instrumentId") or "N/A",
+        "lastValidationDate": fs_in.get("lastValidationDate") or "N/A",
+        "nextValidationDate": fs_in.get("nextValidationDate") or "N/A",
     }
+    dates = _resolve_validation_dates(fs_in)
+    if dates.get("lastValidationDate"):
+        enriched["lastValidationDate"] = dates["lastValidationDate"]
+    if dates.get("nextValidationDate"):
+        enriched["nextValidationDate"] = dates["nextValidationDate"]
+    return enriched
 
 
 def _parse_density_number(val: Any) -> Optional[float]:
@@ -175,15 +182,11 @@ def enrich_report_context(report_data: Dict[str, Any]) -> Dict[str, Any]:
     ]:
         if not fs.get(k):
             fs[k] = factory_settings.get(k) or default
-    if factory_settings.get("lastValidationDate"):
-        fs["lastValidationDate"] = factory_settings["lastValidationDate"]
-    if factory_settings.get("nextValidationDate"):
-        fs["nextValidationDate"] = factory_settings["nextValidationDate"]
-    computed = _compute_validation_dates_from_reports()
-    if computed.get("lastValidationDate"):
-        fs["lastValidationDate"] = computed["lastValidationDate"]
-    if computed.get("nextValidationDate"):
-        fs["nextValidationDate"] = computed["nextValidationDate"]
+    dates = _resolve_validation_dates({**factory_settings, **fs})
+    if dates.get("lastValidationDate"):
+        fs["lastValidationDate"] = dates["lastValidationDate"]
+    if dates.get("nextValidationDate"):
+        fs["nextValidationDate"] = dates["nextValidationDate"]
     report_data["factorySettings"] = fs
     if str(report_data.get("type") or "").strip().lower() == "test":
         td = report_data.get("testData") if isinstance(report_data.get("testData"), dict) else report_data
@@ -205,21 +208,59 @@ def _parse_report_datetime(value: Any) -> Optional[datetime]:
         return None
 
 
-def _add_months(dt: datetime, months: int) -> datetime:
-    month_index = (dt.month - 1) + int(months or 0)
-    year = dt.year + (month_index // 12)
-    month = (month_index % 12) + 1
-    day = dt.day
-    if month == 2:
-        leap = (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
-        max_day = 29 if leap else 28
-    elif month in (4, 6, 9, 11):
-        max_day = 30
-    else:
-        max_day = 31
-    if day > max_day:
-        day = max_day
-    return dt.replace(year=year, month=month, day=day)
+def _parse_display_date(value: Any) -> Optional[datetime]:
+    """Parse DD-MM-YYYY, DD/MM/YYYY, or ISO datetime strings."""
+    s = str(value or "").strip()
+    if not s or s.upper() == "N/A":
+        return None
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(s[:10], fmt)
+        except Exception:
+            continue
+    return _parse_report_datetime(value)
+
+
+def _add_years(dt: datetime, years: int = 1) -> datetime:
+    """Add calendar years; Feb 29 rolls to Feb 28 on non-leap years."""
+    try:
+        return dt.replace(year=dt.year + int(years or 1))
+    except ValueError:
+        return dt.replace(month=2, day=28, year=dt.year + int(years or 1))
+
+
+def _validation_dates_from_last(dt: datetime) -> Dict[str, str]:
+    """Last validation date and next due exactly one calendar year later."""
+    next_dt = _add_years(dt, 1)
+    return {
+        "lastValidationDate": dt.strftime("%d-%m-%Y"),
+        "nextValidationDate": next_dt.strftime("%d-%m-%Y"),
+    }
+
+
+def _resolve_validation_dates(factory_settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Single source for validation dates: latest validation report, else stored last; next always +1 year."""
+    computed = _compute_validation_dates_from_reports()
+    if computed.get("lastValidationDate"):
+        return computed
+    fs = factory_settings or {}
+    last_dt = _parse_display_date(fs.get("lastValidationDate"))
+    if last_dt:
+        return _validation_dates_from_last(last_dt)
+    return {}
+
+
+def sync_factory_validation_dates() -> Dict[str, str]:
+    """Persist resolved validation dates into factory settings storage."""
+    stored = data_service.get_factory_settings() or {}
+    dates = _resolve_validation_dates(stored)
+    if not dates:
+        return {}
+    updated = dict(stored)
+    updated["lastValidationDate"] = dates["lastValidationDate"]
+    updated["nextValidationDate"] = dates["nextValidationDate"]
+    data_service.save_factory_settings(updated)
+    return dates
 
 
 def _compute_validation_dates_from_reports() -> Dict[str, str]:
@@ -244,11 +285,7 @@ def _compute_validation_dates_from_reports() -> Dict[str, str]:
             latest_dt = dt
     if latest_dt is None:
         return {}
-    next_dt = _add_months(latest_dt, 3)
-    return {
-        "lastValidationDate": latest_dt.strftime("%d-%m-%Y"),
-        "nextValidationDate": next_dt.strftime("%d-%m-%Y"),
-    }
+    return _validation_dates_from_last(latest_dt)
 
 
 def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:

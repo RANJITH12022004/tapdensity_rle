@@ -487,6 +487,111 @@ def _session_has_internal(internal_key: str) -> bool:
     return rbac_service.member_has_internal(m, internal_key)
 
 
+def _require_auth():
+    """Return 401 if no logged-in session."""
+    if not data_service.get_current_user():
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
+
+
+def _session_member_id():
+    """Logged-in member id from session, or None (e.g. factory stub)."""
+    cur = data_service.get_current_user() or {}
+    try:
+        mid = cur.get("id")
+        if mid is None:
+            return None
+        return int(mid)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_self_member(member_id: int) -> bool:
+    """True when the session user is updating/viewing their own member record."""
+    try:
+        target_id = int(member_id)
+    except (TypeError, ValueError):
+        return False
+    sid = _session_member_id()
+    if sid is not None and sid == target_id:
+        return True
+    cur = data_service.get_current_user() or {}
+    member = data_service.get_member(target_id)
+    if not member:
+        return False
+    un_cur = str(cur.get("username") or "").strip().lower()
+    un_mem = str(member.get("username") or "").strip().lower()
+    return bool(un_cur) and un_cur == un_mem
+
+
+def _require_user_manage_or_self(member_id: int):
+    """Allow user-manage admins or any user accessing their own profile."""
+    err = _require_auth()
+    if err:
+        return err
+    if _is_self_member(member_id):
+        return None
+    return _require_session_internal(
+        "user-manage",
+        "Forbidden. You do not have permission to manage users.",
+    )
+
+
+def _self_profile_payload_from_request(existing: dict, payload: dict) -> dict:
+    """Self-service profile: only display name and password may change."""
+    out = dict(existing)
+    if "name" in payload:
+        name = str(payload.get("name") or "").strip()
+        if name:
+            out["name"] = name
+    new_pwd = payload.get("password")
+    if new_pwd is not None and str(new_pwd).strip():
+        pwd_err = _password_strength_error(str(new_pwd))
+        if pwd_err:
+            raise ValueError(pwd_err)
+        out["password"] = str(new_pwd)
+    return out
+
+
+def _resolve_session_member_record():
+    """Member row for the logged-in user (not factory)."""
+    data_service.refresh_current_user_from_member()
+    cur = data_service.get_current_user() or {}
+    un = str(cur.get("username") or "").strip()
+    if un.upper() == data_service.FACTORY_USERNAME.upper():
+        return None, cur
+    mid = _session_member_id()
+    member = data_service.get_member(mid) if mid is not None else None
+    if not member and un:
+        member = data_service.get_member_by_username(un)
+    return member, cur
+
+
+def _require_session_internal(internal_key: str, message: str = None):
+    """Return Flask error response if session lacks internal permission, else None."""
+    err = _require_auth()
+    if err:
+        return err
+    data_service.refresh_current_user_from_member()
+    if not _session_has_internal(internal_key):
+        msg = message or "Forbidden. You do not have permission for this action."
+        return jsonify({"error": msg}), 403
+    return None
+
+
+def _require_any_session_internal(internal_keys, message: str = None):
+    """Return Flask error response if session lacks all listed permissions, else None."""
+    err = _require_auth()
+    if err:
+        return err
+    data_service.refresh_current_user_from_member()
+    for key in internal_keys or []:
+        if _session_has_internal(key):
+            return None
+    msg = message or "Forbidden. You do not have permission for this action."
+    return jsonify({"error": msg}), 403
+
+
 def _session_can_edit_datetime() -> bool:
     """True when the logged-in user may change system date/time (RBAC, not role name alone)."""
     data_service.refresh_current_user_from_member()
@@ -746,6 +851,12 @@ def serve_static(path):
 @app.route("/api/data/recipes", methods=["GET"])
 def get_recipes():
     try:
+        gate = _require_any_session_internal(
+            ["recipe-list", "quick-test", "recipe-test", "recipe-edit"],
+            "Forbidden. You do not have permission to view recipes.",
+        )
+        if gate:
+            return gate
         recipes = data_service.list_recipes()
         return jsonify({"recipes": recipes}), 200
     except Exception as e:
@@ -756,6 +867,12 @@ def get_recipes():
 @app.route("/api/data/recipes", methods=["POST"])
 def create_recipe():
     try:
+        gate = _require_any_session_internal(
+            ["recipe-edit", "recipe-list"],
+            "Forbidden. You do not have permission to create recipes.",
+        )
+        if gate:
+            return gate
         recipe_data = request.get_json(force=True, silent=True) or {}
         validation_result = calculation_service.validate_recipe(recipe_data)
         if not validation_result.get("valid", False):
@@ -782,6 +899,12 @@ def create_recipe():
 @app.route("/api/data/recipes/<int:recipe_id>", methods=["GET"])
 def get_recipe(recipe_id):
     try:
+        gate = _require_any_session_internal(
+            ["recipe-list", "quick-test", "recipe-test", "recipe-edit"],
+            "Forbidden. You do not have permission to view recipes.",
+        )
+        if gate:
+            return gate
         recipe = data_service.get_recipe(recipe_id)
         if recipe:
             return jsonify({"recipe": recipe}), 200
@@ -794,6 +917,9 @@ def get_recipe(recipe_id):
 @app.route("/api/data/recipes/<int:recipe_id>", methods=["PUT"])
 def update_recipe(recipe_id):
     try:
+        gate = _require_session_internal("recipe-edit", "Forbidden. You do not have permission to edit recipes.")
+        if gate:
+            return gate
         recipe_data = request.get_json(force=True, silent=True) or {}
         recipe_data["id"] = recipe_id
         validation_result = calculation_service.validate_recipe(recipe_data)
@@ -821,6 +947,12 @@ def update_recipe(recipe_id):
 @app.route("/api/data/recipes/<int:recipe_id>", methods=["DELETE"])
 def delete_recipe(recipe_id):
     try:
+        gate = _require_any_session_internal(
+            ["recipe-delete", "disable-recipes"],
+            "Forbidden. You do not have permission to disable recipes.",
+        )
+        if gate:
+            return gate
         existing = data_service.get_recipe(recipe_id)
         success = data_service.delete_recipe(recipe_id)
         if success:
@@ -900,6 +1032,9 @@ def approve_recipe(recipe_id):
 @app.route("/api/data/reports", methods=["GET"])
 def get_reports():
     try:
+        gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to view reports.")
+        if gate:
+            return gate
         filter_type = request.args.get("filter", "all")
         reports = data_service.list_reports(filter_type)
         return jsonify({"reports": reports}), 200
@@ -936,6 +1071,21 @@ def _audit_report_created(report_id, enriched):
 def create_report():
     try:
         report_data = request.get_json(force=True, silent=True) or {}
+        rtype = (report_data.get("type") or "").strip().lower()
+        if rtype == "validation":
+            gate = _require_session_internal(
+                "validation-test",
+                "Forbidden. You do not have permission to run validation.",
+            )
+        elif rtype == "test":
+            gate = _require_any_session_internal(
+                ["quick-test", "recipe-test"],
+                "Forbidden. You do not have permission to save test reports.",
+            )
+        else:
+            gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to save reports.")
+        if gate:
+            return gate
         recipe = report_data.get("recipe") or (report_data.get("testData") or {}).get("recipe")
         enriched = report_service.generate_report(
             report_data,
@@ -953,6 +1103,13 @@ def create_report():
                 for k in ("approvalPassFail", "approvalRemarks", "approvedBy", "approvedAt", "approvedByUsername"):
                     enriched.pop(k, None)
         report_id = data_service.save_report(enriched)
+        enriched = report_service.enrich_report_context({**enriched, "id": report_id})
+        data_service.save_report(enriched)
+        if (enriched.get("type") or "").strip().lower() == "validation":
+            try:
+                report_service.sync_factory_validation_dates()
+            except Exception:
+                app.logger.exception("Failed to sync factory validation dates after validation report")
         try:
             print_service.save_report_text_files(enriched, report_id, REPORTS_DIR)
         except Exception:
@@ -1069,6 +1226,20 @@ def abort_report(report_id):
         if not report:
             return jsonify({"ok": False, "error": "Report not found"}), 404
         rtype = (report.get("type") or "").strip().lower()
+        if rtype == "validation":
+            gate = _require_session_internal(
+                "validation-test",
+                "Forbidden. You do not have permission to abort validation reports.",
+            )
+        elif rtype == "test":
+            gate = _require_any_session_internal(
+                ["quick-test", "recipe-test"],
+                "Forbidden. You do not have permission to abort test reports.",
+            )
+        else:
+            gate = _require_session_internal("reports-view", "Forbidden.")
+        if gate:
+            return gate
         if rtype not in ("test", "validation"):
             return jsonify({"ok": False, "error": "Report type cannot be aborted"}), 400
         st = (report.get("reportApprovalStatus") or "").strip().lower()
@@ -1113,6 +1284,9 @@ def abort_report(report_id):
 @app.route("/api/data/reports/<int:report_id>", methods=["GET"])
 def get_report(report_id):
     try:
+        gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to view reports.")
+        if gate:
+            return gate
         report = data_service.get_report(report_id)
         if report:
             return jsonify({"report": report}), 200
@@ -1125,6 +1299,9 @@ def get_report(report_id):
 @app.route("/api/data/reports/<int:report_id>", methods=["DELETE"])
 def delete_report(report_id):
     try:
+        gate = _require_session_internal("reports-delete", "Forbidden. You do not have permission to delete reports.")
+        if gate:
+            return gate
         existing = data_service.get_report(report_id)
         success = data_service.delete_report(report_id)
         if success:
@@ -1147,6 +1324,9 @@ def delete_report(report_id):
 @app.route("/api/data/members", methods=["GET"])
 def get_members():
     try:
+        gate = _require_session_internal("user-manage", "Forbidden. You do not have permission to manage users.")
+        if gate:
+            return gate
         members = data_service.list_members()
         safe = [data_service.sanitize_member_for_client(m) or m for m in members]
         return jsonify({"members": safe}), 200
@@ -1158,6 +1338,9 @@ def get_members():
 @app.route("/api/data/members", methods=["POST"])
 def create_member():
     try:
+        gate = _require_session_internal("user-add", "Forbidden. You do not have permission to add users.")
+        if gate:
+            return gate
         member_data = request.get_json(force=True, silent=True) or {}
         if _payload_has_protected_feature_overrides(member_data):
             return jsonify({"error": "Protected features cannot be overridden."}), 400
@@ -1196,6 +1379,9 @@ def create_member():
 @app.route("/api/data/members/<int:member_id>", methods=["GET"])
 def get_member(member_id):
     try:
+        gate = _require_user_manage_or_self(member_id)
+        if gate:
+            return gate
         member = data_service.get_member(member_id)
         if member:
             return jsonify({"member": data_service.sanitize_member_for_client(member) or member}), 200
@@ -1208,11 +1394,22 @@ def get_member(member_id):
 @app.route("/api/data/members/<int:member_id>", methods=["PUT"])
 def update_member(member_id):
     try:
+        gate = _require_user_manage_or_self(member_id)
+        if gate:
+            return gate
         member_data = request.get_json(force=True, silent=True) or {}
         before_member = data_service.get_member(member_id)
-        if _payload_has_protected_feature_overrides(member_data):
+        if not before_member:
+            return jsonify({"error": "Member not found"}), 404
+        is_self = _is_self_member(member_id)
+        if is_self:
+            try:
+                member_data = _self_profile_payload_from_request(before_member, member_data)
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+        elif _payload_has_protected_feature_overrides(member_data):
             return jsonify({"error": "Protected features cannot be overridden."}), 400
-        if data_service.has_non_empty_feature_overrides(member_data) and not _can_assign_feature_overrides():
+        if not is_self and data_service.has_non_empty_feature_overrides(member_data) and not _can_assign_feature_overrides():
             return jsonify({"error": "Forbidden. Only Factory/Admin can assign feature overrides."}), 403
         member_data["id"] = member_id
         cur = data_service.get_current_user() or {}
@@ -1261,6 +1458,9 @@ def update_member(member_id):
 @app.route("/api/data/members/<int:member_id>", methods=["DELETE"])
 def delete_member(member_id):
     try:
+        gate = _require_session_internal("user-delete", "Forbidden. You do not have permission to delete users.")
+        if gate:
+            return gate
         member = data_service.get_member(member_id)
         if not member:
             return jsonify({"error": "Member not found"}), 404
@@ -1395,7 +1595,7 @@ def enable_member_route(member_id):
 @app.route("/api/data/factory-settings", methods=["GET"])
 def get_factory_settings():
     try:
-        settings = data_service.get_factory_settings()
+        settings = report_service.enrich_factory_settings(data_service.get_factory_settings() or {})
         return jsonify({"settings": settings}), 200
     except Exception as e:
         app.logger.exception("Error getting factory settings")
@@ -1573,7 +1773,8 @@ def login():
                     }), 403
             data_service.record_successful_login(username)
             data_service.save_current_user(user)
-            data_service.write_session_power_audit_pending(user)
+            data_service.refresh_current_user_from_member()
+            data_service.write_session_power_audit_pending(data_service.get_current_user() or user)
             _audit_event(
                 action="Login",
                 outcome="success",
@@ -1583,7 +1784,7 @@ def login():
                 target_user=username,
                 after={"username": user.get("username"), "role": user.get("role")},
             )
-            safe_user = data_service.sanitize_member_for_client(user) or user
+            safe_user = data_service.sanitize_member_for_client(data_service.get_current_user() or user) or user
             return jsonify({"success": True, "user": safe_user}), 200
 
         # Wrong password: increment failedAttempts (may lock at 3)
@@ -2013,12 +2214,97 @@ def approval_verify():
 @app.route("/api/data/auth/current-user", methods=["GET"])
 def get_current_user_route():
     try:
-        user = data_service.get_current_user()
+        user = data_service.refresh_current_user_from_member() or data_service.get_current_user()
         if user:
             user = data_service.sanitize_member_for_client(user) or user
         return jsonify({"user": user}), 200
     except Exception as e:
         app.logger.exception("Error getting current user")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/auth/profile", methods=["GET"])
+def get_own_profile():
+    """Any logged-in member may read their own profile (for the User Profile screen)."""
+    try:
+        err = _require_auth()
+        if err:
+            return err
+        member, cur = _resolve_session_member_record()
+        if member:
+            return jsonify({"member": data_service.sanitize_member_for_client(member) or member}), 200
+        if cur:
+            return jsonify({"member": data_service.sanitize_member_for_client(cur) or cur}), 200
+        return jsonify({"error": "Member not found"}), 404
+    except Exception as e:
+        app.logger.exception("Error getting own profile")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/auth/profile", methods=["PUT"])
+def update_own_profile():
+    """Any logged-in member may change their own display name and password."""
+    try:
+        err = _require_auth()
+        if err:
+            return err
+        payload = request.get_json(force=True, silent=True) or {}
+        member, cur = _resolve_session_member_record()
+        if not member:
+            if cur and str((cur.get("username") or "")).strip().upper() == data_service.FACTORY_USERNAME.upper():
+                return jsonify({"error": "Factory profile is managed locally on this device."}), 400
+            return jsonify({"error": "Member not found"}), 404
+        member_id = int(member.get("id"))
+        before_member = dict(member)
+        try:
+            member_data = _self_profile_payload_from_request(before_member, payload)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        name_in = "name" in payload and str(payload.get("name") or "").strip()
+        pwd_in = "password" in payload and str(payload.get("password") or "").strip()
+        if not name_in and not pwd_in:
+            return jsonify({"error": "Provide a name and/or new password to save."}), 400
+        acting_id = _session_member_id()
+        password_changed = pwd_in
+        data_service.save_member(member_data, acting_user_id=acting_id)
+        updated = data_service.get_member(member_id) or member_data
+        data_service.refresh_current_user_from_member()
+        cur_after = data_service.get_current_user() or {}
+        sig = {
+            "mode": "self",
+            "username": (cur_after.get("username") or cur_after.get("name") or "").strip() or "--",
+            "role": (cur_after.get("role") or "").strip() or "--",
+        }
+        uname = updated.get("username") or updated.get("name") or ""
+        if password_changed:
+            _audit_event(
+                action="Password changed",
+                outcome="success",
+                entity_type="member",
+                entity_id=member_id,
+                entity_name=uname,
+                details="Password changed (self) for user: {}".format(uname),
+                target_user=uname,
+                signature=sig,
+            )
+        _audit_event(
+            action="Profile updated",
+            outcome="success",
+            entity_type="member",
+            entity_id=member_id,
+            entity_name=uname,
+            details="Profile updated (self)",
+            target_user=uname,
+            before=data_service.sanitize_member_for_client(before_member),
+            after=data_service.sanitize_member_for_client(updated) or updated,
+            signature=sig,
+        )
+        safe = data_service.sanitize_member_for_client(updated) or dict(updated)
+        return jsonify({"ok": True, "member": safe}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error updating own profile")
         return jsonify({"error": str(e)}), 500
 
 
@@ -2029,7 +2315,8 @@ def _require_export_usb_and_verification_json():
     cur = data_service.get_current_user()
     if not cur:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
-    if not _session_has_internal("export-usb") and not _session_has_internal("reports-view"):
+    data_service.refresh_current_user_from_member()
+    if not _session_has_internal("export-usb"):
         return jsonify({"success": False, "error": "Forbidden. Export to USB is not permitted for this account."}), 403
     role = str(cur.get("role") or "").strip().lower()
     if role != "factory":
@@ -2448,6 +2735,12 @@ def export_audit_trails():
         gate = _require_export_usb_and_verification_json()
         if gate is not None:
             return gate
+        audit_gate = _require_session_internal(
+            "audit-view",
+            "Forbidden. You do not have permission to export audit trails.",
+        )
+        if audit_gate:
+            return audit_gate
         cur = data_service.get_current_user()
 
         data = request.get_json(force=True, silent=True) or {}
@@ -2536,6 +2829,12 @@ def export_audit_trails():
 @app.route("/api/calculate/recipe-validate", methods=["POST"])
 def validate_recipe_endpoint():
     try:
+        gate = _require_any_session_internal(
+            ["recipe-edit", "recipe-list", "quick-test"],
+            "Forbidden. You do not have permission to manage recipes.",
+        )
+        if gate:
+            return gate
         recipe_data = request.get_json(force=True, silent=True) or {}
         result = calculation_service.validate_recipe(recipe_data)
         return jsonify(result), 200
@@ -2550,6 +2849,9 @@ def validate_recipe_endpoint():
 @app.route("/api/reports/<int:report_id>/preview", methods=["GET"])
 def get_report_preview(report_id):
     try:
+        gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to view reports.")
+        if gate:
+            return gate
         report = data_service.get_report(report_id)
         if not report:
             return jsonify({"error": "Report not found"}), 404
@@ -2571,6 +2873,9 @@ def get_report_preview(report_id):
 def list_usb_pendrives():
     """List external pendrives suitable for export (excludes OS root + internal USB)."""
     try:
+        gate = _require_session_internal("export-usb", "Forbidden. Export to USB is not permitted for this account.")
+        if gate:
+            return gate
         devices = usb_export.list_external_pendrives()
         return jsonify({"success": True, "devices": devices}), 200
     except Exception as e:
@@ -2650,6 +2955,9 @@ def save_report_pdf(report_id):
     Body: { "html": "<full document or fragment>" }
     """
     try:
+        gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to view reports.")
+        if gate:
+            return gate
         report = data_service.get_report(report_id)
         if not report:
             return jsonify({"success": False, "error": "Report not found"}), 404
@@ -3055,7 +3363,9 @@ def _load_report_data_for_print(report_id, report_data_fallback=None):
         rd = dict(report_data_fallback)
         if not rd.get("factorySettings"):
             try:
-                rd["factorySettings"] = data_service.get_factory_settings()
+                rd["factorySettings"] = report_service.enrich_factory_settings(
+                    data_service.get_factory_settings() or {}
+                )
             except Exception:
                 pass
         return report_service.enrich_report_context(rd)
@@ -3069,10 +3379,23 @@ def print_a4():
     try:
         data = request.get_json(force=True, silent=True) or {}
         if data.get("type") == "recipe" and data.get("recipe_data"):
+            gate = _require_any_session_internal(
+                ["recipe-list", "recipe-edit", "reports-view"],
+                "Forbidden. You do not have permission to print recipes.",
+            )
+            if gate:
+                return gate
+        else:
+            gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to print reports.")
+            if gate:
+                return gate
+        if data.get("type") == "recipe" and data.get("recipe_data"):
             recipe_data = dict(data["recipe_data"])
             if not recipe_data.get("factorySettings"):
                 try:
-                    recipe_data["factorySettings"] = data_service.get_factory_settings()
+                    recipe_data["factorySettings"] = report_service.enrich_factory_settings(
+                        data_service.get_factory_settings() or {}
+                    )
                 except Exception:
                     pass
             result = print_service.print_recipe_a4(recipe_data)
@@ -3102,9 +3425,12 @@ def print_a4():
         if not report_data.get("factorySettings"):
             try:
                 report_data = dict(report_data)
-                report_data["factorySettings"] = data_service.get_factory_settings()
+                report_data["factorySettings"] = report_service.enrich_factory_settings(
+                    data_service.get_factory_settings() or {}
+                )
             except Exception:
                 pass
+        report_data = report_service.enrich_report_context(dict(report_data))
         result = print_service.print_a4_report(report_data)
         rid = report_data.get("id")
         _audit(
@@ -3124,10 +3450,23 @@ def print_thermal():
     try:
         data = request.get_json(force=True, silent=True) or {}
         if data.get("type") == "recipe" and data.get("recipe_data"):
+            gate = _require_any_session_internal(
+                ["recipe-list", "recipe-edit", "reports-view"],
+                "Forbidden. You do not have permission to print recipes.",
+            )
+            if gate:
+                return gate
+        else:
+            gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to print reports.")
+            if gate:
+                return gate
+        if data.get("type") == "recipe" and data.get("recipe_data"):
             recipe_data = dict(data["recipe_data"])
             if not recipe_data.get("factorySettings"):
                 try:
-                    recipe_data["factorySettings"] = data_service.get_factory_settings()
+                    recipe_data["factorySettings"] = report_service.enrich_factory_settings(
+                        data_service.get_factory_settings() or {}
+                    )
                 except Exception:
                     pass
             result = print_service.print_recipe_thermal(recipe_data)
@@ -3157,9 +3496,12 @@ def print_thermal():
         if not report_data.get("factorySettings"):
             try:
                 report_data = dict(report_data)
-                report_data["factorySettings"] = data_service.get_factory_settings()
+                report_data["factorySettings"] = report_service.enrich_factory_settings(
+                    data_service.get_factory_settings() or {}
+                )
             except Exception:
                 pass
+        report_data = report_service.enrich_report_context(dict(report_data))
         result = print_service.print_thermal_report(report_data)
         rid = report_data.get("id")
         _audit(
@@ -3190,11 +3532,23 @@ def print_status():
 
 @app.route("/api/hardware/stream", methods=["GET"])
 def hardware_stream():
+    gate = _require_any_session_internal(
+        ["quick-test", "recipe-test", "validation-test", "calibration-menu"],
+        "Forbidden. You do not have permission to use hardware controls.",
+    )
+    if gate:
+        return gate
     return hardware_service.start_sse_stream()
 
 
 @app.route("/api/hardware/log/reset", methods=["POST"])
 def hardware_log_reset():
+    gate = _require_any_session_internal(
+        ["quick-test", "recipe-test", "validation-test", "calibration-menu"],
+        "Forbidden. You do not have permission to use hardware controls.",
+    )
+    if gate:
+        return gate
     result = hardware_service.reset_uart_log(reason="ui_refresh")
     code = 200 if result.get("ok") else 500
     return jsonify(result), code
@@ -3202,6 +3556,12 @@ def hardware_log_reset():
 
 @app.route("/api/hardware/command", methods=["POST"])
 def hardware_command():
+    gate = _require_any_session_internal(
+        ["quick-test", "recipe-test", "validation-test", "calibration-menu"],
+        "Forbidden. You do not have permission to use hardware controls.",
+    )
+    if gate:
+        return gate
     data = request.get_json(force=True, silent=True) or {}
     cmd = data.get("command", "")
     if not cmd:
@@ -3215,6 +3575,12 @@ def hardware_command():
 
 @app.route("/api/hardware/status", methods=["GET"])
 def hardware_status():
+    gate = _require_any_session_internal(
+        ["quick-test", "recipe-test", "validation-test", "calibration-menu"],
+        "Forbidden. You do not have permission to use hardware controls.",
+    )
+    if gate:
+        return gate
     result = hardware_service.cmd_status()
     return jsonify(result)
 
@@ -3242,6 +3608,9 @@ def _adapter_kind_from_check_result(result):
 
 @app.route("/api/hardware/validation/load/start", methods=["POST"])
 def validation_load_start():
+    gate = _require_session_internal("validation-test", "Forbidden. You do not have permission to run validation.")
+    if gate:
+        return gate
     data = request.get_json(force=True, silent=True) or {}
     mode = str(data.get("mode") or "usp2").strip().lower()
     if mode not in ("usp1", "usp2"):
@@ -3274,11 +3643,20 @@ def validation_load_start():
 
 @app.route("/api/hardware/validation/load/stop", methods=["POST"])
 def validation_load_stop():
+    gate = _require_session_internal("validation-test", "Forbidden. You do not have permission to run validation.")
+    if gate:
+        return gate
     return jsonify(hardware_service.cmd_stop())
 
 
 @app.route("/api/hardware/adapter/check", methods=["POST"])
 def hardware_check_adapter():
+    gate = _require_any_session_internal(
+        ["validation-test", "quick-test", "recipe-test"],
+        "Forbidden. You do not have permission to use hardware controls.",
+    )
+    if gate:
+        return gate
     result = hardware_service.cmd_check_adapter()
     detected = _adapter_kind_from_check_result(result)
     if detected == "error" or (result and not result.get("ok") and detected is None):
@@ -3295,6 +3673,12 @@ def hardware_check_adapter():
 
 @app.route("/api/hardware/tap/start", methods=["POST"])
 def hardware_tap_start():
+    gate = _require_any_session_internal(
+        ["quick-test", "recipe-test"],
+        "Forbidden. You do not have permission to run tests.",
+    )
+    if gate:
+        return gate
     data = request.get_json(force=True, silent=True) or {}
     speed_mode = data.get("speedMode")
     taps = data.get("tapCount")
@@ -3304,6 +3688,12 @@ def hardware_tap_start():
 
 @app.route("/api/hardware/tap/stop", methods=["POST"])
 def hardware_tap_stop():
+    gate = _require_any_session_internal(
+        ["quick-test", "recipe-test"],
+        "Forbidden. You do not have permission to run tests.",
+    )
+    if gate:
+        return gate
     result = hardware_service.cmd_stop()
     return jsonify(result)
 

@@ -1064,6 +1064,8 @@ def refresh_current_user_from_member() -> Optional[Dict[str, Any]]:
     if not member:
         return cur
     updated = dict(cur)
+    updated["id"] = member.get("id", cur.get("id"))
+    updated["name"] = member.get("name", cur.get("name"))
     updated["role"] = member.get("role", cur.get("role"))
     updated["featureOverrides"] = member.get("featureOverrides")
     updated["permissionsVersion"] = member.get("permissionsVersion")

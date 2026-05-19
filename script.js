@@ -3510,6 +3510,10 @@ function startRecipeCreation() {
 
 function selectOperation(type) {
     if (type === 'validate') {
+        if (!userCanRunValidation()) {
+            denyPermission('run validation');
+            return;
+        }
         validationCompletion = { distance: false, load: false };
         validationSessionResults = { distance: null, load: null };
         goToPage('validate-type-select');
@@ -3523,12 +3527,20 @@ function selectOperation(type) {
 }
 
 function startValidationFromType() {
+    if (!userCanRunValidation()) {
+        denyPermission('run validation');
+        return;
+    }
     var radio = document.querySelector('input[name="val-type"]:checked');
     lastValidationType = radio ? radio.value : 'distance'; // 'distance' = USP 1, 'load' = USP 2
     goToPage('validation-run');
 }
 
 function startUspValidation(type) {
+    if (!userCanRunValidation()) {
+        denyPermission('run validation');
+        return;
+    }
     var t = String(type || '').toLowerCase();
     lastValidationType = t === 'usp2' ? 'load' : 'distance';
     goToPage('validation-run');
@@ -3830,6 +3842,10 @@ function loadReports(filterType) {
     tbody.innerHTML = '';
 
     if (filterType === 'audit') {
+        if (typeof canViewAuditLog === 'function' && !canViewAuditLog()) {
+            denyPermission('view audit trails');
+            return;
+        }
         if (bar) bar.style.display = '';
         if (theadRow) theadRow.innerHTML = '<th>Date & Time</th><th>User</th><th>Role</th><th>Action</th><th>Details</th>';
         var userEl = document.getElementById('audit-filter-user');
@@ -3884,6 +3900,11 @@ function loadReports(filterType) {
         return;
     }
 
+    if (!userCanViewReports()) {
+        denyPermission('view reports');
+        return;
+    }
+
     if (bar) bar.style.display = 'none';
     if (theadRow) theadRow.innerHTML = '<th>SL No</th><th>Report Name</th><th>Creation Time</th><th>Action</th>';
     var filter = (filterType === 'test' || filterType === 'validation') ? filterType : 'all';
@@ -3922,11 +3943,32 @@ function isFactorySessionUser(userObj) {
     return role === 'factory';
 }
 
-function userCanPrintReports(userObj) {
+function userCanViewReports(userObj) {
     var u = userObj || window.currentUser;
     if (!u) return false;
     if (isFactorySessionUser(u)) return true;
     return typeof canAccess === 'function' && canAccess(u, 'reports-view');
+}
+
+function userCanRunValidation(userObj) {
+    var u = userObj || window.currentUser;
+    if (!u) return false;
+    if (isFactorySessionUser(u)) return true;
+    return typeof canAccess === 'function' && canAccess(u, 'validation-test');
+}
+
+function denyPermission(actionLabel) {
+    showAppModal(
+        'You do not have permission to ' + (actionLabel || 'perform this action') + '.',
+        'Permission'
+    );
+}
+
+function userCanPrintReports(userObj) {
+    var u = userObj || window.currentUser;
+    if (!u) return false;
+    if (isFactorySessionUser(u)) return true;
+    return userCanViewReports(u);
 }
 
 function userCanExportToUsb(userObj) {
@@ -4388,6 +4430,10 @@ function scrollReportPreviewActionsIntoView() {
 
 function openReportPreview(reportId, options) {
     if (!reportId) return;
+    if (!userCanViewReports()) {
+        denyPermission('view reports');
+        return;
+    }
     options = options || {};
     apiRequest(API_BASE + '/api/reports/' + reportId + '/preview').then(function (data) {
         if (data.preview) {
@@ -7813,24 +7859,27 @@ function saveUserProfile() {
         return;
     }
 
-    apiRequest(API_BASE + '/api/data/members/' + memberId, { method: 'GET' })
-        .then(function (data) {
-            var member = (data && data.member) ? data.member : data;
-            if (!member || member.id == null) {
-                if (typeof showAppModal === 'function') showAppModal('Member not found.', 'User Profile');
-                return Promise.reject(new Error('Member not found'));
-            }
-            member.name = newName || member.name || member.username || '';
-            if (newPassword) member.password = newPassword;
-            return apiRequest(API_BASE + '/api/data/members/' + memberId, {
-                method: 'PUT',
-                body: member
-            });
-        })
+    var payload = {};
+    if (newName) payload.name = newName;
+    if (newPassword) payload.password = newPassword;
+    if (!payload.name && !payload.password) {
+        if (typeof showAppModal === 'function') {
+            showAppModal('Enter a new full name and/or password to save.', 'User Profile');
+        }
+        return;
+    }
+    if (!payload.name) {
+        payload.name = (user.name || user.username || '').trim();
+    }
+
+    apiRequest(API_BASE + '/api/data/auth/profile', {
+        method: 'PUT',
+        body: payload
+    })
         .then(function (result) {
             var updated = (result && result.member) ? result.member : result;
             var nameToSet = (updated && updated.name) ? updated.name : newName;
-            updateLocalName(nameToSet || newName);
+            updateLocalName(nameToSet || newName || (user.name || user.username));
             if (passwordEl) passwordEl.value = '';
             if (typeof showAppModal === 'function') showAppModal('Profile updated.', 'User Profile');
         })

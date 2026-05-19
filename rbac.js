@@ -82,8 +82,8 @@ var PERM_CARD_EXPAND = {
   perm_validation_report_approve: ['validation-report-approve'],
   perm_datetime: ['edit-datetime', 'settings'],
   perm_reports_view: ['reports-view'],
-  perm_audit_view: ['reports-view', 'audit-view'],
-  perm_export_usb: ['reports-view', 'audit-view', 'export-usb'],
+  perm_audit_view: ['audit-view'],
+  perm_export_usb: ['export-usb'],
   perm_export_approve: ['export-approve'],
 };
 
@@ -97,8 +97,8 @@ var PERMISSION_CARD_CATALOG = [
   { key: 'perm_validation_report_approve', label: 'Validation report approval', description: 'Approve pending validation reports.', accent: 6 },
   { key: 'perm_datetime', label: 'Edit date and time', description: 'Change system date, time, and RTC.', accent: 7 },
   { key: 'perm_reports_view', label: 'View and print reports', description: 'Open, preview, and print reports.', accent: 8 },
-  { key: 'perm_audit_view', label: 'View and print audit trails', description: 'View audit log and print audit trails.', accent: 9 },
-  { key: 'perm_export_usb', label: 'Export reports and audit (USB)', description: 'Export reports and audit trails to USB.', accent: 10 },
+  { key: 'perm_audit_view', label: 'View and print audit trails', description: 'View audit log and print audit trails (does not include test/validation reports list).', accent: 9 },
+  { key: 'perm_export_usb', label: 'Export reports and audit (USB)', description: 'Export to USB (requires report or audit access for the data being exported).', accent: 10 },
   { key: 'perm_export_approve', label: 'Export approval', description: 'Verify another user’s USB export (secondary approval).', accent: 11 },
 ];
 
