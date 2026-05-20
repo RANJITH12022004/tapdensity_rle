@@ -205,6 +205,38 @@ def _capture_to_buffer(buffer_id, timeout_sec=10.0):
     return _exec(bytes([_CMD_IMAGE_2_TZ, buffer_id]), timeout_sec=2.0)
 
 
+
+def capture_enroll_finger(buffer_id, timeout_sec=10.0):
+    """Capture one fingerprint image into enroll buffer 1 or 2."""
+    buffer_id = int(buffer_id)
+    if buffer_id not in (0x01, 0x02):
+        return {"ok": False, "error": "buffer_id must be 1 or 2"}
+    verify = verify_sensor()
+    if not verify.get("ok"):
+        return verify
+    return _capture_to_buffer(buffer_id, timeout_sec=timeout_sec)
+
+
+def finalize_enroll(template_id):
+    """Merge buffers 1+2 and store template after both captures succeeded."""
+    template_id = int(template_id)
+    if template_id <= 0 or template_id > 1000:
+        return {"ok": False, "error": "templateId must be between 1 and 1000"}
+    verify = verify_sensor()
+    if not verify.get("ok"):
+        return verify
+    model = _exec(bytes([_CMD_REG_MODEL]), timeout_sec=2.0)
+    if not model.get("ok"):
+        if model.get("code") == _CONFIRM_ENROLL_MISMATCH:
+            return {"ok": False, "error": "Fingerprints do not match. Use the same finger for both scans.", "code": model.get("code")}
+        return model
+    store_payload = bytes([_CMD_STORE, 0x01]) + template_id.to_bytes(2, "big")
+    stored = _exec(store_payload, timeout_sec=2.0)
+    if not stored.get("ok"):
+        return stored
+    return {"ok": True, "templateId": template_id}
+
+
 def enroll(template_id, capture_timeout_sec=10.0):
     template_id = int(template_id)
     if template_id <= 0 or template_id > 1000:
@@ -213,26 +245,14 @@ def enroll(template_id, capture_timeout_sec=10.0):
     if not verify.get("ok"):
         return verify
 
-    first = _capture_to_buffer(0x01, timeout_sec=capture_timeout_sec)
+    first = capture_enroll_finger(0x01, timeout_sec=capture_timeout_sec)
     if not first.get("ok"):
         return first
-
     time.sleep(1.0)
-    second = _capture_to_buffer(0x02, timeout_sec=capture_timeout_sec)
+    second = capture_enroll_finger(0x02, timeout_sec=capture_timeout_sec)
     if not second.get("ok"):
         return second
-
-    model = _exec(bytes([_CMD_REG_MODEL]), timeout_sec=2.0)
-    if not model.get("ok"):
-        if model.get("code") == _CONFIRM_ENROLL_MISMATCH:
-            return {"ok": False, "error": "Fingerprints do not match", "code": model.get("code")}
-        return model
-
-    store_payload = bytes([_CMD_STORE, 0x01]) + template_id.to_bytes(2, "big")
-    stored = _exec(store_payload, timeout_sec=2.0)
-    if not stored.get("ok"):
-        return stored
-    return {"ok": True, "templateId": template_id}
+    return finalize_enroll(template_id)
 
 
 def identify(timeout_sec=10.0):

@@ -8,10 +8,12 @@ import json
 import os
 import pathlib
 import secrets
+import atexit
 import signal
 import subprocess
 import sys
 import time
+import threading
 from datetime import datetime
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
 
@@ -84,8 +86,13 @@ calculation_service.init()
 report_service.init(config)
 print_service.init(config)
 hardware_service.init(app, config)
+
+_enroll_sessions = {}
+_enroll_sessions_lock = threading.Lock()
+
 biometric_service.init(app, config)
 rtc_service.init(app.logger)
+rtc_service.schedule_rtc_startup_sync()
 
 
 def _audit(user, role, action, details=""):
@@ -111,7 +118,7 @@ def _audit(user, role, action, details=""):
 
 
 def _audit_time_fields():
-    payload = _get_stored_datetime() or {}
+    payload = rtc_service.get_device_wall_datetime_payload()
     dt_raw = (payload.get("datetime") or "").strip()
     if dt_raw:
         try:
@@ -215,16 +222,53 @@ def _audit_event(
     )
 
 
+
+
+def _abort_pending_reports_after_power_loss(session_username):
+    """Mark in-progress pending reports as aborted after unclean shutdown (power loss)."""
+    un = _norm_username(session_username)
+    if not un:
+        return 0
+    aborted = 0
+    for report in data_service.list_reports("all") or []:
+        rtype = (report.get("type") or "").strip().lower()
+        if rtype not in ("test", "validation"):
+            continue
+        if (report.get("reportApprovalStatus") or "").strip().lower() != "pending":
+            continue
+        if _report_operated_by_username(report) != un:
+            continue
+        td = report.get("testData")
+        if not isinstance(td, dict):
+            td = {}
+        else:
+            td = dict(td)
+        td["status"] = "aborted"
+        report["testData"] = td
+        report["status"] = "aborted"
+        report["reportApprovalStatus"] = "aborted"
+        if not report.get("completedAt"):
+            report["completedAt"] = _utc_now_iso()
+        data_service.save_report(report)
+        aborted += 1
+    return aborted
+
 def _startup_session_power_audit():
     """If the last run ended without a clean stop while a session was active, log one power-interruption row."""
     try:
         had_clean_shutdown = data_service.consume_app_clean_stop_flag()
         pending = data_service.read_session_power_audit_pending()
         if pending and not had_clean_shutdown:
-            un = (pending.get("username") or "").strip()
-            role = (pending.get("role") or "").strip()
-            audit_time = _audit_time_fields()
-            if audit_service.is_hidden_factory_actor(un, role):
+            if not pending.get("powerAuditLogged"):
+                un = (pending.get("username") or "").strip()
+                role = (pending.get("role") or "").strip()
+                audit_time = _audit_time_fields()
+                if audit_service.is_hidden_factory_actor(un, role):
+                    pi_details = "Privileged factory session was active when power was interrupted or the system restarted."
+                elif un:
+                    pi_details = "User {} was logged in when power was interrupted or the system restarted.".format(un)
+                else:
+                    pi_details = "Session was active when power was interrupted or the system restarted."
                 audit_service.log_structured_event(
                     user="--",
                     role="--",
@@ -232,21 +276,7 @@ def _startup_session_power_audit():
                     outcome="success",
                     entity_type="session",
                     entity_name="power",
-                    details="Privileged factory session was active when power was interrupted or the system restarted.",
-                    event_type="compliance",
-                    request_source="system/startup",
-                    timestamp_ms=audit_time.get("timestamp_ms"),
-                    date_time=audit_time.get("date_time"),
-                )
-            else:
-                audit_service.log_structured_event(
-                    user="--",
-                    role="--",
-                    action="Power interruption",
-                    outcome="success",
-                    entity_type="session",
-                    entity_name="power",
-                    details="Session was active when power was interrupted or the system restarted.",
+                    details=pi_details,
                     event_type="compliance",
                     target_user=un,
                     extra={"lastKnownRole": role} if role else None,
@@ -254,14 +284,43 @@ def _startup_session_power_audit():
                     timestamp_ms=audit_time.get("timestamp_ms"),
                     date_time=audit_time.get("date_time"),
                 )
+                pending = dict(pending)
+                pending["powerAuditLogged"] = True
+                data_service.write_session_power_audit_pending(pending)
+                try:
+                    _abort_pending_reports_after_power_loss(un)
+                except Exception:
+                    app.logger.exception("Abort pending reports after power loss failed")
+        elif pending and had_clean_shutdown and pending.get("powerAuditLogged"):
+            pending = dict(pending)
+            pending.pop("powerAuditLogged", None)
+            data_service.write_session_power_audit_pending(pending)
         cur = data_service.get_current_user()
         if cur:
-            data_service.write_session_power_audit_pending(cur)
+            if not pending:
+                data_service.write_session_power_audit_pending(cur)
         else:
             data_service.delete_session_power_audit_pending()
+        audit_service.prune_power_interruption_overflow(keep=10)
     except Exception:
         app.logger.exception("Startup session power audit failed")
 
+
+
+
+def _register_clean_shutdown_atexit():
+    """Mark clean shutdown on normal process exit (reduces false power-interruption audits)."""
+
+    def _on_exit():
+        try:
+            data_service.touch_app_clean_stop_flag()
+        except Exception:
+            pass
+
+    try:
+        atexit.register(_on_exit)
+    except Exception:
+        pass
 
 def _register_clean_shutdown_signals():
     """Mark clean shutdown on SIGTERM/SIGINT so the next start does not log a false power interruption."""
@@ -303,15 +362,86 @@ def _approval_verifier_eligible_for_report(verifier_role):
 
 
 def _utc_now_iso():
-    dt_payload = _get_stored_datetime() or {}
-    dt_str = (dt_payload.get("datetime") or "").strip()
-    if dt_str:
-        return dt_str
+    """Naive local ISO timestamp for reports/labels (hardware RTC wall time)."""
+    dt = rtc_service.read_rtc_wall_datetime()
+    if dt is not None:
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
     return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def _norm_username(val):
     return str(val or "").strip().lower()
+
+
+def _report_operated_by_username(report):
+    td = report.get("testData") or {}
+    if isinstance(td, dict):
+        u = td.get("operatedByUsername") or td.get("employeeId")
+        if u:
+            return _norm_username(u)
+    return _norm_username(report.get("operatedByUsername") or report.get("employeeId"))
+
+
+def _stamp_report_operator(enriched):
+    cur = data_service.get_current_user() or {}
+    td = enriched.get("testData")
+    if not isinstance(td, dict):
+        td = {}
+    un = _norm_username(
+        enriched.get("operatedByUsername")
+        or td.get("operatedByUsername")
+        or td.get("employeeId")
+        or cur.get("username")
+        or cur.get("name")
+    )
+    name = (
+        enriched.get("operatorName")
+        or td.get("operatorName")
+        or cur.get("name")
+        or cur.get("username")
+        or "—"
+    )
+    emp = (
+        enriched.get("employeeId")
+        or td.get("employeeId")
+        or cur.get("username")
+        or un
+    )
+    enriched["operatedByUsername"] = un
+    enriched["operatorName"] = name
+    enriched["employeeId"] = emp
+    td = dict(td)
+    td["operatedByUsername"] = un
+    td["operatorName"] = name
+    td["employeeId"] = emp
+    enriched["testData"] = td
+    return enriched
+
+
+def _report_requires_approval(report):
+    rtype = (report.get("type") or "").strip().lower()
+    return rtype in ("test", "validation")
+
+
+def _check_report_approved_for_print_export(report=None, report_id=None, report_data=None):
+    """Return (json_response, status_code) if blocked, else None."""
+    if report is None and report_id is not None:
+        report = data_service.get_report(report_id)
+    if report is None and report_data:
+        report = report_data
+    if not report or not _report_requires_approval(report):
+        return None
+    st = (report.get("reportApprovalStatus") or "").strip().lower()
+    if st == "approved":
+        return None
+    if st == "pending" and _effective_request_role() != "factory":
+        body = {
+            "ok": False,
+            "success": False,
+            "error": "Report must be approved before print or export.",
+        }
+        return jsonify(body), 403
+    return None
 
 
 def _display_role_label(role_str):
@@ -505,7 +635,7 @@ def _format_report_audit_details(report_id, enriched):
     parts = []
     name = enriched.get("name")
     if name:
-        parts.append("report: {}".format(name))
+        parts.append("saved as: {}".format(name))
     else:
         parts.append("report id {}".format(report_id))
     recipe = enriched.get("recipe") or {}
@@ -575,9 +705,9 @@ def create_recipe():
         _apply_recipe_approval_for_session_creator(processed)
         recipe_id = data_service.save_recipe(processed)
         rlabel = processed.get("name") or processed.get("productName") or ""
-        rd = "Recipe id {}".format(recipe_id)
-        if rlabel:
-            rd = "{}: {}".format(rd, rlabel)
+        rd = "Recipe created: {}".format(rlabel or ("id {}".format(recipe_id)))
+        if recipe_id:
+            rd = "{} (id {})".format(rd, recipe_id)
         _audit(None, None, "Recipe created", rd)
         if processed.get("recipeApprovalStatus") == "approved":
             au = (request.headers.get("X-User-Username") or "").strip() or "--"
@@ -719,6 +849,25 @@ def get_reports():
         return jsonify({"error": str(e)}), 500
 
 
+
+
+def _audit_report_created(report_id, enriched):
+    """Write audit row for a newly saved report/test/validation."""
+    details = _format_report_audit_details(report_id, enriched)
+    rtype = (enriched.get("type") or "").strip().lower()
+    if rtype == "test":
+        td = enriched.get("testData") or {}
+        recipe = enriched.get("recipe") or td.get("recipe") or {}
+        pname = str(recipe.get("productName") or td.get("productName") or "").strip()
+        recipe_id = recipe.get("id")
+        is_quick = pname.lower() == "quick test" or (recipe_id is None and bool(pname))
+        action = "Quick test performed" if is_quick else "Test performed"
+        _audit(None, None, action, details)
+    elif rtype == "validation":
+        _audit(None, None, "Validation performed", details)
+    else:
+        _audit(None, None, "Report saved", details)
+
 @app.route("/api/data/reports", methods=["POST"])
 def create_report():
     try:
@@ -730,19 +879,21 @@ def create_report():
             factory_settings=report_data.get("factorySettings"),
         )
         if (enriched.get("type") or "").strip().lower() in ("test", "validation"):
-            enriched["reportApprovalStatus"] = "pending"
-            for k in ("approvalPassFail", "approvalRemarks", "approvedBy", "approvedAt"):
-                enriched.pop(k, None)
+            enriched = _stamp_report_operator(enriched)
+            td = enriched.get("testData") if isinstance(enriched.get("testData"), dict) else {}
+            run_status = str(td.get("status") or enriched.get("status") or "").strip().lower()
+            if run_status == "aborted":
+                enriched["reportApprovalStatus"] = "aborted"
+            else:
+                enriched["reportApprovalStatus"] = "pending"
+                for k in ("approvalPassFail", "approvalRemarks", "approvedBy", "approvedAt", "approvedByUsername"):
+                    enriched.pop(k, None)
         report_id = data_service.save_report(enriched)
         try:
             print_service.save_report_text_files(enriched, report_id, REPORTS_DIR)
         except Exception:
             pass
-        details = _format_report_audit_details(report_id, enriched)
-        if (enriched.get("type") or "").strip().lower() == "test":
-            _audit(None, None, "Test performed", details)
-        else:
-            _audit(None, None, "Report generated", details)
+        _audit_report_created(report_id, enriched)
         return jsonify({"id": report_id, "report": enriched}), 201
     except Exception as e:
         app.logger.exception("Error creating report")
@@ -798,6 +949,9 @@ def approve_report(report_id):
             return jsonify({"ok": True, "report": report}), 200
         if st != "pending":
             return jsonify({"ok": False, "error": "Invalid approval state"}), 400
+        op_username = _report_operated_by_username(report)
+        if op_username and verified_username == op_username and _effective_request_role() != "factory":
+            return jsonify({"ok": False, "error": "Operator cannot approve their own report."}), 403
         verified_name = (verified.get("name") or verified.get("username") or approver_name or "—").strip()
         verified_role = (verified.get("role") or role_header or "").strip()
         by_line = verified_name
@@ -823,6 +977,44 @@ def approve_report(report_id):
         return jsonify({"ok": True, "report": report}), 200
     except Exception as e:
         app.logger.exception("Error approving report")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/data/reports/<int:report_id>/abort", methods=["POST"])
+def abort_report(report_id):
+    try:
+        report = data_service.get_report(report_id)
+        if not report:
+            return jsonify({"ok": False, "error": "Report not found"}), 404
+        rtype = (report.get("type") or "").strip().lower()
+        if rtype not in ("test", "validation"):
+            return jsonify({"ok": False, "error": "Report type cannot be aborted"}), 400
+        st = (report.get("reportApprovalStatus") or "").strip().lower()
+        if st != "pending":
+            return jsonify({"ok": False, "error": "Only pending reports can be aborted"}), 400
+        cur = data_service.get_current_user() or {}
+        session_un = _norm_username(cur.get("username") or cur.get("name"))
+        op_un = _report_operated_by_username(report)
+        role = _effective_request_role()
+        if role != "factory" and session_un != op_un:
+            return jsonify({"ok": False, "error": "Only the operator or Factory can abort this report."}), 403
+        td = report.get("testData")
+        if not isinstance(td, dict):
+            td = {}
+        else:
+            td = dict(td)
+        td["status"] = "aborted"
+        report["testData"] = td
+        report["status"] = "aborted"
+        report["reportApprovalStatus"] = "aborted"
+        if not report.get("completedAt"):
+            report["completedAt"] = _utc_now_iso()
+        data_service.save_report(report)
+        ctx = _format_report_audit_details(report_id, report)
+        _audit(session_un or None, role or None, "Report aborted", ctx)
+        return jsonify({"ok": True, "report": report}), 200
+    except Exception as e:
+        app.logger.exception("Error aborting report")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
@@ -1248,7 +1440,7 @@ def login():
                     outcome="success",
                     entity_type="session",
                     entity_name="password",
-                    details="Password login succeeded",
+                    details="User logged in: {}".format(username),
                     target_user=username,
                     after={"username": user.get("username"), "role": user.get("role")},
                 )
@@ -1320,7 +1512,7 @@ def login():
                 outcome="success",
                 entity_type="session",
                 entity_name="password",
-                details="Password login succeeded",
+                details="User logged in: {}".format(username),
                 target_user=username,
                 after={"username": user.get("username"), "role": user.get("role")},
             )
@@ -1516,7 +1708,7 @@ def login_biometric():
             outcome="success",
             entity_type="session",
             entity_name="biometric",
-            details="Biometric login succeeded",
+            details="User logged in (biometric): {}".format(username),
             target_user=username,
             after={"username": user.get("username"), "role": user.get("role")},
             extra={"templateId": template_id, "confidence": identified.get("confidence")},
@@ -1555,9 +1747,10 @@ def logout():
                     outcome="success",
                     entity_type="session",
                     entity_name="logout",
-                    details="User logged out",
+                    details="User logged out: {}".format(user.get("username") or user.get("name") or ""),
                     target_user=user.get("username") or user.get("name") or "",
                 )
+        data_service.touch_app_clean_stop_flag()
         data_service.delete_session_power_audit_pending()
         data_service.clear_current_user()
         return jsonify({"success": True}), 200
@@ -1748,7 +1941,7 @@ def _require_export_usb_and_verification_json():
     cur = data_service.get_current_user()
     if not cur:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
-    if not _session_has_internal("export-usb"):
+    if not _session_has_internal("export-usb") and not _session_has_internal("reports-view"):
         return jsonify({"success": False, "error": "Forbidden. Export to USB is not permitted for this account."}), 403
     role = str(cur.get("role") or "").strip().lower()
     if role != "factory":
@@ -2292,6 +2485,11 @@ def export_reports():
         if err:
             return jsonify({"success": False, "error": err, "devices": devices}), 400
 
+        for rid in report_ids:
+            blocked = _check_report_approved_for_print_export(report_id=rid)
+            if blocked is not None:
+                return blocked
+
         export_dir.mkdir(parents=True, exist_ok=True)
 
         exported_files = []
@@ -2392,6 +2590,10 @@ def export_reports_stream():
     gate = _require_export_usb_and_verification_json()
     if gate is not None:
         return gate
+    for rid in report_ids:
+        blocked = _check_report_approved_for_print_export(report_id=rid)
+        if blocked is not None:
+            return blocked
 
     def _emit(obj):
         return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
@@ -2539,6 +2741,23 @@ def export_reports_stream():
     return Response(stream_with_context(gen()), mimetype="application/x-ndjson")
 
 
+
+def _load_report_data_for_print(report_id, report_data_fallback=None):
+    """Load full saved report (including testData) for printing."""
+    if report_id is not None:
+        stored = data_service.get_report(int(report_id))
+        if stored:
+            return report_service.enrich_report_context(dict(stored))
+    if report_data_fallback:
+        rd = dict(report_data_fallback)
+        if not rd.get("factorySettings"):
+            try:
+                rd["factorySettings"] = data_service.get_factory_settings()
+            except Exception:
+                pass
+        return report_service.enrich_report_context(rd)
+    return None
+
 # =================== PRINT ==========================
 
 
@@ -2560,14 +2779,23 @@ def print_a4():
         report_data = data.get("report_data", {}) or {}
         report_id = report_data.get("id")
         if report_id is not None:
-            path_a4 = REPORTS_DIR / f"report_{report_id}_a4.txt"
-            if path_a4.exists():
-                result = print_service.print_report_from_file(
-                    path_a4, config.get("A4_PORT", ""), config.get("A4_BAUD", 9600), "a4"
-                )
+            blocked = _check_report_approved_for_print_export(report_id=report_id)
+            if blocked is not None:
+                return blocked
+            loaded = _load_report_data_for_print(report_id, report_data)
+            if loaded:
+                report_data = loaded
+                try:
+                    print_service.save_report_text_files(report_data, int(report_id), REPORTS_DIR)
+                except Exception:
+                    pass
+                result = print_service.print_a4_report(report_data)
                 if result.get("success"):
-                    _audit(None, None, "Print A4", "report id {} | from file".format(report_id))
+                    _audit(None, None, "Print A4", "report id {} | full data".format(report_id))
                 return jsonify(result), 200 if result.get("success") else 500
+        blocked = _check_report_approved_for_print_export(report_data=report_data)
+        if blocked is not None:
+            return blocked
         if not report_data.get("factorySettings"):
             try:
                 report_data = dict(report_data)
@@ -2606,14 +2834,23 @@ def print_thermal():
         report_data = data.get("report_data", {}) or {}
         report_id = report_data.get("id")
         if report_id is not None:
-            path_thermal = REPORTS_DIR / f"report_{report_id}_thermal.txt"
-            if path_thermal.exists():
-                result = print_service.print_report_from_file(
-                    path_thermal, config.get("THERMAL_PORT", ""), config.get("THERMAL_BAUD", 9600), "thermal"
-                )
+            blocked = _check_report_approved_for_print_export(report_id=report_id)
+            if blocked is not None:
+                return blocked
+            loaded = _load_report_data_for_print(report_id, report_data)
+            if loaded:
+                report_data = loaded
+                try:
+                    print_service.save_report_text_files(report_data, int(report_id), REPORTS_DIR)
+                except Exception:
+                    pass
+                result = print_service.print_thermal_report(report_data)
                 if result.get("success"):
-                    _audit(None, None, "Print thermal", "report id {} | from file".format(report_id))
+                    _audit(None, None, "Print thermal", "report id {} | full data".format(report_id))
                 return jsonify(result), 200 if result.get("success") else 500
+        blocked = _check_report_approved_for_print_export(report_data=report_data)
+        if blocked is not None:
+            return blocked
         if not report_data.get("factorySettings"):
             try:
                 report_data = dict(report_data)
@@ -2684,12 +2921,39 @@ def calibrate_tare():
     return jsonify({"ok": False, "error": "Tare command is not supported by current ESP firmware"}), 400
 
 
+
+
+def _adapter_kind_from_check_result(result):
+    """Parse usp,chk* response: usp1, usp2, error, or None."""
+    if not result or not result.get("ok"):
+        return None
+    norm = hardware_service.normalize_line(result.get("normalized") or result.get("response") or "")
+    s = str(norm).lower()
+    if "adapt" in s and "error" in s:
+        return "error"
+    if "usp1" in s and "ok" in s:
+        return "usp1"
+    if "usp2" in s and "ok" in s:
+        return "usp2"
+    return None
+
 @app.route("/api/hardware/validation/load/start", methods=["POST"])
 def validation_load_start():
     data = request.get_json(force=True, silent=True) or {}
     mode = str(data.get("mode") or "usp2").strip().lower()
     if mode not in ("usp1", "usp2"):
         mode = "usp2"
+    check = hardware_service.cmd_check_adapter()
+    detected = _adapter_kind_from_check_result(check)
+    if detected != mode:
+        return jsonify({
+            "ok": False,
+            "error": "adapter_mismatch",
+            "expected": mode,
+            "detected": detected,
+            "message": "Please check the adapter",
+            "response": (check.get("response") if check else None),
+        }), 400
     result = hardware_service.cmd_start_validation(mode)
     return jsonify(result), (200 if result.get("ok") else 400)
 
@@ -2792,6 +3056,149 @@ def biometric_enroll():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+
+
+def _clear_enroll_session(username):
+    key = str(username or "").strip().lower()
+    if not key:
+        return
+    with _enroll_sessions_lock:
+        _enroll_sessions.pop(key, None)
+
+
+def _get_enroll_session(username):
+    key = str(username or "").strip().lower()
+    with _enroll_sessions_lock:
+        return dict(_enroll_sessions.get(key) or {})
+
+
+def _set_enroll_session(username, data):
+    key = str(username or "").strip().lower()
+    with _enroll_sessions_lock:
+        _enroll_sessions[key] = dict(data or {})
+
+
+@app.route("/api/biometric/enroll/capture", methods=["POST"])
+def biometric_enroll_capture():
+    """Step 1 or 2 of fingerprint enrollment (two scans of the same finger)."""
+    try:
+        if not _is_biometric_enabled():
+            return jsonify({"ok": False, "error": "Biometric enrollment is disabled by Factory Settings."}), 403
+        payload = request.get_json(force=True, silent=True) or {}
+        username = str(payload.get("username") or "").strip()
+        if not username:
+            return jsonify({"ok": False, "error": "username is required"}), 400
+        try:
+            step = int(payload.get("step") or 0)
+        except (TypeError, ValueError):
+            step = 0
+        if step not in (1, 2):
+            return jsonify({"ok": False, "error": "step must be 1 or 2"}), 400
+        member = data_service.get_member_by_username(username)
+        if not member:
+            return jsonify({"ok": False, "error": "Member not found for the provided username"}), 404
+        status = str(member.get("status") or "active").strip().lower()
+        if status != "active":
+            return jsonify({"ok": False, "error": "Member account is not active"}), 403
+        before_member = dict(member)
+        timeout_sec = float(payload.get("captureTimeoutSec") or BIOMETRIC_ENROLL_TIMEOUT_SEC)
+
+        if step == 1:
+            template_id_raw = payload.get("templateId")
+            if template_id_raw is None:
+                template_id = data_service.get_next_fingerprint_template_id()
+            else:
+                template_id = int(template_id_raw)
+            captured = biometric_service.capture_enroll_finger(0x01, timeout_sec=timeout_sec)
+            if not captured.get("ok"):
+                _clear_enroll_session(username)
+                return jsonify(captured), 400
+            _set_enroll_session(username, {"templateId": template_id, "step1Done": True, "startedAt": int(time.time())})
+            return jsonify({
+                "ok": True,
+                "step": 1,
+                "nextStep": 2,
+                "templateId": template_id,
+                "message": "First scan complete. Remove your finger from the scanner.",
+                "nextMessage": "Place the same finger on the scanner again for the second scan.",
+            }), 200
+
+        session = _get_enroll_session(username)
+        if not session.get("step1Done"):
+            return jsonify({"ok": False, "error": "Complete capture step 1 before step 2."}), 400
+        template_id = int(session.get("templateId") or 0)
+        if template_id <= 0:
+            _clear_enroll_session(username)
+            return jsonify({"ok": False, "error": "Enrollment session expired. Start again."}), 400
+
+        captured = biometric_service.capture_enroll_finger(0x02, timeout_sec=timeout_sec)
+        if not captured.get("ok"):
+            _clear_enroll_session(username)
+            return jsonify(captured), 400
+
+        finalized = biometric_service.finalize_enroll(template_id)
+        _clear_enroll_session(username)
+        if not finalized.get("ok"):
+            _audit_event(
+                action="Biometric enroll",
+                outcome="failed",
+                entity_type="member",
+                entity_id=member.get("id"),
+                entity_name=username,
+                details=finalized.get("error") or "Unknown error",
+                target_user=username,
+                before=before_member,
+                extra={"templateId": template_id},
+            )
+            return jsonify(finalized), 400
+
+        previous_owner = data_service.get_member_by_fingerprint_template(template_id)
+        if previous_owner and previous_owner.get("id") != member.get("id"):
+            previous_owner["fingerprintTemplateId"] = None
+            previous_owner["biometricEnrollmentStatus"] = "not_enrolled"
+            previous_owner["biometricEnrolledAt"] = None
+            data_service.save_member(previous_owner)
+        member["fingerprintTemplateId"] = template_id
+        member["biometricEnrollmentStatus"] = "enrolled"
+        member["biometricEnrolledAt"] = int(time.time())
+        member["biometricEnabled"] = True
+        data_service.save_member(member)
+        _audit_event(
+            action="Biometric enroll",
+            outcome="success",
+            entity_type="member",
+            entity_id=member.get("id"),
+            entity_name=username,
+            details="Fingerprint enrolled and linked (2 captures)",
+            target_user=username,
+            before=before_member,
+            after=member,
+            extra={"templateId": template_id},
+        )
+        return jsonify({
+            "ok": True,
+            "step": 2,
+            "templateId": template_id,
+            "linked": True,
+            "memberId": member.get("id"),
+            "message": "Fingerprint registered successfully.",
+        }), 200
+    except Exception as e:
+        app.logger.exception("Error during biometric enroll capture")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/biometric/enroll/cancel", methods=["POST"])
+def biometric_enroll_cancel():
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+        username = str(payload.get("username") or "").strip()
+        if username:
+            _clear_enroll_session(username)
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 @app.route("/api/biometric/delete", methods=["POST"])
 def biometric_delete():
     try:
@@ -2814,36 +3221,8 @@ def biometric_delete():
 
 
 def _get_stored_datetime():
-    import time
-    from datetime import timedelta
-    now_ts = time.time()
-    try:
-        if DATETIME_STORAGE.exists():
-            with open(DATETIME_STORAGE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            dt_str = data.get("datetime", "")
-            last_tick = data.get("last_tick", now_ts)
-            if dt_str:
-                from datetime import datetime
-                dt_obj = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-                elapsed = max(0, now_ts - last_tick)
-                dt_obj = dt_obj + timedelta(seconds=elapsed)
-                with open(DATETIME_STORAGE, "w", encoding="utf-8") as f:
-                    json.dump({"datetime": dt_obj.strftime("%Y-%m-%dT%H:%M:%S"), "last_tick": now_ts}, f)
-                return {
-                    "datetime": dt_obj.strftime("%Y-%m-%dT%H:%M:%S"),
-                    "date": dt_obj.strftime("%d-%m-%Y"),
-                    "time": dt_obj.strftime("%H:%M"),
-                }
-    except Exception:
-        pass
-    from datetime import datetime
-    now = datetime.now()
-    return {
-        "datetime": now.strftime("%Y-%m-%dT%H:%M:%S"),
-        "date": now.strftime("%d-%m-%Y"),
-        "time": now.strftime("%H:%M"),
-    }
+    """Return local wall time from the DS1307 (hwclock on /dev/rtc0), not NTP/network."""
+    return rtc_service.get_device_wall_datetime_payload()
 
 
 @app.route("/api/get_datetime", methods=["GET"])
@@ -2861,105 +3240,32 @@ def _set_datetime_common():
         return jsonify({"ok": False, "error": "datetime required"}), 400
     try:
         from datetime import datetime
-        dt_obj = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        clean = dt_str.strip().replace("Z", "")
+        if "+" in clean:
+            clean = clean.split("+", 1)[0]
+        if clean.count("-") > 2:
+            clean = clean.rsplit("-", 1)[0]
+        dt_obj = datetime.fromisoformat(clean)
+        if getattr(dt_obj, "tzinfo", None) is not None:
+            dt_obj = dt_obj.replace(tzinfo=None)
     except Exception:
         return jsonify({"ok": False, "error": "invalid datetime"}), 400
-    system_ok, system_err = _set_system_datetime(dt_obj)
-    if not system_ok:
-        return jsonify({"ok": False, "error": system_err or "Failed to set system time"}), 500
+    rtc_ok, rtc_err = rtc_service.apply_user_wall_time(dt_obj)
+    if not rtc_ok:
+        return jsonify({"ok": False, "error": rtc_err or "Failed to set RTC time"}), 500
     try:
         STORAGE_DIR.mkdir(parents=True, exist_ok=True)
         with open(DATETIME_STORAGE, "w", encoding="utf-8") as f:
             json.dump({"datetime": dt_obj.strftime("%Y-%m-%dT%H:%M:%S"), "last_tick": time.time()}, f)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-    _sync_rtc_after_datetime_set(dt_obj)
+    applied = rtc_service.get_device_wall_datetime_payload()
     _audit(None, None, "System date change", dt_str)
-    return jsonify({"ok": True, "datetime": dt_obj.strftime("%Y-%m-%dT%H:%M:%S")})
-
-
-def _run_datetime_command(cmd, timeout_sec=5):
-    """Run a privileged date/time helper. Prefer non-interactive sudo for kiosk services."""
-    cmd = list(cmd)
-
-    def _attempt(argv):
-        try:
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_sec)
-            if proc.returncode == 0:
-                return True, ""
-            err = (proc.stderr or proc.stdout or "").strip() or ("exit code %s" % proc.returncode)
-            return False, err
-        except Exception as ex:
-            return False, str(ex)
-
-    ok, msg = _attempt(cmd)
-    if ok:
-        return True, ""
-    if cmd and cmd[0] == "sudo":
-        return False, msg
-    if os.geteuid() == 0:
-        return False, msg
-    ok2, msg2 = _attempt(["sudo", "-n"] + cmd)
-    if ok2:
-        return True, ""
-    ok3, msg3 = _attempt(["sudo"] + cmd)
-    if ok3:
-        return True, ""
-    return False, "{} | sudo -n: {} | sudo: {}".format(msg, msg2, msg3)
-
-
-def _set_system_datetime(dt_obj):
-    """Set OS clock from provided datetime (Pi/Linux)."""
-    if sys.platform == "win32":
-        return True, ""
-    date_cmd_str = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
-    ok, err = _run_datetime_command(["date", "-s", date_cmd_str], timeout_sec=5)
-    if ok:
-        return True, ""
-    ok2, err2 = _run_datetime_command(["timedatectl", "set-time", date_cmd_str], timeout_sec=5)
-    if ok2:
-        return True, ""
-    return False, ("date failed: {} ; timedatectl failed: {}".format(err, err2)).strip()
-
-
-def _kernel_rtc_device_path():
-    """Path to kernel RTC node when present (e.g. DS1307 via dtoverlay=i2c-rtc,ds1307)."""
-    if os.path.exists("/dev/rtc0"):
-        return "/dev/rtc0"
-    if os.path.exists("/dev/rtc"):
-        return "/dev/rtc"
-    return None
-
-
-def _sync_rtc_after_datetime_set(dt_obj):
-    """Copy system time to hardware RTC after datetime update.
-
-    When the DS1307 is bound as rtc-ds1307, /dev/rtc0 is root-only and userspace I2C to 0x68
-    returns EBUSY — use hwclock(8) against that device. Userspace SMBus is only used when
-    no kernel RTC node exists (e.g. some custom setups).
-    """
-    if sys.platform == "win32":
-        return
-    rtc_dev = _kernel_rtc_device_path()
-    if rtc_dev:
-        ok, err = _run_datetime_command(["hwclock", "-f", rtc_dev, "--systohc"], timeout_sec=8)
-        if ok:
-            app.logger.info("RTC synced from system time (%s hwclock --systohc)", rtc_dev)
-            return
-        app.logger.warning("hwclock --systohc failed (%s): %s", rtc_dev, err)
-    try:
-        rtc_res = rtc_service.set_rtc_date(dt_obj)
-        if rtc_res.get("success"):
-            app.logger.info("RTC synced via I2C (DS1307 userspace)")
-            return
-        app.logger.warning("RTC I2C sync failed after datetime set: %s", rtc_res.get("error"))
-    except Exception as rtc_err:
-        app.logger.warning("RTC I2C sync exception after datetime set: %s", rtc_err)
-    if rtc_dev:
-        return
-    ok2, err2 = _run_datetime_command(["hwclock", "--systohc"], timeout_sec=8)
-    if not ok2:
-        app.logger.warning("hwclock sync (no explicit rtc device) failed: %s", err2)
+    return jsonify({
+        "ok": True,
+        "datetime": applied.get("datetime") or dt_obj.strftime("%Y-%m-%dT%H:%M:%S"),
+        "source": applied.get("source", "rtc"),
+    })
 
 
 @app.route("/api/set_datetime", methods=["POST"])
@@ -3002,6 +3308,7 @@ def set_rtc_date_route():
 
 _startup_session_power_audit()
 _register_clean_shutdown_signals()
+_register_clean_shutdown_atexit()
 
 
 # =================== MAIN ==========================

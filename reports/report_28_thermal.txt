@@ -1,0 +1,24 @@
+
+TAP DENSITY TEST REPORT
+
+Company: RAM
+Model No: THYY
+Serial No: THY
+Location: dd
+Instrument ID: qq
+Last Validation Date: 14-05-2026
+Next Validation Due: 14-08-2026
+
+Product: Quick Test
+Batch: --
+Report/Test Start: 20/05/2026 20:21:02
+Generated: 20/05/2026 20:21:02
+Test Status: Completed
+
+Operated by: Ranjith
+Employee ID: Ranjiiii
+Approval Status: pending
+Approval Result: --
+Approved By: --
+Approved At: --
+Approval Remarks: 

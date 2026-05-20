@@ -101,5 +101,73 @@
     "biometricEnrolledAt": null,
     "biometricEnrollmentStatus": "not_enrolled",
     "permissionsVersion": 2
+  },
+  {
+    "name": "Ranjith",
+    "username": "Ranjiiii",
+    "password": "Ranjith@1580",
+    "role": "Admin",
+    "featureOverrides": {
+      "allow": [
+        "perm_audit_view",
+        "perm_datetime",
+        "perm_export_approve",
+        "perm_export_usb",
+        "perm_profile_admin",
+        "perm_recipe_approve",
+        "perm_recipe_manage",
+        "perm_reports_view",
+        "perm_test_access",
+        "perm_test_report_approve",
+        "perm_validation_report_approve",
+        "perm_validation_test"
+      ],
+      "deny": []
+    },
+    "id": 4,
+    "status": "active",
+    "failedAttempts": 0,
+    "createdAt": "2026-05-20T13:11:02.010031Z",
+    "passwordLastChangedAt": "2026-05-20T13:11:56.137469Z",
+    "mustChangePassword": false,
+    "biometricEnabled": true,
+    "fingerprintTemplateId": 1,
+    "biometricEnrolledAt": 1779282676,
+    "biometricEnrollmentStatus": "enrolled",
+    "permissionsVersion": 2
+  },
+  {
+    "name": "Test@1234",
+    "username": "Test@1234",
+    "password": "Test@1234",
+    "role": "Admin",
+    "featureOverrides": {
+      "allow": [
+        "perm_audit_view",
+        "perm_datetime",
+        "perm_export_approve",
+        "perm_export_usb",
+        "perm_profile_admin",
+        "perm_recipe_approve",
+        "perm_recipe_manage",
+        "perm_reports_view",
+        "perm_test_access",
+        "perm_test_report_approve",
+        "perm_validation_report_approve",
+        "perm_validation_test"
+      ],
+      "deny": []
+    },
+    "id": 5,
+    "status": "active",
+    "failedAttempts": 0,
+    "createdAt": "2026-05-20T13:38:28.716982Z",
+    "passwordLastChangedAt": "2026-05-20T13:39:32.567022Z",
+    "mustChangePassword": false,
+    "biometricEnabled": true,
+    "fingerprintTemplateId": 2,
+    "biometricEnrolledAt": 1779284325,
+    "biometricEnrollmentStatus": "enrolled",
+    "permissionsVersion": 2
   }
 ]

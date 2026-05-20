@@ -173,6 +173,91 @@ def _wrap_lines(lines: list, width: int) -> list:
     return out
 
 
+
+def _fmt_density_val(val: Any) -> str:
+    if val is None or val == "":
+        return "--"
+    try:
+        f = float(val)
+        return f"{f:.3f}".rstrip("0").rstrip(".") if f != int(f) else str(int(f))
+    except (TypeError, ValueError):
+        return str(val)
+
+
+def _append_test_report_details(lines: list, td: Dict[str, Any], report_data: Dict[str, Any], width: int, thermal: bool) -> None:
+    """Append remarks, step results, and statistics (matches on-screen report preview)."""
+    dash = "" if thermal else ("-" * min(width, 70))
+    remarks = report_data.get("remarks")
+    if remarks is None and isinstance(td, dict):
+        remarks = td.get("remarks")
+    if remarks not in (None, ""):
+        lines.extend(["", "REMARKS:", str(remarks), ""])
+
+    if not isinstance(td, dict):
+        td = {}
+    step_count = td.get("stepCount")
+    results = td.get("stepResults") or []
+    if step_count is None and results:
+        step_count = len(results)
+    try:
+        step_count = int(step_count or 0)
+    except (TypeError, ValueError):
+        step_count = len(results) if results else 0
+
+    duration_sec = td.get("durationSeconds")
+    if duration_sec is not None:
+        try:
+            lines.append(f"Test Duration: {int(duration_sec)} s")
+        except (TypeError, ValueError):
+            pass
+
+    if step_count > 0 or results:
+        lines.extend(["", "TEST DATA:" if thermal else "TEST DATA", dash if dash else ""])
+        if not thermal:
+            hdr = f"{'S':>2} {'Vol(ml)':>8} {'dVol':>7} {'Bulk':>8} {'Tap':>8} {'Result':>8}"
+            lines.append(hdr)
+            if dash:
+                lines.append(dash)
+        for i in range(max(step_count, len(results))):
+            r = results[i] if i < len(results) and isinstance(results[i], dict) else {}
+            vol = r.get("volumeMl", "__")
+            dvol = r.get("volumeDeltaMl", "__")
+            if dvol not in (None, "", "__"):
+                dvol = _fmt_density_val(dvol)
+            bulk = r.get("bulkDensity", "__")
+            tap = r.get("tapDensity", "__")
+            res = r.get("resultText", "__")
+            sn = i + 1
+            if thermal:
+                lines.append(
+                    f"{sn}. Vol:{vol} dVol:{dvol} Bulk:{bulk} Tap:{tap} Res:{res}"
+                )
+            else:
+                lines.append(
+                    f"{sn:2d} {str(vol):>8} {str(dvol):>7} {str(bulk):>8} {str(tap):>8} {str(res):>8}"
+                )
+    elif str(report_data.get("type") or "test").strip().lower() == "test":
+        lines.extend(["", "TEST DATA: No test data recorded"])
+
+    stats = report_data.get("statistics") or td.get("statistics") or {}
+    if isinstance(stats, dict) and stats:
+        lines.extend(["", "STATISTICS:" if thermal else "STATISTICS", dash if dash else ""])
+        if not thermal:
+            lines.append(f"{'Parameter':<16} {'Mean':>10} {'Min':>10} {'Max':>10}")
+            if dash:
+                lines.append(dash)
+        for key, val in stats.items():
+            if not isinstance(val, dict):
+                continue
+            mean = val.get("mean", val.get("Mean", "--"))
+            mn = val.get("min", val.get("Min", "--"))
+            mx = val.get("max", val.get("Max", "--"))
+            if thermal:
+                lines.append(f"{key}: mean={mean} min={mn} max={mx}")
+            else:
+                lines.append(f"{str(key):<16} {str(mean):>10} {str(mn):>10} {str(mx):>10}")
+
+
 def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
     thermal = width < 70
     sep = "" if thermal else ("=" * width)
@@ -194,32 +279,66 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
         "",
     ]
     if rtype == "validation":
-        lines.extend(
-            [
-                f"Date / Time: {_format_ts_readable(td.get('completedAt') or report_data.get('completedAt') or report_data.get('createdAt'))}",
-                f"USP: {td.get('usp', report_data.get('usp', '--'))}",
-                f"Taps/Min: {td.get('tapsMin', report_data.get('tapsMin', '--'))}",
-                f"Drop Height (mm): {td.get('dropHeight', report_data.get('dropHeight', '--'))}",
-                f"Expected Tap Count: {td.get('expectedTapCount', report_data.get('expectedTapCount', '--'))}",
-                f"Actual Tap Count: {td.get('actualTapCount', report_data.get('actualTapCount', '--'))}",
-                f"Status: {td.get('status', report_data.get('status', '--'))}",
-            ]
-        )
+        runs = td.get("validationRuns") or report_data.get("validationRuns")
+        if runs and isinstance(runs, list) and len(runs) > 0:
+            for idx, run in enumerate(runs):
+                if idx > 0:
+                    lines.append("")
+                run = run if isinstance(run, dict) else {}
+                usp = run.get("usp") or ("USP 2" if run.get("validationSubtype") == "load" else "USP 1")
+                expected = run.get("expectedTapCount", "--")
+                tol = run.get("expectedTolerance")
+                if tol is not None and expected not in (None, "--"):
+                    expected = f"{expected} (+/- {tol})"
+                lines.extend(
+                    [
+                        f"--- {usp} validation ---",
+                        f"Date / Time: {_format_ts_readable(run.get('completedAt') or td.get('completedAt') or report_data.get('completedAt') or report_data.get('createdAt'))}",
+                        f"USP: {usp}",
+                        f"Taps/Min: {run.get('tapsMin', '--')}",
+                        f"Drop Height (mm): {run.get('dropHeight', '--')}",
+                        f"Expected Tap Count: {expected}",
+                        f"Actual Tap Count: {run.get('actualTapCount', '--')}",
+                        f"Status: {run.get('status', '--')}",
+                    ]
+                )
+            lines.append(f"Overall Status: {td.get('status', report_data.get('status', '--'))}")
+        else:
+            lines.extend(
+                [
+                    f"Date / Time: {_format_ts_readable(td.get('completedAt') or report_data.get('completedAt') or report_data.get('createdAt'))}",
+                    f"USP: {td.get('usp', report_data.get('usp', '--'))}",
+                    f"Taps/Min: {td.get('tapsMin', report_data.get('tapsMin', '--'))}",
+                    f"Drop Height (mm): {td.get('dropHeight', report_data.get('dropHeight', '--'))}",
+                    f"Expected Tap Count: {td.get('expectedTapCount', report_data.get('expectedTapCount', '--'))}",
+                    f"Actual Tap Count: {td.get('actualTapCount', report_data.get('actualTapCount', '--'))}",
+                    f"Status: {td.get('status', report_data.get('status', '--'))}",
+                ]
+            )
     else:
         recipe = report_data.get("recipe") or td.get("recipe") or td
+        if not isinstance(recipe, dict):
+            recipe = {}
+        status_raw = str(td.get("status", "")).lower() if isinstance(td, dict) else ""
+        status_label = "Aborted" if status_raw == "aborted" else "Completed"
+        sc = td.get("completedSteps") if isinstance(td, dict) else None
+        stc = td.get("stepCount") if isinstance(td, dict) else None
+        if sc is not None and stc is not None:
+            status_label = f"{status_label} ({sc}/{stc} steps)"
         lines.extend(
             [
                 f"Product: {recipe.get('productName', td.get('productName', 'N/A'))}",
                 f"Batch: {recipe.get('batchNumber', td.get('batchNumber', 'N/A'))}",
                 f"Report/Test Start: {_format_ts_readable(td.get('testStartTime') or report_data.get('createdAt'))}",
                 f"Generated: {_format_ts_readable(td.get('testEndTime') or report_data.get('completedAt') or report_data.get('createdAt'))}",
-                f"Test Status: {'Aborted' if str(td.get('status', '')).lower() == 'aborted' else 'Completed'}",
+                f"Test Status: {status_label}",
             ]
         )
+        _append_test_report_details(lines, td if isinstance(td, dict) else {}, report_data, width, thermal)
     lines.extend(
         [
             "",
-            f"Operated by: {td.get('operatorName', '--')}",
+            f"Operated by: {report_data.get('operatorName') or td.get('operatorName', '--')}",
             f"Employee ID: {td.get('employeeId', '--')}",
             f"Approval Status: {report_data.get('reportApprovalStatus', '--')}",
             f"Approval Result: {report_data.get('approvalPassFail', '--')}",

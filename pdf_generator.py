@@ -151,7 +151,7 @@ def _wrap_html_for_a4(html: str) -> str:
     looks_like_doc = snippet.lower().startswith("<!doctype") or snippet.lower().startswith("<html")
     a4_page_css = (
         "<style>"
-        "@page { size: A4; margin: 12mm 10mm 12mm 10mm; }"
+        "@page { size: A4; margin: 6mm 5mm; }"
         "html, body { margin: 0; padding: 0; }"
         "body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }"
         "</style>"

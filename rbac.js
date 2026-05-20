@@ -268,7 +268,11 @@ function getExpandedInternalKeysForUser(userObj) {
 }
 
 function userHasInternalKey(userObj, internalKey) {
-  return getExpandedInternalKeysForUser(userObj).indexOf(internalKey) !== -1;
+  if (!internalKey) return false;
+  var u = _getUserObjectFromInput(userObj);
+  if (!u) return false;
+  if (isFactoryLikeRole(_getRoleFromInput(u), u)) return true;
+  return getExpandedInternalKeysForUser(u).indexOf(internalKey) !== -1;
 }
 
 function _getUserObjectFromInput(roleOrUser) {

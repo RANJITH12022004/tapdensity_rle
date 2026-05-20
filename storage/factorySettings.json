@@ -12,5 +12,6 @@
   "maxAdmins": 99,
   "maxSupervisors": 99,
   "biometricEnabled": true,
-  "passwordResetPeriodDays": 30
+  "passwordResetPeriodDays": 30,
+  "autoLogoutMinutes": 0
 }

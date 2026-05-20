@@ -15,12 +15,14 @@ var validationRunState = 'idle'; // 'idle' | 'running'
 var validationRunIntervalId = null;
 var validationRunCurrentCount = 0;
 var validationRunTarget = 300;
-var validationRunTolerance = 50;
-var validationRunMin = 250;
-var validationRunMax = 350;
+var validationRunTolerance = 15;
+var validationRunMin = 285;
+var validationRunMax = 315;
 var validationRunBackendPending = false;
 var validationHardwareEnabled = true;
 var validationCompletion = { distance: false, load: false }; // distance=USP 1, load=USP 2
+/** USP1 (distance) and USP2 (load) results held until both validations complete. */
+var validationSessionResults = { distance: null, load: null };
 /** 60s timed validation: hardware tap count via SSE */
 var validationRunHardwareEs = null;
 var validationRunSseListener = null;
@@ -32,6 +34,7 @@ var currentReportData = null;
 var currentRecipeForPrint = null;
 var lastKnownDateTime = null;
 var dateTimeClockInterval = null;
+var _wallClockResyncInterval = null;
 var lastDisplayedRecipes = [];
 var pendingRecipeToLoad = null;
 var recipeListMode = 'manage'; // 'manage' | 'load'
@@ -101,25 +104,8 @@ function getMissingValidationLabel() {
 }
 
 function stopActiveRunForLogout() {
-    // Abort active test-run (hardware or UI) before logout.
-    if (testRunButtonState === 'abort') {
-        if (testRunIntervalId != null) {
-            clearInterval(testRunIntervalId);
-            testRunIntervalId = null;
-        }
-        hardwareTapStopSilently();
-        _closeTestRunHardwareEs();
-        testRunButtonState = 'start';
-        var testBtn = document.getElementById('btn-test-start-abort');
-        if (testBtn) {
-            testBtn.className = 'btn-ctrl start';
-            testBtn.innerHTML = '<span class="ctrl-icon">&#9654;</span><span>START</span>';
-            testBtn.classList.remove('danger');
-        }
-        var statusText = document.getElementById('run-status-text');
-        var statusSubtext = document.getElementById('run-status-subtext');
-        if (statusText) statusText.textContent = 'Aborted';
-        if (statusSubtext) statusSubtext.textContent = 'Test stopped';
+    if (testRunButtonState === 'abort' && typeof abortTestRunAndSave === 'function') {
+        return abortTestRunAndSave();
     }
 
     // Abort active validation hardware run before logout.
@@ -606,13 +592,14 @@ function computeStandardUspTaps(stepCount) {
 }
 
 function computeCreateRecipeStepTapsForStepCount(stepCount) {
-    var mode = getCreateUspMode();
-    if (mode === 'CUSTOM') {
-        var totalEl = document.getElementById('create-custom-total-taps');
-        var total = totalEl ? parseInt(totalEl.value, 10) : 0;
-        return distributeTotalTaps(total, stepCount);
+    var n = Math.max(1, Math.min(10, parseInt(stepCount, 10) || 10));
+    if (getCreateUspMode() === 'CUSTOM') {
+        if (window._createRecipeStepTaps && window._createRecipeStepTaps.length === n) {
+            return window._createRecipeStepTaps.slice();
+        }
+        return null;
     }
-    return computeStandardUspTaps(stepCount);
+    return computeStandardUspTaps(n);
 }
 
 function refreshActiveQaCount() {
@@ -677,6 +664,289 @@ function userCanApproveValidationReport() {
     return false;
 }
 
+
+window._reportApprovalGate = null;
+var _reportApprovalPollTimerId = null;
+
+function normalizeReportUsername(u) {
+    return String(u || '').trim().toLowerCase();
+}
+
+function getCurrentReportUsername() {
+    var u = window.currentUser;
+    if (!u) return '';
+    return normalizeReportUsername(u.username || u.name || '');
+}
+
+function getReportOperatedByUsername(preview) {
+    var p = preview || window._lastReportPreview || {};
+    var td = p.testData || {};
+    return normalizeReportUsername(p.operatedByUsername || td.operatedByUsername || td.employeeId || p.employeeId);
+}
+
+function isReportPendingApproval(preview) {
+    var st = String((preview || window._lastReportPreview || {}).reportApprovalStatus || '').trim().toLowerCase();
+    return st === 'pending';
+}
+
+function isReportApproved(preview) {
+    var st = String((preview || window._lastReportPreview || {}).reportApprovalStatus || '').trim().toLowerCase();
+    return st === 'approved';
+}
+
+function isCurrentUserReportOperator(preview) {
+    var op = getReportOperatedByUsername(preview);
+    var cur = getCurrentReportUsername();
+    return !!(op && cur && op === cur);
+}
+
+function isReportPreviewLockedForCurrentUser(preview) {
+    if (typeof isFactorySessionUser === 'function' && isFactorySessionUser()) return false;
+    var p = preview || window._lastReportPreview || {};
+    var reportTypeNorm = String(p.type || 'test').trim().toLowerCase();
+    if (reportTypeNorm !== 'test' && reportTypeNorm !== 'validation') return false;
+    if (!isReportPendingApproval(p)) return false;
+    return isCurrentUserReportOperator(p);
+}
+
+function setReportApprovalGate(reportId, operatedByUsername) {
+    if (reportId == null) {
+        window._reportApprovalGate = null;
+        return;
+    }
+    window._reportApprovalGate = {
+        reportId: reportId,
+        operatedByUsername: normalizeReportUsername(operatedByUsername)
+    };
+}
+
+function clearReportApprovalGate() {
+    window._reportApprovalGate = null;
+    stopReportApprovalPoll();
+}
+
+function setReportApprovalGateFromPreview(preview, reportId) {
+    if (!isReportPendingApproval(preview)) {
+        clearReportApprovalGate();
+        return;
+    }
+    if (isReportPreviewLockedForCurrentUser(preview)) {
+        setReportApprovalGate(reportId, getReportOperatedByUsername(preview));
+    } else {
+        clearReportApprovalGate();
+    }
+}
+
+function stopReportApprovalPoll() {
+    if (_reportApprovalPollTimerId != null) {
+        clearInterval(_reportApprovalPollTimerId);
+        _reportApprovalPollTimerId = null;
+    }
+}
+
+function startReportApprovalPollIfLocked() {
+    stopReportApprovalPoll();
+    if (!isReportPreviewLockedForCurrentUser(window._lastReportPreview)) return;
+    var rid = currentReportId;
+    if (rid == null) return;
+    _reportApprovalPollTimerId = setInterval(function () {
+        if (!isReportPreviewLockedForCurrentUser(window._lastReportPreview)) {
+            stopReportApprovalPoll();
+            return;
+        }
+        apiRequest(API_BASE + '/api/reports/' + rid + '/preview').then(function (data) {
+            if (!data || !data.preview) return;
+            var st = String(data.preview.reportApprovalStatus || '').trim().toLowerCase();
+            if (st === 'approved') {
+                populateReportPreview(data.preview);
+                clearReportApprovalGate();
+                applyReportPreviewLockUi(data.preview);
+                showAppModal('Report has been approved. You may now print or leave this screen.', 'Report');
+            }
+        }).catch(function () {});
+    }, 5000);
+}
+
+function clearReportApproveVerifyError() {
+    var errEl = document.getElementById('report-approve-verify-error');
+    if (!errEl) return;
+    errEl.textContent = '';
+    errEl.style.display = 'none';
+}
+
+function setReportApproveVerifyError(message) {
+    var errEl = document.getElementById('report-approve-verify-error');
+    if (!errEl) return;
+    errEl.textContent = message ? String(message) : '';
+    errEl.style.display = message ? 'block' : 'none';
+}
+
+function wireReportApproveVerifierListeners() {
+    if (window._reportApproveVerifierListenersWired) return;
+    window._reportApproveVerifierListenersWired = true;
+    var userEl = document.getElementById('report-approve-verifier-username');
+    if (!userEl) return;
+    userEl.addEventListener('input', function () {
+        setReportApprovePanelInteractionState(window._lastReportPreview);
+    });
+}
+
+function setReportApprovePanelInteractionState(preview) {
+    var apprPanel = document.getElementById('report-approve-panel');
+    if (!apprPanel) return;
+    wireReportApproveVerifierListeners();
+    var pending = isReportPendingApproval(preview);
+    var isOp = isCurrentUserReportOperator(preview);
+    var isFactory = typeof isFactorySessionUser === 'function' && isFactorySessionUser();
+    var fieldsEnabled = !!pending;
+    var usernameEl = document.getElementById('report-approve-verifier-username');
+    var entered = usernameEl && typeof normalizeReportUsername === 'function'
+        ? normalizeReportUsername(usernameEl.value)
+        : (usernameEl ? String(usernameEl.value || '').trim().toLowerCase() : '');
+    var opUser = typeof getReportOperatedByUsername === 'function'
+        ? getReportOperatedByUsername(preview) : '';
+    var canCredentialSubmit = fieldsEnabled && (!isOp || isFactory || (entered && opUser && entered !== opUser));
+    apprPanel.classList.toggle('is-operator-view', !!(pending && isOp && !isFactory));
+    var hintEl = document.getElementById('report-approve-operator-hint');
+    if (hintEl) hintEl.style.display = (pending && isOp && !isFactory) ? 'block' : 'none';
+    var subtitleEl = document.getElementById('report-approve-panel-subtitle');
+    if (subtitleEl) subtitleEl.style.display = '';
+    ['#report-approve-remarks-input', 'input[name="report-approve-pass-fail"]',
+        '#report-approve-verifier-username', '#report-approve-verifier-password'].forEach(function (sel) {
+        apprPanel.querySelectorAll(sel).forEach(function (el) { el.disabled = !fieldsEnabled; });
+    });
+    var submitBtn = document.getElementById('btn-report-approve-submit');
+    if (submitBtn) submitBtn.disabled = !canCredentialSubmit;
+    var bioBtn = document.getElementById('btn-report-approve-biometric');
+    if (bioBtn) bioBtn.disabled = !fieldsEnabled;
+    apprPanel.querySelectorAll('.report-approve-card-wrap').forEach(function (wrap) {
+        if (fieldsEnabled) wrap.classList.remove('is-disabled');
+        else wrap.classList.add('is-disabled');
+    });
+}
+
+function updateReportApprovePanelForPreview(preview) {
+    var apprPanel = document.getElementById('report-approve-panel');
+    if (!apprPanel) return;
+    var reportTypeNorm = String((preview || {}).type || 'test').trim().toLowerCase();
+    var titleEl = document.getElementById('report-approve-panel-title') || apprPanel.querySelector('h3');
+    if (titleEl) {
+        titleEl.textContent = reportTypeNorm === 'validation'
+            ? 'Validation report approval'
+            : 'Test report approval';
+    }
+    var pending = isReportPendingApproval(preview);
+    apprPanel.style.display = pending ? 'block' : 'none';
+    if (!pending) clearReportApproveVerifyError();
+    setReportApprovePanelInteractionState(preview);
+    var bioBtn = document.getElementById('btn-report-approve-biometric');
+    var bioWrap = document.getElementById('report-approve-biometric-wrap');
+    var showBio = typeof biometricEnabledSetting === 'undefined' || biometricEnabledSetting;
+    if (bioBtn) bioBtn.style.display = showBio ? '' : 'none';
+    if (bioWrap) bioWrap.style.display = showBio ? '' : 'none';
+}
+
+function scrollReportApprovePanelIntoView() {
+    var panel = document.getElementById('report-approve-panel');
+    if (!panel || panel.style.display === 'none') return;
+    try {
+        panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch (e) {
+        panel.scrollIntoView(true);
+    }
+}
+
+function scrollReportPendingBannerIntoView() {
+    var banner = document.getElementById('report-pending-lock-banner');
+    if (!banner || banner.style.display === 'none') return;
+    try {
+        banner.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (e) {
+        banner.scrollIntoView(true);
+    }
+}
+
+function applyReportPreviewLockUi(preview) {
+    preview = preview || window._lastReportPreview;
+    var locked = isReportPreviewLockedForCurrentUser(preview);
+    var pending = isReportPendingApproval(preview);
+    var app = document.querySelector('.app-container');
+    if (app) app.classList.toggle('report-approval-locked', !!locked);
+    var banner = document.getElementById('report-pending-lock-banner');
+    if (banner) banner.style.display = locked ? 'block' : 'none';
+    var closeBtn = document.querySelector('#report-preview-actions .btn-close');
+    if (closeBtn) closeBtn.style.display = locked ? 'none' : '';
+    var backBtn = document.getElementById('header-back-btn');
+    if (backBtn) backBtn.style.visibility = locked ? 'hidden' : '';
+    document.querySelectorAll('.nav-item[data-page]').forEach(function (btn) {
+        btn.style.pointerEvents = locked ? 'none' : '';
+        btn.style.opacity = locked ? '0.45' : '';
+    });
+    var profileEl = document.querySelector('.sidebar .user-profile');
+    var logoutBtn = document.querySelector('.sidebar .logout-btn');
+    [profileEl, logoutBtn].forEach(function (el) {
+        if (!el) return;
+        el.style.pointerEvents = locked ? 'none' : '';
+        el.style.opacity = locked ? '0.45' : '';
+        if (locked) el.setAttribute('aria-disabled', 'true');
+        else el.removeAttribute('aria-disabled');
+    });
+    updateReportApprovePanelForPreview(preview);
+    updateReportPreviewPrintExportButtons(preview);
+}
+
+function stampOperatorOnTestReportPayload(payload) {
+    if (!payload) return payload;
+    var u = window.currentUser || {};
+    var un = normalizeReportUsername(u.username || u.name || '');
+    var name = String(u.name || u.username || '—').trim();
+    var emp = String(u.username || un || '').trim();
+    payload.operatedByUsername = un;
+    payload.operatorName = name;
+    payload.employeeId = emp;
+    payload.testData = payload.testData || {};
+    payload.testData.operatedByUsername = un;
+    payload.testData.operatorName = name;
+    payload.testData.employeeId = emp;
+    return payload;
+}
+
+function abortPendingReportOnLogout() {
+    var gate = window._reportApprovalGate;
+    if (!gate || gate.reportId == null) return Promise.resolve();
+    if (typeof isFactorySessionUser === 'function' && isFactorySessionUser()) {
+        clearReportApprovalGate();
+        return Promise.resolve();
+    }
+    return apiRequest(API_BASE + '/api/data/reports/' + gate.reportId + '/abort', { method: 'POST' }).then(function () {
+        clearReportApprovalGate();
+    }).catch(function () {
+        clearReportApprovalGate();
+    });
+}
+
+function reportActionsBlockedForPreview(preview) {
+    var p = preview || window._lastReportPreview || {};
+    var reportTypeNorm = String(p.type || 'test').trim().toLowerCase();
+    var approvalSt = String(p.reportApprovalStatus || '').trim().toLowerCase();
+    return approvalSt === 'pending' && (reportTypeNorm === 'test' || reportTypeNorm === 'validation');
+}
+
+function finishTestRunReportSaved(reportId) {
+    resetQuickTestFormAfterRunIfPending();
+    if (reportId) {
+        _saveReportPdfSilent(reportId);
+        if (typeof openReportPreview === 'function') {
+            openReportPreview(reportId, { setGate: true });
+        } else {
+            goToPage('reports');
+        }
+    } else {
+        goToPage('reports');
+        if (typeof loadReports === 'function') loadReports();
+    }
+}
+
 /** Recipe approval modal copy; server allows QA only when QA exists, else Admin only. */
 function _approvalVerifyModalOptionsForRecipe() {
     var hasQa = typeof window._activeQaCount === 'number' && window._activeQaCount >= 1;
@@ -724,8 +994,8 @@ function applyCreateUspModeToSpeedHeight() {
     var mode = getCreateUspMode();
     var speedWrap = document.getElementById('create-custom-speed-height-wrap');
     if (speedWrap) speedWrap.style.display = mode === 'CUSTOM' ? '' : 'none';
-    var totalWrap = document.getElementById('create-custom-total-wrap');
-    if (totalWrap) totalWrap.style.display = mode === 'CUSTOM' ? '' : 'none';
+    var stepsSec = document.getElementById('create-recipe-steps-section');
+    if (stepsSec) stepsSec.style.display = mode === 'CUSTOM' ? '' : 'none';
     if (mode === 'USP1') {
         var s1 = document.querySelector('input[name="create-speed"][value="300"]');
         var h1 = document.querySelector('input[name="create-height"][value="14"]');
@@ -764,8 +1034,7 @@ var PAGE_TITLES = {
     'quick-test': 'Quick Test',
     'quick-test-steps': 'Quick Test — Steps',
     'create-recipe-step1': 'Create Recipe',
-    'create-recipe-step2': 'Configure Steps',
-    'create-recipe-step3': 'Cylinder Size',
+    'create-recipe-step2': 'Create Recipe — Steps',
     'manage-recipes': null,
     'manage-members': 'Manage Profiles',
     'load-validation': 'USP 2',
@@ -801,21 +1070,69 @@ async function fetchDateTimeFromBackend() {
     return null;
 }
 
+/** Parse API naive ISO wall time (YYYY-MM-DDTHH:MM:SS) as local components — not UTC via Date(). */
+function parseWallDatetimeIso(isoStr) {
+    var s = String(isoStr || '').trim().replace('Z', '');
+    var m = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
+    if (!m) return null;
+    return {
+        y: parseInt(m[1], 10),
+        mo: parseInt(m[2], 10),
+        d: parseInt(m[3], 10),
+        h: parseInt(m[4], 10),
+        mi: parseInt(m[5], 10),
+        sec: parseInt(m[6] || '0', 10)
+    };
+}
+
+function formatWallClockParts(p) {
+    return {
+        dateString: String(p.d).padStart(2, '0') + '/' + String(p.mo).padStart(2, '0') + '/' + p.y,
+        timeString: String(p.h).padStart(2, '0') + ':' + String(p.mi).padStart(2, '0') + ':' + String(p.sec).padStart(2, '0')
+    };
+}
+
+function wallClockPartsPlusSeconds(parts, extraSec) {
+    var t = new Date(parts.y, parts.mo - 1, parts.d, parts.h, parts.mi, parts.sec + (extraSec || 0));
+    return {
+        y: t.getFullYear(),
+        mo: t.getMonth() + 1,
+        d: t.getDate(),
+        h: t.getHours(),
+        mi: t.getMinutes(),
+        sec: t.getSeconds()
+    };
+}
+
+var _wallClockAnchor = null;
+
+function applyWallClockToTopBar(parts) {
+    if (!parts) return;
+    var fmt = formatWallClockParts(parts);
+    lastKnownDateTime = { timeString: fmt.timeString, dateString: fmt.dateString };
+    var timeEl = document.getElementById('current-time');
+    var dateEl = document.getElementById('current-date');
+    if (timeEl) timeEl.textContent = fmt.timeString;
+    if (dateEl) dateEl.textContent = fmt.dateString;
+}
+
+function tickWallClockFromAnchor() {
+    if (!_wallClockAnchor || !_wallClockAnchor.parts) return;
+    var elapsed = Math.floor((Date.now() - _wallClockAnchor.at) / 1000);
+    applyWallClockToTopBar(wallClockPartsPlusSeconds(_wallClockAnchor.parts, elapsed));
+}
+
 function updateDateTime() {
     fetchDateTimeFromBackend().then(function (data) {
         var timeString = '--:--:--';
         var dateString = '--/--/----';
         if (data && data.datetime) {
-            var dt = new Date(data.datetime.replace('Z', ''));
-            if (!isNaN(dt.getTime())) {
-                var d = dt.getDate();
-                var m = dt.getMonth() + 1;
-                var y = dt.getFullYear();
-                var h = dt.getHours();
-                var min = String(dt.getMinutes()).padStart(2, '0');
-                var sec = String(dt.getSeconds()).padStart(2, '0');
-                dateString = String(d).padStart(2, '0') + '/' + String(m).padStart(2, '0') + '/' + y;
-                timeString = String(h).padStart(2, '0') + ':' + min + ':' + sec;
+            var parts = parseWallDatetimeIso(data.datetime);
+            if (parts) {
+                _wallClockAnchor = { parts: parts, at: Date.now() };
+                var fmt = formatWallClockParts(parts);
+                dateString = fmt.dateString;
+                timeString = fmt.timeString;
                 lastKnownDateTime = { timeString: timeString, dateString: dateString };
             }
         } else if (data && data.date && data.time) {
@@ -828,10 +1145,14 @@ function updateDateTime() {
             timeString = lastKnownDateTime.timeString;
             dateString = lastKnownDateTime.dateString;
         }
-        var timeEl = document.getElementById('current-time');
-        var dateEl = document.getElementById('current-date');
-        if (timeEl) timeEl.textContent = timeString;
-        if (dateEl) dateEl.textContent = dateString;
+        if (_wallClockAnchor && _wallClockAnchor.parts) {
+            applyWallClockToTopBar(_wallClockAnchor.parts);
+        } else {
+            var timeEl = document.getElementById('current-time');
+            var dateEl = document.getElementById('current-date');
+            if (timeEl) timeEl.textContent = timeString;
+            if (dateEl) dateEl.textContent = dateString;
+        }
     });
 }
 
@@ -860,7 +1181,12 @@ function showAppContainer() {
     if (app) app.style.display = 'flex';
     updateDateTime();
     if (!dateTimeClockInterval) {
-        dateTimeClockInterval = setInterval(updateDateTime, 1000);
+        dateTimeClockInterval = setInterval(function () {
+            tickWallClockFromAnchor();
+            if (!_wallClockResyncInterval) {
+                _wallClockResyncInterval = setInterval(updateDateTime, 5000);
+            }
+        }, 1000);
     }
     setTimeout(function () {
         if (typeof refreshShellAccessVisibility === 'function') refreshShellAccessVisibility();
@@ -929,10 +1255,7 @@ function refreshShellAccessVisibility() {
     var am = document.querySelector('.profile-actions button[onclick*="openAddMember"]');
     if (mp) mp.style.display = u && typeof canAccess === 'function' && canAccess(u, 'user-manage') ? '' : 'none';
     if (am) am.style.display = u && typeof canAccess === 'function' && canAccess(u, 'user-add') ? '' : 'none';
-    var expBtn = document.querySelector('.reports-filter-export');
-    if (expBtn) expBtn.style.display = u && typeof userHasInternalKey === 'function' && userHasInternalKey(u, 'export-usb') ? '' : 'none';
-    var audEx = document.querySelector('.audit-filter-export');
-    if (audEx) audEx.style.display = u && typeof userHasInternalKey === 'function' && userHasInternalKey(u, 'export-usb') ? '' : 'none';
+    if (typeof refreshReportsActionButtons === 'function') refreshReportsActionButtons();
     if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();
 }
 
@@ -952,6 +1275,16 @@ function goToPage(pageName) {
         }
     }
     _suppressTestRunNavGuardOnce = false;
+    if (pageName !== 'report-preview' && typeof isReportPreviewLockedForCurrentUser === 'function' &&
+        isReportPreviewLockedForCurrentUser(window._lastReportPreview)) {
+        showAppModal('This report is awaiting approval. You must stay on the report screen until a reviewer approves it.', 'Report');
+        var active = document.querySelector('.page.active');
+        if (!active || active.id !== 'page-report-preview') {
+            var rid = currentReportId || (window._reportApprovalGate && window._reportApprovalGate.reportId);
+            if (rid) openReportPreview(rid);
+        }
+        return;
+    }
     if (window._mandatoryPasswordResetPending && pageName !== 'password-expired-reset') {
         showAppModal('Please reset your password to continue.', 'Reset Password');
         return;
@@ -1007,7 +1340,11 @@ function goToPage(pageName) {
         if (backBtnEl) backBtnEl.style.display = 'block';
     }
     if (pageName === 'reports' && typeof loadReports === 'function') {
+        if (typeof refreshReportsActionButtons === 'function') refreshReportsActionButtons();
         setTimeout(function () { loadReports(currentReportFilter || null); }, 50);
+    }
+    if (pageName === 'report-preview' && typeof refreshReportsActionButtons === 'function') {
+        setTimeout(refreshReportsActionButtons, 50);
     }
     if (pageName === 'settings') {
         setTimeout(function () {
@@ -1053,24 +1390,21 @@ function goToPage(pageName) {
     }
     if (pageName === 'create-recipe-step1') {
         setTimeout(function () {
-            if (!window.currentEditingRecipeId) {
-                var nameEl = document.getElementById('recipe-product-name');
-                if (nameEl) nameEl.value = '';
-                var um = document.querySelector('input[name="create-usp-mode"][value="USP1"]');
-                if (um) um.checked = true;
-                applyCreateUspModeToSpeedHeight();
-                var ct = document.getElementById('create-custom-total-taps');
-                if (ct) ct.value = '';
-                window._createRecipeStepTaps = null;
-                updateCreateRecipeContinueButton();
-            } else if (typeof loadRecipeForEdit === 'function') {
+            if (window._createRecipePreserveStep1) {
+                window._createRecipePreserveStep1 = false;
+                if (typeof _refreshCreateStepSummary === 'function') _refreshCreateStepSummary();
+                if (typeof updateCreateRecipeContinueButton === 'function') updateCreateRecipeContinueButton();
+                return;
+            }
+            if (typeof _refreshCreateStepSummary === 'function') _refreshCreateStepSummary();
+            if (window.currentEditingRecipeId && typeof loadRecipeForEdit === 'function') {
                 loadRecipeForEdit();
             }
         }, 50);
     }
     if (pageName === 'create-recipe-step2') {
         setTimeout(function () {
-            if (typeof renderCreateRecipeStepInputsPage === 'function') renderCreateRecipeStepInputsPage();
+            if (typeof initCreateRecipeStepsPage === 'function') initCreateRecipeStepsPage();
         }, 50);
     }
     if (pageName === 'view-recipes') {
@@ -1121,9 +1455,12 @@ function goBack() {
         goToPage('manage-recipes');
     } else if (pageId === 'page-create-recipe-step2') {
         goToPage('create-recipe-step1');
-    } else if (pageId === 'page-create-recipe-step3') {
-        goToPage('create-recipe-step2');
     } else if (pageId === 'page-report-preview') {
+        if (typeof isReportPreviewLockedForCurrentUser === 'function' &&
+            isReportPreviewLockedForCurrentUser(window._lastReportPreview)) {
+            showAppModal('This report must be approved before you can leave. Ask a reviewer to verify approval on this screen.', 'Report');
+            return;
+        }
         goToPage('reports');
     } else if (pageId === 'page-recipe-print-preview') {
         goToPage('view-recipes');
@@ -1460,13 +1797,18 @@ function logout() {
         (testRunButtonState === 'abort') ||
         (validationRunState === 'running') ||
         (validationRunBackendPending === true);
+    var pendingGate = window._reportApprovalGate && window._reportApprovalGate.reportId != null &&
+        !(typeof isFactorySessionUser === 'function' && isFactorySessionUser());
 
     var doLogout = function () {
-        stopActiveRunForLogout().finally(function () {
+        abortPendingReportOnLogout().then(function () {
+            return stopActiveRunForLogout();
+        }).finally(function () {
             apiRequest(API_BASE + '/api/data/auth/logout', { method: 'POST' }).catch(function () {});
             window.currentUser = null;
             try { localStorage.removeItem('currentUser'); } catch (e) {}
             if (typeof currentUser !== 'undefined') currentUser = null;
+            clearReportApprovalGate();
             showLoginScreen();
         });
     };
@@ -1476,6 +1818,13 @@ function logout() {
             if (!ok) return;
             doLogout();
         });
+        return;
+    }
+
+    if (pendingGate) {
+        showAppModal('You cannot log out until this report has been approved by a reviewer.', 'Report');
+        var rid = currentReportId || (window._reportApprovalGate && window._reportApprovalGate.reportId);
+        if (rid && typeof openReportPreview === 'function') openReportPreview(rid);
         return;
     }
 
@@ -1588,14 +1937,28 @@ function autoLogoutTick() {
 }
 
 function performAutoLogoutDueToInactivity() {
-    apiRequest(API_BASE + '/api/data/auth/logout', { method: 'POST' }).catch(function () {});
-    window.currentUser = null;
-    try { localStorage.removeItem('currentUser'); } catch (e) {}
-    if (typeof currentUser !== 'undefined') currentUser = null;
-    showLoginScreen();
-    setTimeout(function () {
-        showAppModal('You were logged out due to inactivity.', 'Session');
-    }, 200);
+    var pendingGate = window._reportApprovalGate && window._reportApprovalGate.reportId != null &&
+        !(typeof isFactorySessionUser === 'function' && isFactorySessionUser());
+    var finish = function () {
+        apiRequest(API_BASE + '/api/data/auth/logout', { method: 'POST' }).catch(function () {});
+        window.currentUser = null;
+        try { localStorage.removeItem('currentUser'); } catch (e) {}
+        if (typeof currentUser !== 'undefined') currentUser = null;
+        clearReportApprovalGate();
+        showLoginScreen();
+        setTimeout(function () {
+            showAppModal('You were logged out due to inactivity.', 'Session');
+        }, 200);
+    };
+    if (pendingGate) {
+        markAutoLogoutActivity();
+        return;
+    }
+    if (testRunButtonState === 'abort' && typeof abortTestRunAndSave === 'function') {
+        abortTestRunAndSave().finally(finish);
+        return;
+    }
+    finish();
 }
 
 function loginBiometric() {
@@ -1641,58 +2004,193 @@ function loginBiometric() {
     });
 }
 
-function enrollMemberBiometric() {
-    if (!biometricEnabledSetting) {
-        showAppModal('Biometric enrollment is disabled by Factory Settings.', 'Biometric Disabled');
-        return;
-    }
+var _biometricEnrollUsername = null;
+var _biometricEnrollCancelled = false;
+
+function _getBiometricEnrollUsername() {
     var bioUserEl = document.getElementById('member-biometric-username');
     var formUserEl = document.getElementById('add-userid');
-    var username = '';
     if (bioUserEl && bioUserEl.textContent && bioUserEl.textContent.trim() !== '--') {
-        username = bioUserEl.textContent.trim();
-    } else if (formUserEl && formUserEl.value) {
-        username = formUserEl.value.trim();
+        return bioUserEl.textContent.trim();
     }
-    if (!username) {
-        showAppModal('No member selected for fingerprint enrollment. Save the member first.', 'Register Fingerprint');
-        return;
-    }
-    showBiometricProgressOverlay('Register Fingerprint', 'Place your finger on the scanner. Hold still until enrollment completes.');
-    apiRequest(API_BASE + '/api/biometric/enroll', {
-        method: 'POST',
-        body: { username: username }
-    }).then(function (data) {
-        hideBiometricProgressOverlay();
-        if (data && data.ok) {
-            _addMemberLastSavedId = null;
-            showAppModal('Fingerprint enrolled successfully.', 'Register Fingerprint');
-            goToPage('user-profile');
-        } else {
-            showAppModal((data && data.error) || 'Fingerprint enrollment failed.', 'Register Fingerprint');
-        }
-    }).catch(function (err) {
-        hideBiometricProgressOverlay();
-        showAppModal('Fingerprint enrollment failed: ' + (err && err.message ? err.message : 'Network error'), 'Register Fingerprint');
+    if (formUserEl && formUserEl.value) return formUserEl.value.trim();
+    return '';
+}
+
+function _setBioEnrollStepActive(step) {
+    var steps = document.querySelectorAll('#bio-enroll-steps .bio-enroll-step');
+    steps.forEach(function (el) {
+        var n = parseInt(el.getAttribute('data-step'), 10);
+        el.classList.remove('active', 'done');
+        if (n < step) el.classList.add('done');
+        else if (n === step) el.classList.add('active');
     });
 }
 
-function showBiometricProgressOverlay(title, message) {
+function _setBioFingerAnimState(state) {
+    var stage = document.getElementById('bio-finger-stage');
+    if (!stage) return;
+    stage.classList.remove('state-place', 'state-scan', 'state-remove', 'state-done');
+    if (state) stage.classList.add('state-' + state);
+}
+
+function showBiometricEnrollUi(opts) {
+    opts = opts || {};
     var overlay = document.getElementById('biometric-progress-overlay');
     var titleEl = document.getElementById('biometric-progress-title');
     var msgEl = document.getElementById('biometric-progress-message');
-    if (titleEl && title) titleEl.textContent = title;
-    if (msgEl && message) msgEl.textContent = message;
+    var hintEl = document.getElementById('biometric-progress-hint');
+    var spinner = document.getElementById('biometric-progress-spinner');
+    var stepsWrap = document.getElementById('bio-enroll-steps');
+    var fingerStage = document.getElementById('bio-finger-stage');
+    var enrollMode = !!opts.enrollMode;
+    if (stepsWrap) stepsWrap.style.display = enrollMode ? 'flex' : 'none';
+    if (fingerStage) fingerStage.style.display = enrollMode ? 'block' : 'none';
+    if (titleEl && opts.title) titleEl.textContent = opts.title;
+    if (msgEl && opts.message !== undefined) msgEl.textContent = opts.message || '';
+    if (hintEl) hintEl.textContent = opts.hint || '';
+    if (spinner) spinner.style.display = opts.scanning ? 'block' : 'none';
+    if (opts.step) _setBioEnrollStepActive(opts.step);
+    if (opts.fingerState) _setBioFingerAnimState(opts.fingerState);
     if (overlay) overlay.style.display = 'flex';
+}
+
+function showBiometricProgressOverlay(title, message) {
+    showBiometricEnrollUi({ title: title, message: message, enrollMode: false, scanning: true });
 }
 
 function hideBiometricProgressOverlay() {
     var overlay = document.getElementById('biometric-progress-overlay');
     if (overlay) overlay.style.display = 'none';
+    _setBioFingerAnimState('');
+    _biometricEnrollUsername = null;
+    _biometricEnrollCancelled = false;
+}
+
+function _cancelBiometricEnrollSession() {
+    var username = _biometricEnrollUsername;
+    if (!username) return Promise.resolve();
+    return apiRequest(API_BASE + '/api/biometric/enroll/cancel', {
+        method: 'POST',
+        body: { username: username }
+    }).catch(function () {});
 }
 
 function cancelBiometricProgress() {
-    hideBiometricProgressOverlay();
+    _biometricEnrollCancelled = true;
+    _cancelBiometricEnrollSession().finally(function () {
+        hideBiometricProgressOverlay();
+    });
+}
+
+function _delayMs(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+}
+
+function _biometricEnrollCaptureStep(username, step) {
+    return apiRequest(API_BASE + '/api/biometric/enroll/capture', {
+        method: 'POST',
+        body: { username: username, step: step }
+    });
+}
+
+function enrollMemberBiometric() {
+    if (!biometricEnabledSetting) {
+        showAppModal('Biometric enrollment is disabled by Factory Settings.', 'Biometric Disabled');
+        return;
+    }
+    var username = _getBiometricEnrollUsername();
+    if (!username) {
+        showAppModal('No member selected for fingerprint enrollment. Save the member first.', 'Register Fingerprint');
+        return;
+    }
+    _biometricEnrollUsername = username;
+    _biometricEnrollCancelled = false;
+
+    showBiometricEnrollUi({
+        enrollMode: true,
+        title: 'Register Fingerprint — Scan 1 of 2',
+        message: 'Place your finger flat on the scanner.',
+        hint: 'Hold still until the first scan is captured.',
+        step: 1,
+        fingerState: 'scan',
+        scanning: true
+    });
+
+    _biometricEnrollCaptureStep(username, 1).then(function (data) {
+        if (_biometricEnrollCancelled) return;
+        if (!data || !data.ok) {
+            hideBiometricProgressOverlay();
+            showAppModal((data && data.error) || 'First scan failed.', 'Register Fingerprint');
+            return;
+        }
+        showBiometricEnrollUi({
+            enrollMode: true,
+            title: 'Remove your finger',
+            message: 'Lift your finger off the scanner.',
+            hint: 'Wait a moment, then you will scan the same finger again.',
+            step: 1,
+            fingerState: 'remove',
+            scanning: false
+        });
+        return _delayMs(1800);
+    }).then(function () {
+        if (_biometricEnrollCancelled) return;
+        showBiometricEnrollUi({
+            enrollMode: true,
+            title: 'Register Fingerprint — Scan 2 of 2',
+            message: 'Place the same finger on the scanner again.',
+            hint: 'Use the same finger as the first scan. Hold still until complete.',
+            step: 2,
+            fingerState: 'scan',
+            scanning: true
+        });
+        return _biometricEnrollCaptureStep(username, 2);
+    }).then(function (data) {
+        if (_biometricEnrollCancelled) return;
+        if (!data) return;
+        if (!data.ok) {
+            hideBiometricProgressOverlay();
+            showAppModal((data && data.error) || 'Second scan failed.', 'Register Fingerprint');
+            return;
+        }
+        showBiometricEnrollUi({
+            enrollMode: true,
+            title: 'Saving fingerprint',
+            message: 'Matching scans and saving template…',
+            hint: '',
+            step: 2,
+            fingerState: 'scan',
+            scanning: true
+        });
+        return _delayMs(400).then(function () { return data; });
+    }).then(function (data) {
+        if (_biometricEnrollCancelled || !data || !data.ok) return;
+        showBiometricEnrollUi({
+            enrollMode: true,
+            title: 'Fingerprint registered',
+            message: 'Both scans captured successfully.',
+            hint: '',
+            step: 2,
+            fingerState: 'done',
+            scanning: false
+        });
+        document.querySelectorAll('#bio-enroll-steps .bio-enroll-step').forEach(function (el) {
+            el.classList.add('done');
+            el.classList.remove('active');
+        });
+        return _delayMs(900);
+    }).then(function () {
+        if (_biometricEnrollCancelled) return;
+        hideBiometricProgressOverlay();
+        _addMemberLastSavedId = null;
+        showAppModal('Fingerprint enrolled successfully.', 'Register Fingerprint');
+        goToPage('user-profile');
+    }).catch(function (err) {
+        if (_biometricEnrollCancelled) return;
+        hideBiometricProgressOverlay();
+        showAppModal('Fingerprint enrollment failed: ' + (err && err.message ? err.message : 'Network error'), 'Register Fingerprint');
+    });
 }
 
 // ===== Generic Loading Overlay (export progress, long ops) =====
@@ -1773,6 +2271,72 @@ function _friendlyExportError(err) {
     if (t.indexOf('disk full') !== -1 || t.indexOf('no space') !== -1)
         return 'Pendrive is full. Free space or use a different pendrive.';
     return 'Failed to export. Please format the pendrive (FAT32 or exFAT) and try again.';
+}
+
+
+var _auditLoadMessageTimers = [];
+
+function showAuditTrailsLoadingOverlay() {
+    hideAuditTrailsLoadingOverlay();
+    showLoadingOverlay('Audit Trails', 'Fetching audit trails...', { cancellable: false });
+    _auditLoadMessageTimers.push(setTimeout(function () {
+        setLoadingMessage('Processing audit trails...', 'Please wait.');
+    }, 450));
+    _auditLoadMessageTimers.push(setTimeout(function () {
+        setLoadingMessage('Loading audit trails...', 'Please wait.');
+    }, 950));
+}
+
+function hideAuditTrailsLoadingOverlay() {
+    _auditLoadMessageTimers.forEach(function (id) { clearTimeout(id); });
+    _auditLoadMessageTimers = [];
+    hideLoadingOverlay();
+}
+
+function _populateAuditFilterDropdowns(userEl, actionEl, fullList) {
+    var users = [];
+    var actions = [];
+    (fullList || []).forEach(function (e) {
+        var u = e.user || '--';
+        if (users.indexOf(u) === -1) users.push(u);
+        var a = e.action || '';
+        if (a && actions.indexOf(a) === -1) actions.push(a);
+    });
+    var coreActions = [
+        'Login', 'Logout', 'User logged in', 'Test performed', 'Quick test performed',
+        'Validation performed', 'Report saved', 'Report generated', 'Report approved',
+        'Recipe created', 'Recipe edited', 'Recipe approved', 'Power interruption',
+        'Approval verification', 'Disable Recipe', 'Recipe disabled'
+    ];
+    coreActions.forEach(function (a) {
+        if (actions.indexOf(a) === -1) actions.push(a);
+    });
+    users.sort();
+    actions.sort();
+    if (userEl) {
+        userEl.innerHTML = '<option value="">All</option>';
+        users.forEach(function (u) { userEl.appendChild(new Option(u, u)); });
+    }
+    if (actionEl) {
+        actionEl.innerHTML = '<option value="">All</option>';
+        actions.forEach(function (a) { actionEl.appendChild(new Option(a, a)); });
+    }
+}
+
+function _renderAuditLogRows(tbody, list) {
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    if (!list || !list.length) {
+        var emptyRow = document.createElement('tr');
+        emptyRow.innerHTML = '<td colspan="5">No audit entries match the filters.</td>';
+        tbody.appendChild(emptyRow);
+        return;
+    }
+    list.forEach(function (entry) {
+        var row = document.createElement('tr');
+        row.innerHTML = '<td>' + (entry.dateTime || '') + '</td><td>' + (entry.user || '--') + '</td><td>' + displayRoleLabel(entry.role || '--') + '</td><td>' + (entry.action || '') + '</td><td>' + (entry.details || '') + '</td>';
+        tbody.appendChild(row);
+    });
 }
 
 function hideLoadingOverlay() {
@@ -1858,7 +2422,7 @@ function _fetchStylesCss() {
 
 function _wrapPreviewHtmlAsDocument(innerHtml, cssText) {
     var docCss =
-        '@page { size: A4; margin: 12mm 10mm; }' +
+        '@page { size: A4; margin: 6mm 5mm; }' +
         'html, body { margin: 0; padding: 0; background: #ffffff; color: #000; }' +
         'body { font-family: Inter, "Segoe UI", Roboto, system-ui, sans-serif; }' +
         '.modal-overlay, .sidebar, .app-header, .header-back-btn, header.app-header, ' +
@@ -1868,7 +2432,16 @@ function _wrapPreviewHtmlAsDocument(innerHtml, cssText) {
             'opacity: 1 !important; overflow: visible !important; height: auto !important; max-height: none !important; }' +
         '#page-report-preview * { color: #000 !important; background: transparent !important; }' +
         '#page-report-preview table { border-collapse: collapse; width: 100%; }' +
-        '#page-report-preview th, #page-report-preview td { border: 1px solid #888; padding: 4px 6px; }';
+        '#page-report-preview th, #page-report-preview td { border: 1px solid #888; padding: 4px 6px; }' +
+        '.report-preview-container.report-pdf-compact { min-height: auto !important; max-height: none !important; padding: 3mm 5mm !important; margin: 0 !important; box-shadow: none !important; font-size: 9pt !important; line-height: 1.2 !important; }' +
+        '.report-preview-container.report-pdf-compact h1 { font-size: 13pt !important; margin: 2px 0 4px !important; }' +
+        '.report-preview-container.report-pdf-compact h2 { font-size: 10pt !important; margin: 2px 0 4px !important; }' +
+        '.report-preview-container.report-pdf-compact h3 { font-size: 9.5pt !important; margin: 5px 0 2px !important; }' +
+        '.report-preview-container.report-pdf-compact table { margin: 4px 0 !important; }' +
+        '.report-preview-container.report-pdf-compact th, .report-preview-container.report-pdf-compact td { padding: 2px 4px !important; font-size: 8.5pt !important; border-width: 1px !important; }' +
+        '.report-preview-container.report-pdf-compact .report-remarks-box { min-height: 20px !important; padding: 3px 5px !important; margin: 4px 0 !important; }' +
+        '.report-preview-container.report-pdf-compact .report-approval-table { margin-top: 6px !important; }' +
+        '.report-preview-container.report-pdf-compact .report-validation-usp-header { background: #e8e8e8 !important; font-weight: bold; }';
     return (
         '<!doctype html><html><head><meta charset="utf-8"><title>Report</title>' +
         '<style>' + (cssText || '') + '</style>' +
@@ -1894,8 +2467,12 @@ function buildReportPreviewHtmlById(reportId) {
             // populate must not throw; we continue with whatever DOM state.
         }
         var pageEl = document.getElementById('page-report-preview');
+        var containerEl = pageEl ? pageEl.querySelector('.report-preview-container') : null;
+        if (containerEl) containerEl.classList.add('report-pdf-compact');
         var inner = pageEl ? pageEl.outerHTML : '';
-        return _wrapPreviewHtmlAsDocument(inner, css);
+        var doc = _wrapPreviewHtmlAsDocument(inner, css);
+        if (containerEl) containerEl.classList.remove('report-pdf-compact');
+        return doc;
     });
 }
 
@@ -1936,7 +2513,7 @@ function _exportReportsWithFlow(reportIds, opts) {
         return Promise.resolve(null);
     }
     var u = window.currentUser;
-    if (!u || typeof userHasInternalKey !== 'function' || !userHasInternalKey(u, 'export-usb')) {
+    if (!userCanExportToUsb(u)) {
         showAppModal('You do not have permission to export reports to USB.', 'Export');
         return Promise.resolve(null);
     }
@@ -2259,6 +2836,139 @@ function confirmQuickTestStepSetup() {
     goToPage('quick-test');
 }
 
+
+function _refreshCreateStepSummary() {
+    var summaryEl = document.getElementById('create-step-count-summary');
+    var subEl = document.getElementById('create-step-count-summary-sub');
+    var n = (typeof window._createRecipeStepCount === 'number' && window._createRecipeStepCount > 0)
+        ? window._createRecipeStepCount
+        : 10;
+    if (summaryEl) summaryEl.textContent = String(n);
+    if (subEl) {
+        if (window._createRecipeStepTaps && window._createRecipeStepTaps.length === n) {
+            var total = 0;
+            for (var i = 0; i < n; i++) total += parseInt(window._createRecipeStepTaps[i], 10) || 0;
+            subEl.textContent = n + ' step' + (n === 1 ? '' : 's') + ', total ' + total + ' taps';
+        } else {
+            subEl.textContent = 'Tap to select steps';
+        }
+    }
+}
+
+function openCreateRecipeStepsPage() {
+    if (getCreateUspMode() !== 'CUSTOM') return;
+    var current = (typeof window._createRecipeStepCount === 'number' && window._createRecipeStepCount > 0)
+        ? window._createRecipeStepCount
+        : 10;
+    goToPage('create-recipe-step2');
+    setTimeout(function () {
+        initCreateRecipeStepsPage();
+    }, 60);
+}
+
+function initCreateRecipeStepsPage() {
+    var current = (typeof window._createRecipeStepCount === 'number' && window._createRecipeStepCount > 0)
+        ? window._createRecipeStepCount
+        : 10;
+    var radio = document.querySelector('input[name="create-step-card"][value="' + current + '"]');
+    if (radio) radio.checked = true;
+    _renderCreateStepTapInputs(current);
+    var cards = document.querySelectorAll('#create-step-cards-grid label.create-recipe-card');
+    cards.forEach(function (label) {
+        label.removeEventListener('click', _onCreateStepCardClick);
+        label.addEventListener('click', _onCreateStepCardClick);
+    });
+}
+
+function _onCreateStepCardClick(ev) {
+    var label = ev && ev.currentTarget ? ev.currentTarget : null;
+    if (!label) return;
+    var input = label.querySelector('input[name="create-step-card"]');
+    if (!input) return;
+    var n = parseInt(input.value, 10);
+    if (isNaN(n) || n < 1) return;
+    setTimeout(function () { _renderCreateStepTapInputs(n); }, 0);
+}
+
+function _renderCreateStepTapInputs(stepCount) {
+    var container = document.getElementById('create-step-tap-inputs');
+    if (!container) return;
+    var n = Math.max(1, Math.min(10, parseInt(stepCount, 10) || 10));
+    var prev = (window._createRecipeStepTaps && window._createRecipeStepTaps.length === n)
+        ? window._createRecipeStepTaps.slice()
+        : computeStandardUspTaps(n);
+    container.innerHTML = '';
+    for (var i = 0; i < n; i++) {
+        var stepNum = i + 1;
+        var group = document.createElement('div');
+        group.className = 'form-group';
+        group.innerHTML =
+            '<label for="create-step-tap-' + stepNum + '">Step ' + stepNum + ' \u2014 Taps</label>' +
+            '<input type="number" id="create-step-tap-' + stepNum + '" ' +
+                'class="input-field create-step-tap" ' +
+                'min="1" step="1" ' +
+                'data-step-index="' + i + '" ' +
+                'value="' + (prev[i] != null ? prev[i] : 0) + '" ' +
+                'onfocus="if(typeof openOSKForInput === \'function\') openOSKForInput(this)">';
+        container.appendChild(group);
+    }
+}
+
+function confirmCreateRecipeStepSetup() {
+    var radio = document.querySelector('input[name="create-step-card"]:checked');
+    if (!radio) {
+        showAppModal('Please choose a step count (1\u201310) before continuing.', 'Create Recipe');
+        return;
+    }
+    var stepCount = parseInt(radio.value, 10);
+    if (isNaN(stepCount) || stepCount < 1 || stepCount > 10) {
+        showAppModal('Please choose a valid step count (1\u201310).', 'Create Recipe');
+        return;
+    }
+    var inputs = document.querySelectorAll('#create-step-tap-inputs input.create-step-tap');
+    var taps = [];
+    for (var i = 0; i < inputs.length && taps.length < stepCount; i++) {
+        var v = parseInt(inputs[i].value, 10);
+        if (isNaN(v) || v < 1) {
+            showAppModal('Step ' + (i + 1) + ' must have at least 1 tap.', 'Create Recipe');
+            inputs[i].focus();
+            return;
+        }
+        taps.push(v);
+    }
+    if (taps.length !== stepCount) {
+        showAppModal('Please configure taps for all ' + stepCount + ' steps before continuing.', 'Create Recipe');
+        return;
+    }
+    window._createRecipeStepCount = stepCount;
+    window._createRecipeStepTaps = taps;
+    window._createRecipePreserveStep1 = true;
+    _refreshCreateStepSummary();
+    updateCreateRecipeContinueButton();
+    goToPage('create-recipe-step1');
+}
+
+function onCreateRecipeContinueClick() {
+    updateCreateRecipeContinueButton();
+    var btn = document.getElementById('create-recipe-continue-btn');
+    if (btn && btn.disabled) {
+        showAppModal('Enter the recipe name and select procedure (and speed/height for Custom) before continuing.', 'Create Recipe');
+        return;
+    }
+    var mode = getCreateUspMode();
+    if (mode === 'CUSTOM') {
+        var n = window._createRecipeStepCount;
+        if (!n || !window._createRecipeStepTaps || window._createRecipeStepTaps.length !== n) {
+            showAppModal('Tap Number of steps to configure steps and taps for each step.', 'Create Recipe');
+            return;
+        }
+    } else {
+        window._createRecipeStepCount = 10;
+        window._createRecipeStepTaps = computeStandardUspTaps(10);
+    }
+    completeRecipeFromStep2();
+}
+
 function startRecipeTest() {
     recipeListMode = 'load';
     goToPage('manage-recipes');
@@ -2269,14 +2979,29 @@ function manageRecipes() {
     goToPage('manage-recipes');
 }
 
+function resetCreateRecipeStep1Form() {
+    var nameEl = document.getElementById('recipe-product-name');
+    if (nameEl) nameEl.value = '';
+    var um = document.querySelector('input[name="create-usp-mode"][value="USP1"]');
+    if (um) um.checked = true;
+    if (typeof applyCreateUspModeToSpeedHeight === 'function') applyCreateUspModeToSpeedHeight();
+    window._createRecipeStepCount = 10;
+    window._createRecipeStepTaps = null;
+    if (typeof _refreshCreateStepSummary === 'function') _refreshCreateStepSummary();
+    if (typeof updateCreateRecipeContinueButton === 'function') updateCreateRecipeContinueButton();
+}
+
 function startRecipeCreation() {
     window.currentEditingRecipeId = null;
+    window._createRecipePreserveStep1 = false;
     goToPage('create-recipe-step1');
+    setTimeout(resetCreateRecipeStep1Form, 0);
 }
 
 function selectOperation(type) {
     if (type === 'validate') {
         validationCompletion = { distance: false, load: false };
+        validationSessionResults = { distance: null, load: null };
         goToPage('validate-type-select');
     } else if (type === 'calibrate') {
         if (typeof canAccess === 'function' && window.currentUser && !canAccess(window.currentUser, 'calibration-menu')) {
@@ -2324,7 +3049,7 @@ function initValidationRunPage() {
     var tapsMin = type === 'load' ? 250 : 300;
     var dropHeight = type === 'load' ? 3 : 14;
     validationRunTarget = type === 'load' ? 250 : 300;
-    validationRunTolerance = 50;
+    validationRunTolerance = 15;
     validationRunMin = validationRunTarget - validationRunTolerance;
     validationRunMax = validationRunTarget + validationRunTolerance;
 
@@ -2550,68 +3275,26 @@ function loadReports(filterType) {
         if (fromTs) q.push('from=' + fromTs);
         if (toTs) q.push('to=' + toTs);
         var auditUrl = API_BASE + '/api/data/audit-log' + (q.length ? '?' + q.join('&') : '');
+        showAuditTrailsLoadingOverlay();
         apiRequest(auditUrl).then(function (data) {
             var list = (data && data.entries) ? data.entries : [];
+            var filterTask = Promise.resolve();
             if (userEl && userEl.options.length <= 1) {
-                apiRequest(API_BASE + '/api/data/audit-log').then(function (full) {
+                filterTask = apiRequest(API_BASE + '/api/data/audit-log').then(function (full) {
                     var fullList = (full && full.entries) ? full.entries : [];
-                    var users = [];
-                    var actions = [];
-                    fullList.forEach(function (e) {
-                        var u = e.user || '--';
-                        if (users.indexOf(u) === -1) users.push(u);
-                        var a = e.action || '';
-                        if (a && actions.indexOf(a) === -1) actions.push(a);
-                    });
-                    // Ensure core audit actions are always available
-                    // Include both current (Title Case) and legacy action strings
-                    // so existing stored audit rows remain filterable.
-                    var coreActions = [
-                        // Use backend's Title Case to avoid duplicates
-                        'Login',
-                        'Logout',
-                        'Test performed',
-                        'Report generated',
-                        'Report approved',
-                        'Recipe approved',
-                        'Approval verification',
-                        'Disable Recipe',
-                        // legacy (older stored audit rows)
-                        'Recipe disabled'
-                    ];
-                    coreActions.forEach(function (a) {
-                        if (actions.indexOf(a) === -1) actions.push(a);
-                    });
-
-                    users.sort();
-                    actions.sort();
-                    if (userEl) {
-                        userEl.innerHTML = '<option value="">All</option>';
-                        users.forEach(function (u) { userEl.appendChild(new Option(u, u)); });
-                    }
-                    if (actionEl) {
-                        actionEl.innerHTML = '<option value="">All</option>';
-                        actions.forEach(function (a) {
-                            actionEl.appendChild(new Option(a, a));
-                        });
-                    }
+                    _populateAuditFilterDropdowns(userEl, actionEl, fullList);
                 }).catch(function () {});
             }
-            if (!list.length) {
-                var emptyRow = document.createElement('tr');
-                emptyRow.innerHTML = '<td colspan="5">No audit entries match the filters.</td>';
-                tbody.appendChild(emptyRow);
-            } else {
-                list.forEach(function (entry, i) {
-                    var row = document.createElement('tr');
-                    row.innerHTML = '<td>' + (entry.dateTime || '') + '</td><td>' + (entry.user || '--') + '</td><td>' + displayRoleLabel(entry.role || '--') + '</td><td>' + (entry.action || '') + '</td><td>' + (entry.details || '') + '</td>';
-                    tbody.appendChild(row);
-                });
-            }
+            return filterTask.then(function () {
+                _renderAuditLogRows(tbody, list);
+            });
         }).catch(function () {
+            tbody.innerHTML = '';
             var emptyRow = document.createElement('tr');
             emptyRow.innerHTML = '<td colspan="5">Unable to load audit log.</td>';
             tbody.appendChild(emptyRow);
+        }).finally(function () {
+            hideAuditTrailsLoadingOverlay();
         });
         return;
     }
@@ -2630,7 +3313,7 @@ function loadReports(filterType) {
                 var row = document.createElement('tr');
                 var name = r.name;
                 if (!name && r.type === 'validation') {
-                    name = 'Validation - ' + (r.validationSubtype === 'load' ? 'USP 2' : 'USP 1');
+                    if (!name) name = 'Validation - ' + (r.validationSubtype === 'load' ? 'USP 2' : 'USP 1');
                 }
                 if (!name) name = (r.recipe && r.recipe.productName) || 'Report ' + (r.id || (i + 1));
                 var created = r.createdAt || r.created || '';
@@ -2644,6 +3327,44 @@ function loadReports(filterType) {
         emptyRow.innerHTML = '<td colspan="4">Unable to load reports.</td>';
         tbody.appendChild(emptyRow);
     });
+}
+
+function isFactorySessionUser(userObj) {
+    var u = userObj || window.currentUser;
+    if (!u) return false;
+    var role = (u.role != null ? String(u.role) : '').toLowerCase();
+    if (typeof isFactoryLikeRole === 'function') return isFactoryLikeRole(role, u);
+    return role === 'factory';
+}
+
+function userCanPrintReports(userObj) {
+    var u = userObj || window.currentUser;
+    if (!u) return false;
+    if (isFactorySessionUser(u)) return true;
+    return typeof canAccess === 'function' && canAccess(u, 'reports-view');
+}
+
+function userCanExportToUsb(userObj) {
+    var u = userObj || window.currentUser;
+    if (!u) return false;
+    if (isFactorySessionUser(u)) return true;
+    if (typeof userHasInternalKey === 'function' && userHasInternalKey(u, 'export-usb')) return true;
+    return false;
+}
+
+function refreshReportsActionButtons() {
+    var u = window.currentUser;
+    var expBtn = document.querySelector('.reports-filter-export');
+    if (expBtn) {
+        expBtn.style.display = u && typeof userCanExportToUsb === 'function' && userCanExportToUsb(u) ? '' : 'none';
+    }
+    var audEx = document.querySelector('.audit-filter-export');
+    if (audEx) {
+        audEx.style.display = u && typeof userCanExportToUsb === 'function' && userCanExportToUsb(u) ? '' : 'none';
+    }
+    if (typeof updateReportPreviewPrintExportButtons === 'function') {
+        updateReportPreviewPrintExportButtons(window._lastReportPreview || null);
+    }
 }
 
 function canViewAuditLog() {
@@ -2682,7 +3403,7 @@ function exportAuditTrails() {
         return;
     }
     var u = window.currentUser;
-    if (!u || typeof userHasInternalKey !== 'function' || !userHasInternalKey(u, 'export-usb')) {
+    if (!userCanExportToUsb(u)) {
         showAppModal('You do not have permission to export audit trails to USB.', 'Export');
         return;
     }
@@ -2805,13 +3526,80 @@ function exportFilteredReports() {
         showAppModal('Could not load reports: ' + (err && err.message ? err.message : 'Network error'), 'Export Reports');
     });
 }
+
+function buildReportPrintPayload(preview, reportId) {
+    if (!preview) return null;
+    var td = preview.testData || preview;
+    if (!td || typeof td !== 'object') td = {};
+    var recipe = preview.recipe || td.recipe || {};
+    return {
+        id: reportId != null ? reportId : preview.id,
+        type: preview.type || 'test',
+        testData: td,
+        recipe: recipe,
+        factorySettings: preview.factorySettings || {},
+        statistics: preview.statistics || td.statistics || {},
+        remarks: preview.remarks != null ? preview.remarks : td.remarks,
+        reportApprovalStatus: preview.reportApprovalStatus,
+        approvalPassFail: preview.approvalPassFail,
+        approvalRemarks: preview.approvalRemarks,
+        approvedBy: preview.approvedBy,
+        approvedAt: preview.approvedAt,
+        createdAt: preview.createdAt || td.createdAt,
+        completedAt: preview.completedAt || td.completedAt,
+        operatorName: preview.operatorName || td.operatorName,
+        employeeId: preview.employeeId || td.employeeId,
+        validationRuns: preview.validationRuns || td.validationRuns
+    };
+}
+
+function resolveReportDataForPrint(callback) {
+    var rid = currentReportId;
+    if (!rid) {
+        callback(null);
+        return;
+    }
+    var fromPreview = typeof buildReportPrintPayload === 'function'
+        ? buildReportPrintPayload(window._lastReportPreview, rid) : null;
+    if (fromPreview && fromPreview.testData) {
+        currentReportData = fromPreview;
+        callback(fromPreview);
+        return;
+    }
+    if (currentReportData && currentReportData.testData) {
+        callback(currentReportData);
+        return;
+    }
+    apiRequest(API_BASE + '/api/data/reports/' + rid).then(function (data) {
+        var reportData = data.report || data;
+        if (reportData) {
+            reportData.id = reportData.id != null ? reportData.id : rid;
+            currentReportData = reportData;
+            callback(reportData);
+        } else {
+            callback(null);
+        }
+    }).catch(function () { callback(null); });
+}
+
 function handlePrintReport() {
+    if (!userCanPrintReports()) {
+        showAppModal('You do not have permission to print reports.', 'Print');
+        return;
+    }
+    if (typeof reportActionsBlockedForPreview === 'function' && reportActionsBlockedForPreview()) {
+        showAppModal('This report must be approved before printing.', 'Print');
+        return;
+    }
     if (!currentReportId) {
         showAppModal('No report selected to print.', 'Print');
         return;
     }
-    var reportData = currentReportData;
-    var doPrint = function () {
+    resolveReportDataForPrint(function (reportData) {
+        if (!reportData) {
+            showAppModal('Could not load report data. Please try again.', 'Print');
+            return;
+        }
         fetch((API_BASE || '') + '/api/print/a4', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2825,31 +3613,27 @@ function handlePrintReport() {
         }).catch(function (e) {
             showAppModal('Print failed: ' + (e && e.message ? e.message : 'Check printer connection.'), 'Print');
         });
-    };
-    if (reportData) {
-        doPrint();
-        return;
-    }
-    apiRequest(API_BASE + '/api/data/reports/' + currentReportId).then(function (data) {
-        reportData = data.report || data;
-        if (reportData) {
-            currentReportData = reportData;
-            doPrint();
-        } else {
-            showAppModal('Could not load report data. Please try again.', 'Print');
-        }
-    }).catch(function () {
-        showAppModal('Could not load report data. Please try again.', 'Print');
     });
 }
 
 function handlePrintThermal() {
+    if (!userCanPrintReports()) {
+        showAppModal('You do not have permission to print reports.', 'Print');
+        return;
+    }
+    if (typeof reportActionsBlockedForPreview === 'function' && reportActionsBlockedForPreview()) {
+        showAppModal('This report must be approved before printing.', 'Print');
+        return;
+    }
     if (!currentReportId) {
         showAppModal('No report selected to print.', 'Print');
         return;
     }
-    var reportData = currentReportData;
-    var doPrint = function () {
+    resolveReportDataForPrint(function (reportData) {
+        if (!reportData) {
+            showAppModal('Could not load report data. Please try again.', 'Print');
+            return;
+        }
         fetch((API_BASE || '') + '/api/print/thermal', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2863,25 +3647,14 @@ function handlePrintThermal() {
         }).catch(function (e) {
             showAppModal('Print failed: ' + (e && e.message ? e.message : 'Check printer connection.'), 'Print');
         });
-    };
-    if (reportData) {
-        doPrint();
-        return;
-    }
-    apiRequest(API_BASE + '/api/data/reports/' + currentReportId).then(function (data) {
-        reportData = data.report || data;
-        if (reportData) {
-            currentReportData = reportData;
-            doPrint();
-        } else {
-            showAppModal('Could not load report data. Please try again.', 'Print');
-        }
-    }).catch(function () {
-        showAppModal('Could not load report data. Please try again.', 'Print');
     });
 }
 
 function handleExportReport() {
+    if (typeof reportActionsBlockedForPreview === 'function' && reportActionsBlockedForPreview()) {
+        showAppModal('This report must be approved before export.', 'Export');
+        return;
+    }
     if (currentReportId == null) {
         showAppModal('No report selected to export.', 'Export');
         return;
@@ -3028,16 +3801,35 @@ function scrollReportPreviewActionsIntoView() {
     }
 }
 
-function openReportPreview(reportId) {
+function openReportPreview(reportId, options) {
     if (!reportId) return;
+    options = options || {};
     apiRequest(API_BASE + '/api/reports/' + reportId + '/preview').then(function (data) {
         if (data.preview) {
             currentReportId = reportId;
             currentReportData = null;
             populateReportPreview(data.preview);
+            setReportApprovalGateFromPreview(data.preview, reportId);
+            applyReportPreviewLockUi(data.preview);
             goToPage('report-preview');
+            startReportApprovalPollIfLocked();
+            setTimeout(function () {
+                if (isReportPreviewLockedForCurrentUser(data.preview)) {
+                    scrollReportPendingBannerIntoView();
+                }
+                if (isReportPendingApproval(data.preview)) {
+                    scrollReportApprovePanelIntoView();
+                }
+                if (typeof scrollReportPreviewActionsIntoView === 'function') {
+                    scrollReportPreviewActionsIntoView();
+                }
+            }, 250);
+        } else {
+            showAppModal('Report preview is not available.', 'Reports');
         }
-    }).catch(function () { showAppModal('Report not found', 'Reports'); });
+    }).catch(function () {
+        showAppModal('Could not open report preview. Check your connection and try again from Reports.', 'Reports');
+    });
 }
 
 function setReportEl(id, value) {
@@ -3080,26 +3872,7 @@ function populateReportPreview(preview) {
     setReportEl('report-next-validation', fs.nextValidationDate);
 
     if (reportType === 'validation') {
-        var titleEl = document.getElementById('report-validation-calibration-title');
-        var bodyEl = document.getElementById('report-validation-calibration-body');
-        if (titleEl) titleEl.textContent = 'VALIDATION DETAILS';
-        if (bodyEl) {
-            var dateStr = formatReportDate(td.completedAt || preview.completedAt || preview.createdAt);
-            var usp = td.usp || preview.usp || '--';
-            var tapsMin = td.tapsMin != null ? td.tapsMin : (preview.tapsMin != null ? preview.tapsMin : '--');
-            var dropHeight = td.dropHeight != null ? td.dropHeight : (preview.dropHeight != null ? preview.dropHeight : '--');
-            var expected = td.expectedTapCount != null ? td.expectedTapCount : (preview.expectedTapCount != null ? preview.expectedTapCount : '--');
-            var tol = td.expectedTolerance != null ? td.expectedTolerance : (preview.expectedTolerance != null ? preview.expectedTolerance : null);
-            var expectedDisplay = (tol != null && expected !== '--') ? (String(expected) + ' (+/- ' + String(tol) + ')') : expected;
-            var actual = td.actualTapCount != null ? td.actualTapCount : (preview.actualTapCount != null ? preview.actualTapCount : '--');
-            var status = td.status || preview.status || '--';
-            var rows = [];
-            rows.push('<tr><th>Date / Time</th><td colspan="3">' + dateStr + '</td></tr>');
-            rows.push('<tr><th>USP</th><td>' + usp + '</td><th>Taps/Min</th><td>' + tapsMin + '</td></tr>');
-            rows.push('<tr><th>Drop Height (mm)</th><td>' + dropHeight + '</td><th>Status</th><td>' + status + '</td></tr>');
-            rows.push('<tr><th>Expected Tap Count</th><td>' + expectedDisplay + '</td><th>Actual Tap Count</th><td>' + actual + '</td></tr>');
-            bodyEl.innerHTML = rows.join('');
-        }
+        renderValidationDetailsInPreview(preview);
     }
 
     setReportEl('report-product-name', recipe.productName || td.productName);
@@ -3184,56 +3957,124 @@ function populateReportPreview(preview) {
     var remarksEl = document.getElementById('report-remarks-box');
     if (remarksEl) remarksEl.textContent = preview.remarks || td.remarks || 'N/A';
 
-    setReportEl('report-operated-by', td.operatorName || '--');
-    setReportEl('report-employee-id', td.employeeId || '--');
+    setReportEl('report-operated-by', preview.operatorName || td.operatorName || '--');
+    setReportEl('report-employee-id', preview.employeeId || td.employeeId || '--');
     setReportEl('report-approved-by', formatApprovedByLine(preview.approvedBy || '--'));
     setReportEl('report-approval-pass-fail', preview.approvalPassFail || '--');
     var apprRem = preview.approvalRemarks;
     setReportEl('report-approval-remarks', (apprRem != null && String(apprRem).trim() !== '') ? apprRem : 'N/A');
 
     window._lastReportPreview = preview;
+    if (currentReportId != null && typeof buildReportPrintPayload === 'function') {
+        currentReportData = buildReportPrintPayload(preview, currentReportId);
+    }
     var reportTypeNorm = String(preview.type || 'test').trim().toLowerCase();
     var approvalSt = String(preview.reportApprovalStatus || '').trim().toLowerCase();
 
-    var apprPanel = document.getElementById('report-approve-panel');
-    if (apprPanel) {
-        var needTest = reportTypeNorm === 'test' && approvalSt === 'pending' && typeof userCanApproveTestReport === 'function' && userCanApproveTestReport();
-        var needVal = reportTypeNorm === 'validation' && approvalSt === 'pending' && typeof userCanApproveValidationReport === 'function' && userCanApproveValidationReport();
-        apprPanel.style.display = (needTest || needVal) ? 'block' : 'none';
-    }
-
-    var peGroup = document.getElementById('report-preview-print-export-group');
-    if (peGroup) {
-        var hidePrintExport = approvalSt === 'pending' && (reportTypeNorm === 'test' || reportTypeNorm === 'validation');
-        peGroup.style.display = hidePrintExport ? 'none' : '';
-    }
+    applyReportPreviewLockUi(preview);
 }
 
-function approveReportWithVerifier(reportId, passFail, remarks) {
-    var name = (window.currentUser && (window.currentUser.name || window.currentUser.username))
-        ? (window.currentUser.name || window.currentUser.username) : '';
+function updateReportPreviewPrintExportButtons(preview) {
+    var peGroup = document.getElementById('report-preview-print-export-group');
+    if (!peGroup) return;
+    var p = preview || window._lastReportPreview || {};
+    var reportTypeNorm = String(p.type || 'test').trim().toLowerCase();
+    var approvalSt = String(p.reportApprovalStatus || '').trim().toLowerCase();
+    var blockActions = approvalSt === 'pending' &&
+        (reportTypeNorm === 'test' || reportTypeNorm === 'validation');
+    var canPrint = typeof userCanPrintReports === 'function' && userCanPrintReports() && !blockActions;
+    var canExport = typeof userCanExportToUsb === 'function' && userCanExportToUsb() && !blockActions;
+    peGroup.style.display = (canPrint || canExport) ? 'flex' : 'none';
+    peGroup.querySelectorAll('.btn-print, .btn-print-thermal').forEach(function (btn) {
+        btn.style.display = canPrint ? '' : 'none';
+    });
+    var expBtn = peGroup.querySelector('.btn-export');
+    if (expBtn) expBtn.style.display = canExport ? '' : 'none';
+}
+
+function verifyReportApproverInline(method) {
+    method = method === 'biometric' ? 'biometric' : 'credentials';
+    clearReportApproveVerifyError();
+    if (method === 'biometric') {
+        if (!biometricEnabledSetting) {
+            setReportApproveVerifyError('Biometric verification is disabled by Factory Settings.');
+            return Promise.resolve(null);
+        }
+        showBiometricProgressOverlay('Verify Fingerprint', 'Place a Reviewer or Admin fingerprint on the scanner to approve this report.');
+        return apiRequest(API_BASE + '/api/data/auth/approval-verify', {
+            method: 'POST',
+            body: { method: 'biometric', purpose: 'report' }
+        }).then(function (data) {
+            hideBiometricProgressOverlay();
+            if (!data || !data.ok || !data.token) {
+                setReportApproveVerifyError((data && data.error) ? String(data.error) : 'Fingerprint verification failed.');
+                return null;
+            }
+            return String(data.token);
+        }).catch(function (err) {
+            hideBiometricProgressOverlay();
+            setReportApproveVerifyError('Fingerprint verification failed: ' + (err && err.message ? err.message : 'Error'));
+            return null;
+        });
+    }
+    var usernameEl = document.getElementById('report-approve-verifier-username');
+    var passwordEl = document.getElementById('report-approve-verifier-password');
+    var username = usernameEl ? String(usernameEl.value || '').trim() : '';
+    var password = passwordEl ? String(passwordEl.value || '') : '';
+    if (!username || !password) {
+        setReportApproveVerifyError('Enter Reviewer or Admin User ID and password.');
+        return Promise.resolve(null);
+    }
+    if (typeof isCurrentUserReportOperator === 'function' && isCurrentUserReportOperator(window._lastReportPreview)) {
+        var opUser = typeof getReportOperatedByUsername === 'function'
+            ? getReportOperatedByUsername(window._lastReportPreview) : '';
+        var enteredNorm = typeof normalizeReportUsername === 'function'
+            ? normalizeReportUsername(username) : String(username).trim().toLowerCase();
+        if (opUser && enteredNorm && enteredNorm === opUser) {
+            setReportApproveVerifyError('You cannot approve your own report. A Reviewer or Admin must sign below.');
+            return Promise.resolve(null);
+        }
+    }
+    return apiRequest(API_BASE + '/api/data/auth/approval-verify', {
+        method: 'POST',
+        body: { method: 'credentials', username: username, password: password, purpose: 'report' }
+    }).then(function (data) {
+        if (!data || !data.ok || !data.token) {
+            setReportApproveVerifyError((data && data.error) ? String(data.error) : 'Verification failed.');
+            return null;
+        }
+        return String(data.token);
+    }).catch(function (err) {
+        setReportApproveVerifyError('Verification failed: ' + (err && err.message ? err.message : 'Error'));
+        return null;
+    });
+}
+
+function approveReportWithVerifier(reportId, passFail, remarks, verifyMethod) {
+    verifyMethod = verifyMethod === 'biometric' ? 'biometric' : 'credentials';
     var role = (typeof getCurrentRole === 'function' ? String(getCurrentRole() || '').toLowerCase() : '');
 
     function postReportApprove(extraHeaders) {
         return apiRequest(API_BASE + '/api/data/reports/' + reportId + '/approve', {
             method: 'POST',
             headers: extraHeaders || {},
-            body: { passFail: passFail, remarks: remarks, approverName: name }
+            body: { passFail: passFail, remarks: remarks }
         }).then(function (data) {
-            if (data && data.ok) return true;
-            showAppModal((data && data.error) ? String(data.error) : 'Approval failed.', 'Report');
-            return false;
+            if (data && data.ok) return data;
+            var msg = (data && data.error) ? String(data.error) : 'Approval failed.';
+            setReportApproveVerifyError(msg);
+            return null;
         });
     }
 
     if (role === 'factory') {
-        return postReportApprove({});
+        return postReportApprove({}).then(function (data) { return data && data.ok; });
     }
 
-    return Promise.all([refreshActiveQaCount(), refreshActiveSupervisorCount()]).then(function () {
-        return openApprovalVerifyModal(_approvalVerifyModalOptionsForReport()).then(function (token) {
-            if (!token) return null;
-            return postReportApprove({ 'X-Approval-Verify-Token': token });
+    return verifyReportApproverInline(verifyMethod).then(function (token) {
+        if (!token) return null;
+        return postReportApprove({ 'X-Approval-Verify-Token': token }).then(function (data) {
+            return data && data.ok;
         });
     });
 }
@@ -3241,24 +4082,62 @@ function approveReportWithVerifier(reportId, passFail, remarks) {
 function submitReportApprove() {
     var id = currentReportId;
     if (id == null) return;
+    var preview = window._lastReportPreview;
     var pfEl = document.querySelector('input[name="report-approve-pass-fail"]:checked');
     var pf = pfEl ? String(pfEl.value).toUpperCase() : '';
     if (pf !== 'PASS' && pf !== 'FAIL') {
-        showAppModal('Select Pass or Fail.', 'Report');
+        setReportApproveVerifyError('Select Pass or Fail.');
         return;
     }
     var ta = document.getElementById('report-approve-remarks-input');
     var remarks = ta ? ta.value.trim() : '';
-    approveReportWithVerifier(id, pf, remarks).then(function (ok) {
+    clearReportApproveVerifyError();
+    approveReportWithVerifier(id, pf, remarks, 'credentials').then(function (ok) {
         if (ok === true) {
+            clearReportApprovalGate();
             showAppModal('Report approved.', 'Report');
-            openReportPreview(id);
+            openReportPreview(id, { setGate: true });
             setTimeout(function () {
+                var row = document.getElementById('report-approved-by');
+                if (row) {
+                    try { row.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { row.scrollIntoView(true); }
+                }
                 scrollReportPreviewActionsIntoView();
             }, 400);
         }
     }).catch(function (err) {
-        showAppModal('Approval failed: ' + (err && err.message ? err.message : 'Error'), 'Report');
+        setReportApproveVerifyError('Approval failed: ' + (err && err.message ? err.message : 'Error'));
+    });
+}
+
+function submitReportApproveBiometric() {
+    var id = currentReportId;
+    if (id == null) return;
+    var preview = window._lastReportPreview;
+    var pfEl = document.querySelector('input[name="report-approve-pass-fail"]:checked');
+    var pf = pfEl ? String(pfEl.value).toUpperCase() : '';
+    if (pf !== 'PASS' && pf !== 'FAIL') {
+        setReportApproveVerifyError('Select Pass or Fail.');
+        return;
+    }
+    var ta = document.getElementById('report-approve-remarks-input');
+    var remarks = ta ? ta.value.trim() : '';
+    clearReportApproveVerifyError();
+    approveReportWithVerifier(id, pf, remarks, 'biometric').then(function (ok) {
+        if (ok === true) {
+            clearReportApprovalGate();
+            showAppModal('Report approved.', 'Report');
+            openReportPreview(id, { setGate: true });
+            setTimeout(function () {
+                var row = document.getElementById('report-approved-by');
+                if (row) {
+                    try { row.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { row.scrollIntoView(true); }
+                }
+                scrollReportPreviewActionsIntoView();
+            }, 400);
+        }
+    }).catch(function (err) {
+        setReportApproveVerifyError('Approval failed: ' + (err && err.message ? err.message : 'Error'));
     });
 }
 
@@ -3276,6 +4155,13 @@ function openTestRunCompletionApprovalModal() {
         errEl.style.display = 'none';
     }
     if (overlay) overlay.style.display = 'flex';
+}
+
+function confirmTestRunCompletionSaveRemarks() {
+    var id = _pendingTestRunReportId;
+    closeTestRunCompletionApprovalModal();
+    _pendingTestRunReportId = null;
+    if (id != null) openReportPreview(id);
 }
 
 function closeTestRunCompletionApprovalModal() {
@@ -3298,8 +4184,9 @@ function confirmTestRunCompletionApproval() {
         if (ok === true) {
             closeTestRunCompletionApprovalModal();
             _pendingTestRunReportId = null;
+            clearReportApprovalGate();
             showAppModal('Report approved.', 'Report');
-            openReportPreview(id);
+            openReportPreview(id, { setGate: true });
             setTimeout(function () {
                 scrollReportPreviewActionsIntoView();
             }, 400);
@@ -3323,6 +4210,12 @@ var testRunButtonState = 'start'; // 'start' | 'abort'
 var testRunIntervalId = null;
 var testRunCurrentStepIndex = 0;
 var testRunCurrentTapCount = 0;
+/** Taps completed in the current step before the latest hardware session (survives adapter pause). */
+var testRunStepTapsBase = 0;
+var testRunAdapterWaitActive = false;
+var testRunAdapterPollTimerId = null;
+var _testRunStepResumeInFlight = false;
+var _adapterPollOkStreak = 0;
 var testRunSteps = [];
 var testRunTotalSteps = 0;
 var testRunStepResults = []; // { stepIndex, bulkDensity, tapDensity, resultText }
@@ -3398,6 +4291,43 @@ function recipeExpectedAdapterKind(recipe) {
     return 'usp1';
 }
 
+
+function validationExpectedAdapterKind() {
+    return lastValidationType === 'load' ? 'usp2' : 'usp1';
+}
+
+function validationAdapterLabel() {
+    return lastValidationType === 'load' ? 'USP 2' : 'USP 1';
+}
+
+function verifyValidationAdapter() {
+    var expected = validationExpectedAdapterKind();
+    return apiRequest(API_BASE + '/api/hardware/adapter/check', { method: 'POST' }).then(function (checkRes) {
+        if (!checkRes || checkRes.ok === false) {
+            return { ok: false, expected: expected, detected: null };
+        }
+        var detected = detectedAdapterKindFromCheckResult(checkRes);
+        if (!detected || detected === 'error') {
+            return { ok: false, expected: expected, detected: detected || 'none' };
+        }
+        return { ok: detected === expected, expected: expected, detected: detected };
+    }).catch(function () {
+        return { ok: false, expected: expected, detected: null };
+    });
+}
+
+function showValidationAdapterCheckModal() {
+    showAppModal(
+        'Please check the adapter. Fit the correct ' + validationAdapterLabel() + ' adapter on the instrument, then try again.',
+        'Validation'
+    );
+}
+
+function _validationErrorIsAdapterRelated(msg) {
+    var s = String(msg || '').toLowerCase();
+    return s.indexOf('adapter') >= 0 || s.indexOf('adapt,') >= 0 || s.indexOf('adapt_') >= 0;
+}
+
 function detectedAdapterKindFromCheckResult(result) {
     if (!result || result.ok === false) return null;
     var s = String(result.normalized != null ? result.normalized : (result.response || '')).toLowerCase();
@@ -3412,6 +4342,42 @@ function stepSpeedToSpdMode(speed) {
     if (n === 300) return 'spd1';
     if (n === 250) return 'spd2';
     return null;
+}
+
+function recipeDropHeightMm(recipe, step) {
+    if (step && step.dropHeight != null && step.dropHeight !== '') {
+        var d = parseFloat(step.dropHeight);
+        if (!isNaN(d)) return d;
+    }
+    if (recipe && recipe.dropHeight != null && recipe.dropHeight !== '') {
+        var d2 = parseFloat(recipe.dropHeight);
+        if (!isNaN(d2)) return d2;
+    }
+    if (recipe && recipe.steps && recipe.steps[0] && recipe.steps[0].dropHeight != null) {
+        var d3 = parseFloat(recipe.steps[0].dropHeight);
+        if (!isNaN(d3)) return d3;
+    }
+    return null;
+}
+
+/** Custom mode: hardware spd command must match drop-height adapter (3 mm → USP2, 14 mm → USP1). */
+function hardwareSpeedModeForRecipeStep(step, recipe) {
+    var mode = String(recipe && recipe.uspMode ? recipe.uspMode : '').toUpperCase();
+    if (mode !== 'CUSTOM') {
+        return stepSpeedToSpdMode(getTestRunStepSpeed(step, recipe));
+    }
+    var dh = recipeDropHeightMm(recipe, step);
+    if (dh != null && !isNaN(dh)) {
+        return dh <= 5 ? 'spd2' : 'spd1';
+    }
+    return stepSpeedToSpdMode(getTestRunStepSpeed(step, recipe));
+}
+
+function isCustomRecipeMode(recipe) {
+    if (!recipe) return false;
+    var mode = String(recipe.uspMode || '').toUpperCase();
+    if (mode === 'CUSTOM') return true;
+    return String(recipe.usp || '').toLowerCase().indexOf('custom') >= 0;
 }
 
 function getTestRunStepSpeed(step, recipe) {
@@ -3429,7 +4395,151 @@ function getTestRunStepSpeed(step, recipe) {
     return 300;
 }
 
+function getTestRunStepTapTarget(stepIndex) {
+    var step = testRunSteps[stepIndex];
+    if (!step) return 0;
+    return parseInt(step.tapCount, 10) || 0;
+}
+
+function updateTestRunTapDisplay(sessionCount) {
+    var target = getTestRunStepTapTarget(testRunCurrentStepIndex);
+    var session = parseInt(sessionCount, 10) || 0;
+    var cumulative = (testRunStepTapsBase || 0) + session;
+    testRunCurrentTapCount = cumulative;
+    setRunCard('run-tap-count-card', String(cumulative));
+    setRunCard('run-tap-count-of-card', 'of ' + target);
+}
+
+function verifyTestRunAdapter() {
+    var recipe = lastTestRunRecipe;
+    return apiRequest(API_BASE + '/api/hardware/adapter/check', { method: 'POST' }).then(function (checkRes) {
+        if (!checkRes || checkRes.ok === false) return false;
+        var expected = recipeExpectedAdapterKind(recipe);
+        if (!expected) return true;
+        var detected = detectedAdapterKindFromCheckResult(checkRes);
+        if (!detected || detected === 'error') return false;
+        if (detected === expected) return true;
+        /* Custom: adapter must match drop height only (not USP1/USP2 procedure mode). */
+        if (isCustomRecipeMode(recipe)) return false;
+        return false;
+    }).catch(function () {
+        return false;
+    });
+}
+
+function stopTestRunAdapterPoll() {
+    if (testRunAdapterPollTimerId != null) {
+        clearInterval(testRunAdapterPollTimerId);
+        testRunAdapterPollTimerId = null;
+    }
+    testRunAdapterWaitActive = false;
+    _adapterPollOkStreak = 0;
+}
+
+function pauseTestRunForAdapterInterrupt() {
+    testRunStepTapsBase = Math.max(testRunStepTapsBase || 0, testRunCurrentTapCount || 0);
+    testRunCurrentTapCount = testRunStepTapsBase;
+    updateTestRunTapDisplay(0);
+
+    if (_testRunHardwareTapListener && testRunHardwareEs) {
+        try {
+            testRunHardwareEs.removeEventListener('message', _testRunHardwareTapListener);
+        } catch (e) {}
+        _testRunHardwareTapListener = null;
+    }
+    hardwareTapStopSilently();
+
+    setRunCard('run-status-text', 'Paused');
+    setRunCard('run-status-subtext', 'Adapter removed — fit the correct USP adapter to continue');
+
+    if (testRunAdapterWaitActive) return;
+
+    testRunAdapterWaitActive = true;
+    _adapterPollOkStreak = 0;
+    testRunAdapterPollTimerId = setInterval(function () {
+        if (testRunButtonState !== 'abort' || _testRunStepResumeInFlight) return;
+        verifyTestRunAdapter().then(function (ok) {
+            if (ok) {
+                _adapterPollOkStreak++;
+                if (_adapterPollOkStreak >= 2) {
+                    resumeTestRunAfterAdapter();
+                }
+            } else {
+                _adapterPollOkStreak = 0;
+            }
+        });
+    }, 1500);
+}
+
+function resumeTestRunAfterAdapter() {
+    if (_testRunStepResumeInFlight) return;
+    _testRunStepResumeInFlight = true;
+    stopTestRunAdapterPoll();
+
+    setRunCard('run-status-text', 'Running');
+    setRunCard('run-status-subtext', 'Resuming taps…');
+
+    verifyTestRunAdapter().then(function (ok) {
+        if (!ok) {
+            _testRunStepResumeInFlight = false;
+            pauseTestRunForAdapterInterrupt();
+            return;
+        }
+        return runTestRunHardwareStep(testRunCurrentStepIndex, { resume: true });
+    }).catch(function (err) {
+        if (err && err.message === 'adapter_interrupt') return;
+        var msg = err && err.message ? String(err.message) : 'Hardware error';
+        showAppModal('Test run failed: ' + msg, 'Test Run');
+        hardwareTapStopSilently();
+        _closeTestRunHardwareEs();
+        _testRunRevertUiToStartAfterHardwareFail();
+    }).finally(function () {
+        _testRunStepResumeInFlight = false;
+    });
+}
+
+function _testRunFinishStepVolumeAndResults(stepIndex) {
+    return askVolumeForStep(stepIndex).then(function (vol) {
+        if (vol === null || vol === '') {
+            return runTestRunHardwareStep(stepIndex);
+        }
+        var curr = parseFloat(vol);
+        if (isNaN(curr) || curr <= 0) {
+            return runTestRunHardwareStep(stepIndex);
+        }
+
+        var prev = testRunPreviousVolumeMl;
+        testRunLastStepPreviousMl = prev;
+        testRunLastStepCurrentMl = curr;
+        if (prev != null && !isNaN(prev)) {
+            testRunLastStepVolumeDeltaMl = prev - curr;
+        } else {
+            testRunLastStepVolumeDeltaMl = null;
+        }
+        testRunPreviousVolumeMl = curr;
+
+        var initialVol = (testRunInitialVolumeMl != null && !isNaN(testRunInitialVolumeMl))
+            ? testRunInitialVolumeMl
+            : parseFloat(testRunStepVolumes[0]);
+        var bulkD = computeBulkDensityGPerMl(testRunInitialWeightG, initialVol);
+        var tapD = computeTapDensityGPerMl(testRunInitialWeightG, testRunStepVolumes[testRunCurrentStepIndex]);
+        setRunCard('run-bulk-density', _formatDensity(bulkD));
+        setRunCard('run-tap-density', _formatDensity(tapD));
+        _pendingStepVolumeDeltaMl = testRunLastStepVolumeDeltaMl;
+        recordCurrentStepResult();
+        _pendingStepVolumeDeltaMl = null;
+        testRunStepTapsBase = 0;
+        return true;
+    }).then(function (ok) {
+        if (!ok) return;
+        var isLastStep = (stepIndex + 1) >= testRunTotalSteps;
+        showTestRunStepCompleteModal(isLastStep);
+    });
+}
+
 function _testRunRevertUiToStartAfterHardwareFail() {
+    stopTestRunAdapterPoll();
+    testRunStepTapsBase = 0;
     testRunButtonState = 'start';
     var btn = document.getElementById('btn-test-start-abort');
     if (btn) {
@@ -3445,13 +4555,15 @@ function _testRunRevertUiToStartAfterHardwareFail() {
     _closeTestRunHardwareEs();
 }
 
-function waitForHardwareTapSequence(targetTaps, speedMode) {
+function waitForHardwareTapSequence(remainingTaps, speedMode, opts) {
+    opts = opts || {};
+    var baseCompleted = opts.baseCompleted != null ? opts.baseCompleted : (testRunStepTapsBase || 0);
     return new Promise(function (resolve, reject) {
         if (!testRunHardwareEs) {
             reject(new Error('Hardware stream not connected.'));
             return;
         }
-        var tapGoal = Math.max(1, parseInt(targetTaps, 10) || 1);
+        var tapGoal = Math.max(1, parseInt(remainingTaps, 10) || 1);
         var handler = function (ev) {
             try {
                 var raw = ev.data;
@@ -3465,8 +4577,7 @@ function waitForHardwareTapSequence(targetTaps, speedMode) {
                 if (kind === 'progress' || /^\d+$/.test(norm)) {
                     var n = parseInt(norm || lineStr, 10);
                     if (!isNaN(n) && n >= 0) {
-                        testRunCurrentTapCount = n;
-                        setRunCard('run-tap-count-card', String(n));
+                        updateTestRunTapDisplay(n);
                     }
                 }
                 if (kind === 'completed' || norm === 'completed' || norm === 'complete.') {
@@ -3476,10 +4587,22 @@ function waitForHardwareTapSequence(targetTaps, speedMode) {
                     if (_testRunHardwareTapListener === handler) {
                         _testRunHardwareTapListener = null;
                     }
+                    testRunCurrentTapCount = baseCompleted + tapGoal;
+                    updateTestRunTapDisplay(tapGoal);
                     resolve();
                     return;
                 }
-                if (kind === 'error' || kind === 'adapter_error') {
+                if (kind === 'adapter_error') {
+                    if (testRunHardwareEs) {
+                        testRunHardwareEs.removeEventListener('message', handler);
+                    }
+                    if (_testRunHardwareTapListener === handler) {
+                        _testRunHardwareTapListener = null;
+                    }
+                    reject(new Error('adapter_interrupt'));
+                    return;
+                }
+                if (kind === 'error') {
                     if (testRunHardwareEs) {
                         testRunHardwareEs.removeEventListener('message', handler);
                     }
@@ -3519,16 +4642,16 @@ function waitForHardwareTapSequence(targetTaps, speedMode) {
     });
 }
 
-function runTestRunHardwareStep(stepIndex) {
+function runTestRunHardwareStep(stepIndex, opts) {
+    opts = opts || {};
     if (stepIndex < 0 || stepIndex >= testRunTotalSteps) return Promise.resolve();
     var recipe = lastTestRunRecipe;
     var step = testRunSteps[stepIndex];
     if (!step) return Promise.reject(new Error('Invalid step.'));
 
     testRunCurrentStepIndex = stepIndex;
-    var speed = getTestRunStepSpeed(step, recipe);
-    var speedMode = stepSpeedToSpdMode(speed);
-    var target = parseInt(step.tapCount, 10) || 0;
+    var speedMode = hardwareSpeedModeForRecipeStep(step, recipe);
+    var target = getTestRunStepTapTarget(stepIndex);
     if (!speedMode) {
         return Promise.reject(new Error('Unsupported step speed for hardware (use 300 or 250 taps/min).'));
     }
@@ -3536,48 +4659,36 @@ function runTestRunHardwareStep(stepIndex) {
         return Promise.reject(new Error('Invalid tap count for this step.'));
     }
 
+    if (!opts.resume) {
+        testRunStepTapsBase = 0;
+    }
+
+    var remaining = target - (testRunStepTapsBase || 0);
+
     setRunCard('run-current-step-card', String(stepIndex + 1));
     setRunCard('run-tap-count-of-card', 'of ' + target);
-    setRunCard('run-tap-count-card', '0');
-    testRunCurrentTapCount = 0;
+    updateTestRunTapDisplay(0);
 
-    return waitForHardwareTapSequence(target, speedMode).then(function () {
-        return askVolumeForStep(stepIndex).then(function (vol) {
-            if (vol === null || vol === '') {
-                return runTestRunHardwareStep(stepIndex);
-            }
-            var curr = parseFloat(vol);
-            if (isNaN(curr) || curr <= 0) {
-                return runTestRunHardwareStep(stepIndex);
-            }
+    if (opts.resume) {
+        setRunCard('run-status-text', 'Running');
+        setRunCard('run-status-subtext', 'Test in progress');
+    }
 
-            var prev = testRunPreviousVolumeMl;
-            testRunLastStepPreviousMl = prev;
-            testRunLastStepCurrentMl = curr;
-            if (prev != null && !isNaN(prev)) {
-                testRunLastStepVolumeDeltaMl = prev - curr;
-            } else {
-                testRunLastStepVolumeDeltaMl = null;
-            }
-            testRunPreviousVolumeMl = curr;
+    if (remaining <= 0) {
+        return _testRunFinishStepVolumeAndResults(stepIndex);
+    }
 
-            var initialVol = (testRunInitialVolumeMl != null && !isNaN(testRunInitialVolumeMl))
-                ? testRunInitialVolumeMl
-                : parseFloat(testRunStepVolumes[0]);
-            var bulkD = computeBulkDensityGPerMl(testRunInitialWeightG, initialVol);
-            var tapD = computeTapDensityGPerMl(testRunInitialWeightG, testRunStepVolumes[testRunCurrentStepIndex]);
-            setRunCard('run-bulk-density', _formatDensity(bulkD));
-            setRunCard('run-tap-density', _formatDensity(tapD));
-            _pendingStepVolumeDeltaMl = testRunLastStepVolumeDeltaMl;
-            recordCurrentStepResult();
-            _pendingStepVolumeDeltaMl = null;
-            return true;
-        }).then(function (ok) {
-            if (!ok) return;
-            var isLastStep = (stepIndex + 1) >= testRunTotalSteps;
-            showTestRunStepCompleteModal(isLastStep);
+    return waitForHardwareTapSequence(remaining, speedMode, { baseCompleted: testRunStepTapsBase })
+        .then(function () {
+            return _testRunFinishStepVolumeAndResults(stepIndex);
+        })
+        .catch(function (err) {
+            if (err && err.message === 'adapter_interrupt') {
+                pauseTestRunForAdapterInterrupt();
+                return;
+            }
+            return Promise.reject(err);
         });
-    });
 }
 
 function runTestRunHardwareOrchestration() {
@@ -3587,6 +4698,8 @@ function runTestRunHardwareOrchestration() {
     testRunTotalSteps = steps.length;
     testRunCurrentStepIndex = 0;
     testRunCurrentTapCount = 0;
+    testRunStepTapsBase = 0;
+    stopTestRunAdapterPoll();
     testRunStepResults = [];
     renderTestRunResultsTable();
 
@@ -3600,6 +4713,7 @@ function runTestRunHardwareOrchestration() {
     }
 
     runTestRunHardwareStep(0).catch(function (err) {
+        if (err && err.message === 'adapter_interrupt') return;
         hardwareTapStopSilently();
         _closeTestRunHardwareEs();
         if (err && err.message === 'adapter') return;
@@ -3621,13 +4735,6 @@ function getMaxSampleVolumeMl(recipe) {
         return isNaN(n2) ? null : n2;
     }
     return null;
-}
-
-/** True if entered ml is above the last reading (initial or prior step); skip when no prior reading yet. */
-function testRunVolumeExceedsMonotonicCap(numMl) {
-    var prev = testRunPreviousVolumeMl;
-    if (prev == null || isNaN(prev) || isNaN(numMl)) return false;
-    return numMl > prev;
 }
 
 function _formatDensity(n) {
@@ -3780,10 +4887,6 @@ function openTestRunVolumeModal(stepIndex) {
                     window.alert('Volume in ml cannot exceed cylinder size (' + maxMl + ' ml).');
                     continue;
                 }
-                if (testRunVolumeExceedsMonotonicCap(num)) {
-                    window.alert('Please check the weight you have entered.');
-                    continue;
-                }
                 resolve(String(vol).trim());
                 return;
             }
@@ -3854,12 +4957,6 @@ function confirmTestRunVolume() {
         return;
     }
 
-    if (testRunVolumeExceedsMonotonicCap(num)) {
-        showAppModal('Please check the weight you have entered.', 'Volume');
-        if (input) input.select();
-        return;
-    }
-
     if (overlay) overlay.style.display = 'none';
     if (typeof window.closeOSK === 'function') window.closeOSK();
     if (!_testRunVolumeResolve) return;
@@ -3881,8 +4978,7 @@ function cancelTestRunVolume() {
 function startTestRun(recipe) {
     if (!recipe) return;
     lastTestRunRecipe = recipe;
-    testRunButtonState = 'start';
-    goToPage('test-run');
+    resetTestRunPageForNewLoad();
 
     function setText(id, value) {
         var el = document.getElementById(id);
@@ -3904,38 +5000,14 @@ function startTestRun(recipe) {
         }
     }
     setText('run-usp', uspLabel || '--');
-    // Initial Volume/Weight are entered at Start time, so reset display here.
-    setText('run-sample-volume', '--');
-    setText('run-initial-weight', '--');
 
-    var totalSteps = Math.max(1, parseInt(recipe.stepCount, 10) || 10);
+    var totalSteps = Math.max(1, parseInt(recipe.stepCount, 10) || (recipe.steps && recipe.steps.length) || 10);
     setText('run-total-steps-card', String(totalSteps));
-    setText('run-current-step-card', '1');
-    setText('run-tap-count-card', '0');
     var firstStepTapCount = (recipe.steps && recipe.steps[0] && recipe.steps[0].tapCount != null)
         ? String(recipe.steps[0].tapCount) : '--';
-    setText('run-tap-count-of-card', 'of ' + firstStepTapCount);
-    setText('run-status-text', 'Ready');
-    setText('run-status-subtext', 'Waiting to start');
+    setRunCard('run-tap-count-of-card', 'of ' + firstStepTapCount);
 
-    var btn = document.getElementById('btn-test-start-abort');
-    if (btn) {
-        btn.className = 'btn-ctrl start';
-        btn.innerHTML = '<span class="ctrl-icon">&#9654;</span><span>START</span>';
-        btn.classList.remove('danger');
-    }
-
-    // Ensure step index and run inputs are reset for a fresh run
-    testRunCurrentStepIndex = 0;
-    testRunStepVolumes = [];
-    testRunInitialWeightG = null;
-    testRunInitialVolumeMl = null;
-    testRunPreviousVolumeMl = null;
-    testRunLastStepVolumeDeltaMl = null;
-    testRunLastStepPreviousMl = null;
-    testRunLastStepCurrentMl = null;
-    _pendingStepVolumeDeltaMl = null;
-    _closeTestRunHardwareEs();
+    goToPage('test-run');
 }
 
 function startQuickTestRun() {
@@ -4052,6 +5124,75 @@ function getTestRunSteps() {
         steps.push({ tapCount: (i === 0) ? 10 : (i === 1) ? 500 : 1250 });
     }
     return steps;
+}
+
+
+function resetTestRunPageForNewLoad() {
+    if (testRunIntervalId != null) {
+        clearInterval(testRunIntervalId);
+        testRunIntervalId = null;
+    }
+    stopTestRunAdapterPoll();
+    if (typeof hardwareTapStopSilently === 'function') hardwareTapStopSilently();
+    if (typeof _closeTestRunHardwareEs === 'function') _closeTestRunHardwareEs();
+
+    testRunButtonState = 'start';
+    testRunCurrentStepIndex = 0;
+    testRunCurrentTapCount = 0;
+    testRunStepTapsBase = 0;
+    testRunSteps = [];
+    testRunTotalSteps = 0;
+    testRunStepResults = [];
+    testRunStepVolumes = [];
+    testRunInitialWeightG = null;
+    testRunInitialVolumeMl = null;
+    testRunPreviousVolumeMl = null;
+    testRunLastStepVolumeDeltaMl = null;
+    testRunLastStepPreviousMl = null;
+    testRunLastStepCurrentMl = null;
+    _pendingStepVolumeDeltaMl = null;
+    _testRunStepResumeInFlight = false;
+    _adapterPollOkStreak = 0;
+
+    if (_testRunVolumeResolve) {
+        var rv = _testRunVolumeResolve;
+        _testRunVolumeResolve = null;
+        try { rv(null); } catch (e) {}
+    }
+    if (_testRunInitialWeightResolve) {
+        var rw = _testRunInitialWeightResolve;
+        _testRunInitialWeightResolve = null;
+        try { rw(null); } catch (e) {}
+    }
+
+    if (typeof closeTestRunStepCompleteModal === 'function') closeTestRunStepCompleteModal();
+    if (typeof closeTestRunCompletionApprovalModal === 'function') closeTestRunCompletionApprovalModal();
+    ['test-run-volume-overlay', 'test-run-initial-weight-overlay', 'test-run-completion-overlay'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+    });
+    if (typeof window.closeOSK === 'function') window.closeOSK();
+
+    setRunCard('run-sample-volume', '--');
+    setRunCard('run-initial-weight', '--');
+    setRunCard('run-bulk-density', '--');
+    setRunCard('run-tap-density', '--');
+    setRunCard('run-result', '--');
+    setRunCard('run-tap-count-card', '0');
+    setRunCard('run-tap-count-of-card', 'of --');
+    setRunCard('run-current-step-card', '1');
+    setRunCard('run-status-text', 'Ready');
+    setRunCard('run-status-subtext', 'Waiting to start');
+
+    var btn = document.getElementById('btn-test-start-abort');
+    if (btn) {
+        btn.disabled = false;
+        btn.className = 'btn-ctrl start';
+        btn.innerHTML = '<span class="ctrl-icon">&#9654;</span><span>START</span>';
+        btn.classList.remove('danger');
+    }
+
+    if (typeof renderTestRunResultsTable === 'function') renderTestRunResultsTable();
 }
 
 function setRunCard(id, value) {
@@ -4175,7 +5316,7 @@ function buildTestRunReportPayload() {
         createdAt: now,
         completedAt: now
     };
-    return {
+    var payload = {
         name: 'Test Report - ' + (recipe.productName || 'Tap Density Apparatus Test'),
         type: 'test',
         recipe: recipe,
@@ -4183,11 +5324,12 @@ function buildTestRunReportPayload() {
         createdAt: now,
         completedAt: now
     };
+    return stampOperatorOnTestReportPayload(payload);
 }
 
 var _abortSaveInFlight = false;
 function abortTestRunAndSave() {
-    if (_abortSaveInFlight) return;
+    if (_abortSaveInFlight) return Promise.resolve();
     _abortSaveInFlight = true;
 
     // Stop any ongoing tick immediately
@@ -4195,6 +5337,8 @@ function abortTestRunAndSave() {
         clearInterval(testRunIntervalId);
         testRunIntervalId = null;
     }
+    stopTestRunAdapterPoll();
+    testRunStepTapsBase = 0;
     hardwareTapStopSilently();
     _closeTestRunHardwareEs();
     closeTestRunStepCompleteModal();
@@ -4216,7 +5360,7 @@ function abortTestRunAndSave() {
     if (!payload) {
         _abortSaveInFlight = false;
         goToPage('reports');
-        return;
+        return Promise.resolve();
     }
 
     // Override status + completed steps to reflect actual recorded steps
@@ -4226,8 +5370,9 @@ function abortTestRunAndSave() {
     payload.testData.completedSteps = completedSteps;
     payload.completedAt = new Date().toISOString();
     payload.testData.completedAt = payload.completedAt;
+    stampOperatorOnTestReportPayload(payload);
 
-    apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: payload })
+    return apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: payload })
         .then(function (result) {
             _abortSaveInFlight = false;
             resetQuickTestFormAfterRunIfPending();
@@ -4279,15 +5424,7 @@ function saveTestRunReportAndGoToReportPreview() {
             }
             testRunButtonState = 'start';
             var reportId = (result && result.id) ? result.id : null;
-            resetQuickTestFormAfterRunIfPending();
-            if (reportId) {
-                _saveReportPdfSilent(reportId);
-                _pendingTestRunReportId = reportId;
-                openTestRunCompletionApprovalModal();
-            } else {
-                goToPage('reports');
-                if (typeof loadReports === 'function') loadReports();
-            }
+            finishTestRunReportSaved(reportId);
         })
         .catch(function (err) {
             console.error('Save report failed', err);
@@ -4327,15 +5464,7 @@ function saveTestRunReportAndGoToReports() {
             }
             testRunButtonState = 'start';
             var reportId = (result && result.id) ? result.id : null;
-            resetQuickTestFormAfterRunIfPending();
-            if (reportId) {
-                _saveReportPdfSilent(reportId);
-                _pendingTestRunReportId = reportId;
-                openTestRunCompletionApprovalModal();
-            } else {
-                goToPage('reports');
-                if (typeof loadReports === 'function') loadReports();
-            }
+            finishTestRunReportSaved(reportId);
         })
         .catch(function (err) {
             console.error('Save report failed', err);
@@ -4351,9 +5480,10 @@ function confirmTestRunStepContinue() {
         return;
     }
     closeTestRunStepCompleteModal();
+    stopTestRunAdapterPoll();
     var volInput = document.getElementById('test-run-volume-input');
     if (volInput) volInput.value = '';
-    // Move to next step
+    // Move to next step (fresh tap base for new step)
     testRunCurrentStepIndex++;
     if (testRunButtonState === 'abort') {
         runTestRunHardwareStep(testRunCurrentStepIndex);
@@ -4398,14 +5528,8 @@ function toggleTestRunState() {
             setRunCard('run-bulk-density', _formatDensity(bulkD));
             setRunCard('run-tap-density', '--');
 
-            return apiRequest(API_BASE + '/api/hardware/adapter/check', { method: 'POST' }).then(function (checkRes) {
-                var expected = recipeExpectedAdapterKind(lastTestRunRecipe);
-                var detected = detectedAdapterKindFromCheckResult(checkRes);
-                if (!checkRes || checkRes.ok === false || !detected || detected === 'error') {
-                    showAppModal('Please fit the correct USP adapter for this recipe and try again.', 'Test Run');
-                    throw new Error('adapter');
-                }
-                if (expected && detected !== expected) {
+            return verifyTestRunAdapter().then(function (ok) {
+                if (!ok) {
                     showAppModal('Please fit the correct USP adapter for this recipe and try again.', 'Test Run');
                     throw new Error('adapter');
                 }
@@ -4585,23 +5709,16 @@ function loadRecipeForEdit() {
         var heightRadio = document.querySelector('input[name="create-height"][value="' + heightVal + '"]');
         if (heightRadio) heightRadio.checked = true;
         var stepCount = Math.max(1, parseInt(r.stepCount, 10) || (r.steps && r.steps.length) || 10);
-        var stepEl = document.getElementById('create-recipe-step-count');
-        if (stepEl) {
-            stepEl.value = String(stepCount);
-            if (stepEl.options[stepCount - 1]) stepEl.value = String(stepCount);
-        }
-        var totalEl = document.getElementById('create-custom-total-taps');
-        if (totalEl) {
-            if (r.customTotalTaps != null) {
-                totalEl.value = String(r.customTotalTaps);
-            } else if (r.steps && r.steps.length && mode === 'CUSTOM') {
-                var sum = 0;
-                for (var si = 0; si < r.steps.length; si++) sum += parseInt(r.steps[si].tapCount, 10) || 0;
-                totalEl.value = sum > 0 ? String(sum) : '';
-            } else {
-                totalEl.value = '';
+        window._createRecipeStepCount = stepCount;
+        if (r.steps && r.steps.length) {
+            window._createRecipeStepTaps = [];
+            for (var si = 0; si < r.steps.length; si++) {
+                window._createRecipeStepTaps.push(parseInt(r.steps[si].tapCount, 10) || 0);
             }
+        } else {
+            window._createRecipeStepTaps = computeStandardUspTaps(stepCount);
         }
+        if (typeof _refreshCreateStepSummary === 'function') _refreshCreateStepSummary();
         updateCreateRecipeContinueButton();
     }).catch(function () {});
 }
@@ -4705,12 +5822,8 @@ function updateCreateRecipeContinueButton() {
     var heightOk = needSpeedHeight ? !!heightRadio : true;
     var customOk = true;
     if (mode === 'CUSTOM') {
-        var totalEl = document.getElementById('create-custom-total-taps');
-        var tv = totalEl ? parseInt(totalEl.value, 10) : 0;
-        var minSteps = (typeof window.currentRecipeStepCount === 'number' && window.currentRecipeStepCount > 0)
-            ? window.currentRecipeStepCount
-            : 10;
-        customOk = !isNaN(tv) && tv >= minSteps;
+        var n = window._createRecipeStepCount;
+        customOk = !!(n && window._createRecipeStepTaps && window._createRecipeStepTaps.length === n);
     }
     var canContinue = !!(recipeName && speedOk && heightOk && customOk);
     if (btn) {
@@ -4743,151 +5856,6 @@ function openCreateRecipeContinueModal() {
 function closeCreateRecipeContinueModal() {
     var overlay = document.getElementById('create-recipe-continue-overlay');
     if (overlay) overlay.style.display = 'none';
-}
-
-function updateCreateRecipeStepsView() {
-    var n = (typeof window.currentRecipeStepCount === 'number' && window.currentRecipeStepCount > 0)
-        ? window.currentRecipeStepCount
-        : 10;
-
-    var taps = window._createRecipeStepTaps;
-    if (!taps || taps.length !== n) {
-        taps = computeStandardUspTaps(n);
-    }
-
-    var note = document.getElementById('create-recipe-steps-note');
-    if (note) {
-        var mode = getCreateUspMode();
-        if (mode === 'CUSTOM') {
-            note.textContent =
-                'Configuring ' + n + ' step' + (n === 1 ? '' : 's') + ' — custom total taps split as below.';
-        } else {
-            note.textContent =
-                'Configuring ' + n + ' step' + (n === 1 ? '' : 's') +
-                ' (Step 1: 10 taps, Step 2: 500 taps, remaining: 1250 taps).';
-        }
-    }
-
-    for (var i = 1; i <= 10; i++) {
-        var row = document.getElementById('create-recipe-step-row-' + i);
-        if (!row) continue;
-        row.style.display = i <= n ? '' : 'none';
-        if (i <= n) {
-            var spans = row.querySelectorAll('span');
-            if (spans.length >= 2) {
-                spans[1].textContent = String(taps[i - 1] != null ? taps[i - 1] : '');
-            }
-        }
-    }
-}
-
-function confirmCreateRecipeContinue() {
-    var stepCountEl = document.getElementById('create-recipe-step-count');
-    var stepCount = stepCountEl ? parseInt(stepCountEl.value, 10) || 10 : 10;
-    var taps = computeCreateRecipeStepTapsForStepCount(stepCount);
-    if (getCreateUspMode() === 'CUSTOM' && !taps) {
-        showAppModal('Enter total taps (at least ' + stepCount + ', one tap per step).', 'Create Recipe');
-        return;
-    }
-    window._createRecipeStepTaps = taps || computeStandardUspTaps(stepCount);
-    window.currentRecipeStepCount = stepCount;
-    closeCreateRecipeContinueModal();
-    updateCreateRecipeStepsView();
-    goToPage('create-recipe-step2');
-}
-
-function goToCreateRecipeStepsPage() {
-    updateCreateRecipeContinueButton();
-    var btn = document.getElementById('create-recipe-continue-btn');
-    if (btn && btn.disabled) {
-        showAppModal('Enter the recipe name and select procedure (and speed/height for Custom) before continuing.', 'Create Recipe');
-        return;
-    }
-    var stepCount = (typeof window.currentRecipeStepCount === 'number' && window.currentRecipeStepCount > 0)
-        ? window.currentRecipeStepCount
-        : 10;
-    var stepCountEl = document.getElementById('create-recipe-step-count');
-    if (stepCountEl) stepCountEl.value = String(stepCount);
-    var taps = computeCreateRecipeStepTapsForStepCount(stepCount);
-    if (getCreateUspMode() === 'CUSTOM' && !taps) {
-        taps = computeStandardUspTaps(stepCount);
-    }
-    window._createRecipeStepTaps = (taps && taps.length === stepCount) ? taps : computeStandardUspTaps(stepCount);
-    window.currentRecipeStepCount = stepCount;
-    goToPage('create-recipe-step2');
-    setTimeout(renderCreateRecipeStepInputsPage, 50);
-}
-
-function renderCreateRecipeStepInputsPage() {
-    var container = document.getElementById('create-recipe-step-inputs');
-    if (!container) return;
-    var stepCountEl = document.getElementById('create-recipe-step-count');
-    var stepCount = stepCountEl ? parseInt(stepCountEl.value, 10) || 10 : 10;
-    if (stepCount < 1) stepCount = 1;
-    if (stepCount > 10) stepCount = 10;
-
-    var existingTaps = window._createRecipeStepTaps;
-    var defaultTaps = computeCreateRecipeStepTapsForStepCount(stepCount) || computeStandardUspTaps(stepCount);
-    var taps;
-    if (existingTaps && existingTaps.length === stepCount) {
-        taps = existingTaps.slice();
-    } else {
-        taps = defaultTaps.slice();
-    }
-    window._createRecipeStepTaps = taps;
-    window.currentRecipeStepCount = stepCount;
-
-    container.innerHTML = '';
-    for (var i = 0; i < stepCount; i++) {
-        var stepNum = i + 1;
-        var group = document.createElement('div');
-        group.className = 'form-group';
-        group.innerHTML =
-            '<label for="create-recipe-step-tap-' + stepNum + '">Step ' + stepNum + ' \u2014 Taps</label>' +
-            '<input type="number" id="create-recipe-step-tap-' + stepNum + '" ' +
-                'class="input-field create-recipe-step-tap" ' +
-                'min="1" step="1" ' +
-                'data-step-index="' + i + '" ' +
-                'value="' + (taps[i] != null ? taps[i] : 0) + '" ' +
-                'onfocus="if(typeof openOSKForInput === \'function\') openOSKForInput(this)" ' +
-                'oninput="_onCreateRecipeStepTapInput(this)">';
-        container.appendChild(group);
-    }
-}
-
-function _onCreateRecipeStepTapInput(inputEl) {
-    if (!inputEl) return;
-    var idx = parseInt(inputEl.getAttribute('data-step-index'), 10);
-    if (isNaN(idx) || idx < 0) return;
-    var v = parseInt(inputEl.value, 10);
-    if (!window._createRecipeStepTaps) window._createRecipeStepTaps = [];
-    window._createRecipeStepTaps[idx] = isNaN(v) ? 0 : v;
-}
-
-function goToCreateRecipeCylinderPage() {
-    var container = document.getElementById('create-recipe-step-inputs');
-    var stepCountEl = document.getElementById('create-recipe-step-count');
-    var stepCount = stepCountEl ? parseInt(stepCountEl.value, 10) || 10 : 10;
-    var taps = [];
-    if (container) {
-        var inputs = container.querySelectorAll('input.create-recipe-step-tap');
-        for (var i = 0; i < inputs.length && taps.length < stepCount; i++) {
-            var v = parseInt(inputs[i].value, 10);
-            if (isNaN(v) || v < 1) {
-                showAppModal('Step ' + (i + 1) + ' must have at least 1 tap.', 'Create Recipe');
-                inputs[i].focus();
-                return;
-            }
-            taps.push(v);
-        }
-    }
-    if (taps.length !== stepCount) {
-        showAppModal('Please configure taps for all ' + stepCount + ' steps before continuing.', 'Create Recipe');
-        return;
-    }
-    window._createRecipeStepTaps = taps;
-    window.currentRecipeStepCount = stepCount;
-    goToPage('create-recipe-step3');
 }
 
 function getRecipes() {
@@ -5127,8 +6095,8 @@ function completeRecipeFromStep2() {
     var cylinderRadio = document.querySelector('input[name="create-cylinder"]:checked');
     var cylinderVolume = cylinderRadio ? parseFloat(cylinderRadio.value) || 100 : 100;
 
-    var stepCount = (typeof window.currentRecipeStepCount === 'number' && window.currentRecipeStepCount > 0)
-        ? window.currentRecipeStepCount
+    var stepCount = (typeof window._createRecipeStepCount === 'number' && window._createRecipeStepCount > 0)
+        ? window._createRecipeStepCount
         : 10;
 
     if (!productName || speed == null || dropHeight == null) {
@@ -5170,14 +6138,9 @@ function completeRecipeFromStep2() {
         uspMode: mode
     };
     if (mode === 'CUSTOM') {
-        var totalEl = document.getElementById('create-custom-total-taps');
-        var ct = totalEl ? parseInt(totalEl.value, 10) : 0;
-        if (!isNaN(ct) && ct > 0) recipe.customTotalTaps = ct;
-        else {
-            var s2 = 0;
-            for (var ti = 0; ti < taps.length; ti++) s2 += parseInt(taps[ti], 10) || 0;
-            recipe.customTotalTaps = s2;
-        }
+        var s2 = 0;
+        for (var ti = 0; ti < taps.length; ti++) s2 += parseInt(taps[ti], 10) || 0;
+        recipe.customTotalTaps = s2;
     }
     var editId = window.currentEditingRecipeId;
     if (editId) {
@@ -5283,10 +6246,14 @@ function validationRunHardwareMessage(ev) {
             _closeValidationRunHardwareEs();
             _resetValidationRunActionButtonToStart();
             updateValidationRunTimerUi(VALIDATION_RUN_DURATION_SEC);
-            showAppModal(
-                'Hardware error during validation: ' + (lineStr || norm || 'Unknown'),
-                'Validation'
-            );
+            if (kind === 'adapter_error' || _validationErrorIsAdapterRelated(lineStr) || _validationErrorIsAdapterRelated(norm)) {
+                showValidationAdapterCheckModal();
+            } else {
+                showAppModal(
+                    'Hardware error during validation: ' + (lineStr || norm || 'Unknown'),
+                    'Validation'
+                );
+            }
         }
     } catch (ex) {
         // ignore malformed SSE payloads
@@ -5304,6 +6271,154 @@ function validationRunTimerTick() {
         }
         completeValidationRunAfterDuration();
     }
+}
+
+
+
+function buildValidationRunSnapshot(isPass) {
+    var usp = lastValidationType === 'load' ? 'USP 2' : 'USP 1';
+    var tapsMin = lastValidationType === 'load' ? 250 : 300;
+    var dropHeight = lastValidationType === 'load' ? 3 : 14;
+    var now = new Date().toISOString();
+    return {
+        validationSubtype: lastValidationType,
+        usp: usp,
+        tapsMin: tapsMin,
+        dropHeight: dropHeight,
+        expectedTapCount: validationRunTarget,
+        expectedTolerance: validationRunTolerance,
+        expectedTapCountMin: validationRunMin,
+        expectedTapCountMax: validationRunMax,
+        actualTapCount: validationRunCurrentCount,
+        validationDurationSec: VALIDATION_RUN_DURATION_SEC,
+        status: isPass ? 'Pass' : 'Fail',
+        completedAt: now
+    };
+}
+
+function getOrderedValidationSessionRuns() {
+    var runs = [];
+    if (validationSessionResults.distance) runs.push(validationSessionResults.distance);
+    if (validationSessionResults.load) runs.push(validationSessionResults.load);
+    return runs;
+}
+
+function buildCombinedValidationReportPayload() {
+    var runs = getOrderedValidationSessionRuns();
+    if (!runs.length) return null;
+    var overallPass = true;
+    for (var i = 0; i < runs.length; i++) {
+        if (String(runs[i].status || '').toLowerCase() !== 'pass') overallPass = false;
+    }
+    var user = window.currentUser || {};
+    var now = new Date().toISOString();
+    var first = runs[0];
+    var last = runs[runs.length - 1];
+    return {
+        name: 'Validation - USP 1 & USP 2 - ' + (overallPass ? 'Pass' : 'Fail'),
+        type: 'validation',
+        validationSubtype: 'combined',
+        validationRuns: runs,
+        status: overallPass ? 'Pass' : 'Fail',
+        usp: 'USP 1 & USP 2',
+        tapsMin: first.tapsMin,
+        dropHeight: first.dropHeight,
+        expectedTapCount: first.expectedTapCount,
+        expectedTolerance: first.expectedTolerance,
+        expectedTapCountMin: first.expectedTapCountMin,
+        expectedTapCountMax: first.expectedTapCountMax,
+        actualTapCount: last.actualTapCount,
+        createdAt: now,
+        completedAt: now,
+        operatedByUsername: normalizeReportUsername(user.username || user.name || ''),
+        operatorName: user.name || user.username || '--',
+        employeeId: user.username || '--',
+        testData: {
+            validationRuns: runs,
+            usp: 'USP 1 & USP 2',
+            status: overallPass ? 'Pass' : 'Fail',
+            operatorName: user.name || user.username || '--',
+            employeeId: user.username || '--',
+            operatedByUsername: normalizeReportUsername(user.username || user.name || ''),
+            createdAt: now,
+            completedAt: now
+        }
+    };
+}
+
+function saveCombinedValidationReport() {
+    var reportPayload = buildCombinedValidationReportPayload();
+    if (!reportPayload) return Promise.resolve();
+    return apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: reportPayload })
+        .then(function (result) {
+            validationSessionResults = { distance: null, load: null };
+            validationCompletion = { distance: false, load: false };
+            var reportId = result && result.id;
+            currentReportFilter = 'validation';
+            if (reportId) {
+                _saveReportPdfSilent(reportId);
+                if (typeof openReportPreview === 'function') openReportPreview(reportId, { setGate: true });
+                else goToPage('reports');
+            } else {
+                goToPage('reports');
+            }
+        })
+        .catch(function (err) {
+            console.error('Failed to save validation report', err);
+            currentReportFilter = 'validation';
+            goToPage('reports');
+        });
+}
+
+function validationRunsFromPreview(preview) {
+    if (!preview) return null;
+    var td = preview.testData || preview;
+    if (preview.validationRuns && preview.validationRuns.length) return preview.validationRuns;
+    if (td && td.validationRuns && td.validationRuns.length) return td.validationRuns;
+    return null;
+}
+
+function renderValidationDetailsInPreview(preview) {
+    var titleEl = document.getElementById('report-validation-calibration-title');
+    var bodyEl = document.getElementById('report-validation-calibration-body');
+    if (!bodyEl) return;
+    if (titleEl) titleEl.textContent = 'VALIDATION DETAILS';
+    var td = preview.testData || preview;
+    var runs = validationRunsFromPreview(preview);
+    var rows = [];
+    if (runs && runs.length) {
+        runs.forEach(function (run) {
+            var dateStr = formatReportDate(run.completedAt || preview.completedAt || preview.createdAt);
+            var usp = run.usp || (run.validationSubtype === 'load' ? 'USP 2' : 'USP 1');
+            var tapsMin = run.tapsMin != null ? run.tapsMin : '--';
+            var dropHeight = run.dropHeight != null ? run.dropHeight : '--';
+            var expected = run.expectedTapCount != null ? run.expectedTapCount : '--';
+            var tol = run.expectedTolerance != null ? run.expectedTolerance : null;
+            var expectedDisplay = (tol != null && expected !== '--') ? (String(expected) + ' (+/- ' + String(tol) + ')') : expected;
+            var actual = run.actualTapCount != null ? run.actualTapCount : '--';
+            var status = run.status || '--';
+            rows.push('<tr><th colspan="4" class="report-validation-usp-header">' + usp + ' validation</th></tr>');
+            rows.push('<tr><th>Date / Time</th><td colspan="3">' + dateStr + '</td></tr>');
+            rows.push('<tr><th>USP</th><td>' + usp + '</td><th>Taps/Min</th><td>' + tapsMin + '</td></tr>');
+            rows.push('<tr><th>Drop Height (mm)</th><td>' + dropHeight + '</td><th>Status</th><td>' + status + '</td></tr>');
+            rows.push('<tr><th>Expected Tap Count</th><td>' + expectedDisplay + '</td><th>Actual Tap Count</th><td>' + actual + '</td></tr>');
+        });
+    } else {
+        var dateStr = formatReportDate(td.completedAt || preview.completedAt || preview.createdAt);
+        var usp = td.usp || preview.usp || '--';
+        var tapsMin = td.tapsMin != null ? td.tapsMin : (preview.tapsMin != null ? preview.tapsMin : '--');
+        var dropHeight = td.dropHeight != null ? td.dropHeight : (preview.dropHeight != null ? preview.dropHeight : '--');
+        var expected = td.expectedTapCount != null ? td.expectedTapCount : (preview.expectedTapCount != null ? preview.expectedTapCount : '--');
+        var tol = td.expectedTolerance != null ? td.expectedTolerance : (preview.expectedTolerance != null ? preview.expectedTolerance : null);
+        var expectedDisplay = (tol != null && expected !== '--') ? (String(expected) + ' (+/- ' + String(tol) + ')') : expected;
+        var actual = td.actualTapCount != null ? td.actualTapCount : (preview.actualTapCount != null ? preview.actualTapCount : '--');
+        var status = td.status || preview.status || '--';
+        rows.push('<tr><th>Date / Time</th><td colspan="3">' + dateStr + '</td></tr>');
+        rows.push('<tr><th>USP</th><td>' + usp + '</td><th>Taps/Min</th><td>' + tapsMin + '</td></tr>');
+        rows.push('<tr><th>Drop Height (mm)</th><td>' + dropHeight + '</td><th>Status</th><td>' + status + '</td></tr>');
+        rows.push('<tr><th>Expected Tap Count</th><td>' + expectedDisplay + '</td><th>Actual Tap Count</th><td>' + actual + '</td></tr>');
+    }
+    bodyEl.innerHTML = rows.join('');
 }
 
 function completeValidationRunAfterDuration() {
@@ -5332,70 +6447,22 @@ function completeValidationRunAfterDuration() {
     }
     _resetValidationRunActionButtonToStart();
 
-    var usp = lastValidationType === 'load' ? 'USP 2' : 'USP 1';
-    var tapsMin = lastValidationType === 'load' ? 250 : 300;
-    var dropHeight = lastValidationType === 'load' ? 3 : 14;
-    var user = window.currentUser || {};
-    var reportPayload = {
-        name: 'Validation - ' + (isPass ? 'Pass' : 'Fail'),
-        type: 'validation',
-        validationSubtype: lastValidationType,
-        status: isPass ? 'Pass' : 'Fail',
-        usp: usp,
-        tapsMin: tapsMin,
-        dropHeight: dropHeight,
-        expectedTapCount: validationRunTarget,
-        expectedTolerance: validationRunTolerance,
-        expectedTapCountMin: validationRunMin,
-        expectedTapCountMax: validationRunMax,
-        actualTapCount: validationRunCurrentCount,
-        createdAt: new Date().toISOString(),
-        completedAt: new Date().toISOString(),
-        testData: {
-            usp: usp,
-            tapsMin: tapsMin,
-            dropHeight: dropHeight,
-            expectedTapCount: validationRunTarget,
-            expectedTolerance: validationRunTolerance,
-            expectedTapCountMin: validationRunMin,
-            expectedTapCountMax: validationRunMax,
-            actualTapCount: validationRunCurrentCount,
-            validationDurationSec: VALIDATION_RUN_DURATION_SEC,
-            status: isPass ? 'Pass' : 'Fail',
-            operatorName: user.name || user.username || '--',
-            employeeId: user.username || '--',
-            createdAt: new Date().toISOString(),
-            completedAt: new Date().toISOString()
-        }
-    };
     if (lastValidationType === 'distance' || lastValidationType === 'load') {
+        validationSessionResults[lastValidationType] = buildValidationRunSnapshot(isPass);
         validationCompletion[lastValidationType] = true;
     }
 
-    apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: reportPayload })
-        .then(function (result) {
-            if (!isValidationFullyCompleted()) {
-                var missing = getMissingValidationLabel();
-                showAppModal('Validation saved. Please complete ' + missing + ' to close validation.', 'Validation');
-                goToPage('validate-type-select');
-                return;
-            }
+    if (!isValidationFullyCompleted()) {
+        var missing = getMissingValidationLabel();
+        showAppModal(
+            (lastValidationType === 'distance' ? 'USP 1' : 'USP 2') + ' validation complete. Please complete ' + missing + ' validation. A combined report will be created when both are done.',
+            'Validation'
+        );
+        goToPage('validate-type-select');
+        return;
+    }
 
-            var reportId = result && result.id;
-            currentReportFilter = 'validation';
-            if (reportId) {
-                _saveReportPdfSilent(reportId);
-                if (typeof openReportPreview === 'function') openReportPreview(reportId);
-                else goToPage('reports');
-            } else {
-                goToPage('reports');
-            }
-        })
-        .catch(function (err) {
-            console.error('Failed to save validation report', err);
-            currentReportFilter = 'validation';
-            goToPage('reports');
-        });
+    saveCombinedValidationReport();
 }
 
 function startValidationOnBackend() {
@@ -5417,48 +6484,69 @@ function toggleValidationRunState() {
         validationRunBackendPending = true;
         if (btn) btn.disabled = true;
         setValRunEl('val-run-status', 'Starting');
-        setValRunEl('val-run-status-sub', validationHardwareEnabled ? 'Waiting for hardware' : 'Starting');
+        setValRunEl('val-run-status-sub', validationHardwareEnabled ? 'Checking adapter…' : 'Starting');
 
-        _closeValidationRunHardwareEs();
-        try {
-            validationRunHardwareEs = new EventSource(_getHardwareSseUrl());
-        } catch (esErr) {
-            validationRunBackendPending = false;
-            if (btn) btn.disabled = false;
-            setValRunEl('val-run-status', 'Ready');
-            setValRunEl('val-run-status-sub', 'Failed to connect to hardware stream');
-            showAppModal('Could not connect to the hardware stream. Check the server and try again.', 'Validation');
-            return;
-        }
-        validationRunSseListener = validationRunHardwareMessage;
-        validationRunHardwareEs.addEventListener('message', validationRunSseListener);
-
-        startValidationOnBackend().then(function (res) {
-            if (!res || res.ok !== true) {
-                throw new Error((res && (res.error || res.response)) || 'Hardware did not acknowledge start');
-            }
-            validationRunState = 'running';
-            validationRunCurrentCount = 0;
-            setValRunEl('val-run-tap-count', '0');
-            validationRunSecondsRemaining = VALIDATION_RUN_DURATION_SEC;
-            updateValidationRunTimerUi(validationRunSecondsRemaining);
-            setValRunEl('val-run-status', 'Running');
-            setValRunEl('val-run-status-sub', String(VALIDATION_RUN_DURATION_SEC) + 's run — tap count from device');
-            var resultCard = document.getElementById('val-result-card');
-            if (resultCard) resultCard.style.display = 'none';
-            if (btn) {
-                btn.className = 'btn btn-primary validation-action-btn danger';
-                btn.innerHTML = '<span class="ctrl-icon">&#9726;</span><span id="btn-validation-label">Abort</span>';
-            }
-            if (label) label.textContent = 'Abort';
-            validationRunIntervalId = setInterval(validationRunTimerTick, 1000);
-        }).catch(function (err) {
+        function _validationRunStartFailed(err) {
             validationRunState = 'idle';
             _closeValidationRunHardwareEs();
             setValRunEl('val-run-status', 'Ready');
-            setValRunEl('val-run-status-sub', 'Failed to start hardware validation');
-            showAppModal('Failed to start validation: ' + (err && err.message ? err.message : 'Unknown error'), 'Validation');
-        }).finally(function () {
+            setValRunEl('val-run-status-sub', 'Press Start to begin');
+            if (err && err.message === 'adapter_check') {
+                showValidationAdapterCheckModal();
+            } else {
+                showAppModal('Failed to start validation: ' + (err && err.message ? err.message : 'Unknown error'), 'Validation');
+            }
+        }
+
+        function _runValidationHardwareStart() {
+            _closeValidationRunHardwareEs();
+            try {
+                validationRunHardwareEs = new EventSource(_getHardwareSseUrl());
+            } catch (esErr) {
+                return Promise.reject(new Error('Could not connect to the hardware stream'));
+            }
+            validationRunSseListener = validationRunHardwareMessage;
+            validationRunHardwareEs.addEventListener('message', validationRunSseListener);
+            return startValidationOnBackend().then(function (res) {
+                if (!res || res.ok !== true) {
+                    var errText = (res && (res.error || res.response || res.message)) || 'Hardware did not acknowledge start';
+                    if (_validationErrorIsAdapterRelated(errText) || (res && res.error === 'adapter_mismatch')) {
+                        return Promise.reject(new Error('adapter_check'));
+                    }
+                    return Promise.reject(new Error(errText));
+                }
+                validationRunState = 'running';
+                validationRunCurrentCount = 0;
+                setValRunEl('val-run-tap-count', '0');
+                validationRunSecondsRemaining = VALIDATION_RUN_DURATION_SEC;
+                updateValidationRunTimerUi(validationRunSecondsRemaining);
+                setValRunEl('val-run-status', 'Running');
+                setValRunEl('val-run-status-sub', String(VALIDATION_RUN_DURATION_SEC) + 's run — tap count from device');
+                var resultCard = document.getElementById('val-result-card');
+                if (resultCard) resultCard.style.display = 'none';
+                if (btn) {
+                    btn.className = 'btn btn-primary validation-action-btn danger';
+                    btn.innerHTML = '<span class="ctrl-icon">&#9726;</span><span id="btn-validation-label">Abort</span>';
+                }
+                if (label) label.textContent = 'Abort';
+                validationRunIntervalId = setInterval(validationRunTimerTick, 1000);
+            });
+        }
+
+        var startPromise;
+        if (!validationHardwareEnabled) {
+            startPromise = _runValidationHardwareStart();
+        } else {
+            startPromise = verifyValidationAdapter().then(function (adapterResult) {
+                if (!adapterResult || !adapterResult.ok) {
+                    return Promise.reject(new Error('adapter_check'));
+                }
+                setValRunEl('val-run-status-sub', 'Adapter OK — starting…');
+                return _runValidationHardwareStart();
+            });
+        }
+
+        startPromise.catch(_validationRunStartFailed).finally(function () {
             validationRunBackendPending = false;
             if (btn) btn.disabled = false;
         });
@@ -5482,6 +6570,7 @@ function toggleValidationRunState() {
         });
     }
 }
+
 
 function selectRole(roleName) {
     var hidden = document.getElementById('selected-role');
@@ -5901,7 +6990,10 @@ function initializeDatetime() {
     fetchDateTimeFromBackend().then(function (data) {
         var now = null;
         if (data && data.datetime) {
-            now = new Date(data.datetime.replace('Z', ''));
+            var wall = parseWallDatetimeIso(data.datetime);
+            if (wall) {
+                now = new Date(wall.y, wall.mo - 1, wall.d, wall.h, wall.mi, wall.sec);
+            }
         }
         if (!now || isNaN(now.getTime())) {
             if (data && data.date && data.time) {
@@ -5995,15 +7087,22 @@ function applyDateTime() {
         headers: Object.assign({ 'Content-Type': 'application/json' }, headers),
         body: JSON.stringify({ datetime: dtStr })
     }).then(function (r) {
-        if (r.ok) {
-            updateDateTime();
-            showAppModal('Date and time updated.', 'Success', function () {
-                goBack();
-            });
-            return;
-        }
-        return r.json().catch(function () { return {}; }).then(function (err) {
-            showAppModal(err.error || 'Failed to set date and time.', 'Error');
+        return r.json().catch(function () { return {}; }).then(function (data) {
+            if (r.ok) {
+                if (data && data.datetime) {
+                    var parts = parseWallDatetimeIso(data.datetime);
+                    if (parts) {
+                        _wallClockAnchor = { parts: parts, at: Date.now() };
+                        applyWallClockToTopBar(parts);
+                    }
+                }
+                updateDateTime();
+                showAppModal('Date and time updated.', 'Success', function () {
+                    goBack();
+                });
+                return;
+            }
+            showAppModal((data && data.error) ? data.error : 'Failed to set date and time.', 'Error');
         });
     }).catch(function (err) {
         showAppModal('Failed to update date and time: ' + (err && err.message ? err.message : 'Network error'), 'Error');
@@ -6295,10 +7394,6 @@ document.addEventListener('DOMContentLoaded', function () {
             if (typeof applyCreateUspModeToSpeedHeight === 'function') applyCreateUspModeToSpeedHeight();
         });
     });
-    var createTotalTaps = document.getElementById('create-custom-total-taps');
-    if (createTotalTaps) {
-        createTotalTaps.addEventListener('input', updateCreateRecipeContinueButton);
-    }
     document.querySelectorAll('input[name="quick-usp-mode"]').forEach(function (el) {
         el.addEventListener('change', function () {
             if (typeof applyQuickUspModeToSpeedHeight === 'function') applyQuickUspModeToSpeedHeight();
@@ -6311,6 +7406,10 @@ document.addEventListener('DOMContentLoaded', function () {
         try { localStorage.removeItem('currentUser'); } catch (e) {}
         window.currentUser = null;
         if (typeof currentUser !== 'undefined') currentUser = null;
+        if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+        window._lastReportPreview = null;
+        var app = document.querySelector('.app-container');
+        if (app) app.classList.remove('report-approval-locked');
         var resetUrl = (API_BASE || '') + '/api/data/auth/session-ui-reset';
         fetch(resetUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
             .catch(function () {})

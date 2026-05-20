@@ -7,7 +7,7 @@
     <meta name="viewport"
         content="width=1024, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Tap Density Apparatus</title>
-    <link rel="stylesheet" href="styles.css?v=6">
+    <link rel="stylesheet" href="styles.css?v=8">
 </head>
 
 <body>
@@ -75,9 +75,26 @@
     </div>
     <div id="biometric-progress-overlay" class="modal-overlay" style="display: none;">
         <div class="role-modal biometric-progress-modal">
+            <div class="bio-enroll-steps" id="bio-enroll-steps" style="display: none;">
+                <div class="bio-enroll-step" data-step="1"><span class="bio-step-num">1</span><span class="bio-step-label">First scan</span></div>
+                <div class="bio-enroll-step-line" aria-hidden="true"></div>
+                <div class="bio-enroll-step" data-step="2"><span class="bio-step-num">2</span><span class="bio-step-label">Second scan</span></div>
+            </div>
+            <div class="bio-finger-stage" id="bio-finger-stage" style="display: none;">
+                <div class="bio-finger-scanner" aria-hidden="true"></div>
+                <div class="bio-finger-icon" id="bio-finger-icon" aria-hidden="true">
+                    <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M18.9 7a8 8 0 0 0-5.3-3.8A8 8 0 0 0 4 12"></path>
+                        <path d="M12 20a8 8 0 0 0 8-8 4.5 4.5 0 0 0-1-2.8"></path>
+                        <path d="M9.1 4.6A8 8 0 0 0 4.5 9.4"></path>
+                        <path d="M12 12a4 4 0 0 0-4 4"></path>
+                    </svg>
+                </div>
+            </div>
             <h3 id="biometric-progress-title">Register Fingerprint</h3>
             <p id="biometric-progress-message" class="section-subtitle">Place finger now.</p>
-            <div class="biometric-progress-spinner" aria-hidden="true"></div>
+            <p id="biometric-progress-hint" class="bio-enroll-hint"></p>
+            <div id="biometric-progress-spinner" class="biometric-progress-spinner" aria-hidden="true" style="display: none;"></div>
             <div class="role-modal-buttons">
                 <button type="button" class="btn-role-select btn-role-cancel" onclick="cancelBiometricProgress()">Cancel</button>
             </div>
@@ -362,7 +379,7 @@
                 </div>
 
                 <div class="page" id="page-quick-test-steps">
-                    <div class="validation-type-page create-recipe-step1-page quick-test-page">
+                    <div class="validation-type-page create-recipe-step1-page quick-test-page tap-steps-picker-page">
                         <h2 class="section-title">Number of steps</h2>
                         <div class="validation-type-grid create-recipe-grid" id="quick-step-cards-grid">
                             <label class="validation-type-settings-card create-recipe-card" data-quick-step="1"><input type="radio" name="quick-step-card" value="1"><h3>1</h3><p>step</p></label>
@@ -541,29 +558,15 @@
                 <div id="test-run-completion-overlay" class="modal-overlay" style="display: none;">
                     <div class="role-modal" style="max-width: 420px;">
                         <h3>Test complete</h3>
-                        <p class="section-subtitle" style="margin-bottom: 0.75rem;">After the test, enter Pass or Fail and remarks here. Reviewer or Admin verification applies when you submit to approve and open the report.</p>
-                        <div class="form-group test-run-completion-passfail-group" style="margin: 0.75rem 0;">
-                            <span class="test-run-completion-passfail-label">Outcome</span>
-                            <div class="test-run-completion-passfail-cards" role="radiogroup" aria-label="Pass or Fail">
-                                <label class="test-run-completion-card-wrap">
-                                    <input type="radio" name="test-run-completion-pass-fail" value="PASS" checked class="test-run-completion-pf-input">
-                                    <span class="test-run-completion-card">Pass</span>
-                                </label>
-                                <label class="test-run-completion-card-wrap">
-                                    <input type="radio" name="test-run-completion-pass-fail" value="FAIL" class="test-run-completion-pf-input">
-                                    <span class="test-run-completion-card">Fail</span>
-                                </label>
-                            </div>
-                        </div>
+                        <p class="section-subtitle" style="margin-bottom: 0.75rem;">Optional test remarks (approval Pass/Fail is entered by a reviewer on the report screen).</p>
                         <div class="form-group">
-                            <label for="test-run-completion-remarks">Remarks</label>
+                            <label for="test-run-completion-remarks">Test remarks</label>
                             <textarea id="test-run-completion-remarks" class="input-field" rows="3" placeholder="Remarks"
                                 onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)"></textarea>
                         </div>
                         <p id="test-run-completion-error" class="section-subtitle" style="display: none; color: #f66; margin-top: 0.5rem;"></p>
                         <div class="role-modal-buttons" style="margin-top: 14px; flex-direction: column; gap: 8px;">
-                            <button type="button" class="btn-role-select btn-role-user" onclick="confirmTestRunCompletionApproval()">Submit and open report</button>
-                            <button type="button" class="btn-role-select btn-role-cancel" onclick="skipTestRunCompletionToReport()">View report without approval</button>
+                            <button type="button" class="btn-role-select btn-role-user" onclick="confirmTestRunCompletionSaveRemarks()">Continue to report</button>
                         </div>
                     </div>
                 </div>
@@ -597,18 +600,15 @@
                     </div>
                 </div>
 
-                <!-- Create Recipe Step 1 -->
+                                <!-- Create Recipe Step 1 (layout matches Quick Test) -->
                 <div class="page" id="page-create-recipe-step1">
-                    <div class="validation-type-page create-recipe-step1-page">
-                        <h2 class="section-title">Create Recipe</h2>
-                        <div class="create-recipe-form-fields form-grid create-recipe-form-grid">
+                    <div class="validation-type-page create-recipe-step1-page quick-test-page">
+                        <div class="quick-test-form form-grid create-recipe-form-grid">
                             <div class="form-group full-width">
                                 <label for="recipe-product-name">Recipe Name</label>
                                 <input type="text" id="recipe-product-name" class="input-field" placeholder="Enter recipe name"
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                             </div>
-                        </div>
-                        <div class="create-recipe-options">
                             <div class="create-recipe-section">
                                 <h3 class="create-recipe-section-title">Procedure</h3>
                                 <div class="validation-type-grid create-recipe-grid procedure-cards-grid">
@@ -633,14 +633,12 @@
                             <div class="create-recipe-section">
                                 <h3 class="create-recipe-section-title">Tap Speed</h3>
                                 <div class="validation-type-grid create-recipe-grid create-recipe-grid--pair">
-                                    <label class="validation-type-settings-card create-recipe-card"
-                                        data-create-option="speed" data-value="300">
+                                    <label class="validation-type-settings-card create-recipe-card" data-create-option="speed" data-value="300">
                                         <input type="radio" name="create-speed" value="300">
                                         <h3 class="cylinder-volume-line"><span class="cylinder-num">300</span></h3>
                                         <p class="step1-card-sublabel">Taps/Min</p>
                                     </label>
-                                    <label class="validation-type-settings-card create-recipe-card"
-                                        data-create-option="speed" data-value="250">
+                                    <label class="validation-type-settings-card create-recipe-card" data-create-option="speed" data-value="250">
                                         <input type="radio" name="create-speed" value="250">
                                         <h3 class="cylinder-volume-line"><span class="cylinder-num">250</span></h3>
                                         <p class="step1-card-sublabel">Taps/Min</p>
@@ -648,32 +646,28 @@
                                 </div>
                             </div>
                             <div class="create-recipe-section">
-                                <h3 class="create-recipe-section-title">Height</h3>
+                                <h3 class="create-recipe-section-title">Drop Height</h3>
                                 <div class="validation-type-grid create-recipe-grid create-recipe-grid--pair">
-                                    <label class="validation-type-settings-card create-recipe-card"
-                                        data-create-option="height" data-value="3">
-                                        <input type="radio" name="create-height" value="3">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">3</span><span class="cylinder-unit">mm</span></h3>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card"
-                                        data-create-option="height" data-value="14">
+                                    <label class="validation-type-settings-card create-recipe-card" data-create-option="height" data-value="14">
                                         <input type="radio" name="create-height" value="14">
                                         <h3 class="cylinder-volume-line"><span class="cylinder-num">14</span><span class="cylinder-unit">mm</span></h3>
                                     </label>
+                                    <label class="validation-type-settings-card create-recipe-card" data-create-option="height" data-value="3">
+                                        <input type="radio" name="create-height" value="3">
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">3</span><span class="cylinder-unit">mm</span></h3>
+                                    </label>
                                 </div>
                             </div>
-                            <div id="create-custom-total-wrap" class="create-recipe-section" style="display: none;">
-                                <h3 class="create-recipe-section-title">Total taps</h3>
-                                <div class="form-group full-width">
-                                    <label for="create-custom-total-taps">Total for all steps</label>
-                                    <input type="number" id="create-custom-total-taps" class="input-field" min="1"
-                                        step="1" placeholder="e.g. 3760"
-                                        onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                                    <p class="section-subtitle" style="margin-top: 6px; font-size: 13px;">Must be at least
-                                        the number of steps (default 10). Taps are split across steps on the next
-                                        screen.</p>
-                                </div>
                             </div>
+                            <div id="create-recipe-steps-section" class="create-recipe-section" style="display: none;">
+                                <h3 class="create-recipe-section-title">Number of steps</h3>
+                                <div class="validation-type-grid create-recipe-grid create-recipe-grid--single">
+                                    <button type="button" class="validation-type-settings-card create-recipe-card quick-step-select-card"
+                                        onclick="openCreateRecipeStepsPage()">
+                                        <h3 class="cylinder-volume-line"><span class="cylinder-num" id="create-step-count-summary">10</span></h3>
+                                        <p class="step1-card-sublabel" id="create-step-count-summary-sub">Tap to select steps</p>
+                                    </button>
+                                </div>
                             </div>
                             <div class="create-recipe-section">
                                 <h3 class="create-recipe-section-title">Cylinder (Sample volume)</h3>
@@ -693,64 +687,36 @@
                                 </div>
                             </div>
                         </div>
-                        <button type="button" class="btn btn-primary validation-start-btn"
-                            id="create-recipe-continue-btn" onclick="goToCreateRecipeStepsPage()"
-                            disabled>Continue</button>
+                        <div class="quick-test-actions">
+                            <button type="button" class="btn btn-secondary" onclick="goToPage('manage-recipes')">Back</button>
+                            <button type="button" class="btn btn-primary" id="create-recipe-continue-btn" onclick="onCreateRecipeContinueClick()" disabled>Continue</button>
+                        </div>
                     </div>
                 </div>
-
-                <!-- Create Recipe Step 2 – Steps and taps -->
+                <!-- Create Recipe Step 2 – Steps and taps (same layout as Quick Test) -->
                 <div class="page" id="page-create-recipe-step2">
-                    <div class="validation-type-page create-recipe-step1-page">
-                        <div class="form-group">
-                            <label for="create-recipe-step-count">Number of steps</label>
-                            <select id="create-recipe-step-count" class="input-field" onchange="renderCreateRecipeStepInputsPage()">
-                                <option value="1">1 step</option>
-                                <option value="2">2 steps</option>
-                                <option value="3">3 steps</option>
-                                <option value="4">4 steps</option>
-                                <option value="5">5 steps</option>
-                                <option value="6">6 steps</option>
-                                <option value="7">7 steps</option>
-                                <option value="8">8 steps</option>
-                                <option value="9">9 steps</option>
-                                <option value="10" selected>10 steps</option>
-                            </select>
+                    <div class="validation-type-page create-recipe-step1-page quick-test-page tap-steps-picker-page">
+                        <h2 class="section-title">Number of steps</h2>
+                        <div class="validation-type-grid create-recipe-grid" id="create-step-cards-grid">
+                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="1"><input type="radio" name="create-step-card" value="1"><h3>1</h3><p>step</p></label>
+                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="2"><input type="radio" name="create-step-card" value="2"><h3>2</h3><p>steps</p></label>
+                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="3"><input type="radio" name="create-step-card" value="3"><h3>3</h3><p>steps</p></label>
+                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="4"><input type="radio" name="create-step-card" value="4"><h3>4</h3><p>steps</p></label>
+                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="5"><input type="radio" name="create-step-card" value="5"><h3>5</h3><p>steps</p></label>
+                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="6"><input type="radio" name="create-step-card" value="6"><h3>6</h3><p>steps</p></label>
+                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="7"><input type="radio" name="create-step-card" value="7"><h3>7</h3><p>steps</p></label>
+                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="8"><input type="radio" name="create-step-card" value="8"><h3>8</h3><p>steps</p></label>
+                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="9"><input type="radio" name="create-step-card" value="9"><h3>9</h3><p>steps</p></label>
+                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="10"><input type="radio" name="create-step-card" value="10"><h3>10</h3><p>steps</p></label>
                         </div>
-                        <div id="create-recipe-step-inputs" class="form-grid"></div>
-                        <button type="button" class="btn btn-primary validation-start-btn" onclick="goToCreateRecipeCylinderPage()">
-                            Continue
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Create Recipe Step 3 – Cylinder and save -->
-                <div class="page" id="page-create-recipe-step3">
-                    <div class="validation-type-page create-recipe-step1-page">
-                        <h2 class="section-title">Cylinder Size</h2>
-                        <p class="section-subtitle">Choose the cylinder size (50 / 100 / 250 ml).</p>
-                        <div class="validation-type-grid create-recipe-grid">
-                            <label class="validation-type-settings-card create-recipe-card"
-                                data-create-option="cylinder" data-value="50">
-                                <input type="radio" name="create-cylinder" value="50">
-                                <h3>50</h3>
-                                <p>ml</p>
-                            </label>
-                            <label class="validation-type-settings-card create-recipe-card"
-                                data-create-option="cylinder" data-value="100">
-                                <input type="radio" name="create-cylinder" value="100">
-                                <h3>100</h3>
-                                <p>ml</p>
-                            </label>
-                            <label class="validation-type-settings-card create-recipe-card"
-                                data-create-option="cylinder" data-value="250">
-                                <input type="radio" name="create-cylinder" value="250">
-                                <h3>250</h3>
-                                <p>ml</p>
-                            </label>
+                        <div class="form-group full-width" id="create-steps-taps-wrap">
+                            <label>Taps per step</label>
+                            <div id="create-step-tap-inputs" class="form-grid"></div>
                         </div>
-                        <button type="button" class="btn btn-primary validation-start-btn"
-                            onclick="completeRecipeFromStep2()">Save Recipe</button>
+                        <div class="quick-test-actions">
+                            <button type="button" class="btn btn-secondary" onclick="goToPage('create-recipe-step1')">Back</button>
+                            <button type="button" class="btn btn-primary" onclick="confirmCreateRecipeStepSetup()">Continue</button>
+                        </div>
                     </div>
                 </div>
 
@@ -954,6 +920,7 @@
                 <!-- Report Preview Page -->
                 <div class="page" id="page-report-preview">
                     <div class="reports-container" style="overflow-y: auto;">
+                        <div id="report-pending-lock-banner" class="report-pending-lock-banner" style="display: none;"><strong>Awaiting approval.</strong> A Reviewer or Admin must complete Pass/Fail and sign in the section below (User ID and password or fingerprint). You cannot leave, log out, or open Profile until the report is approved.</div>
                         <div class="report-preview-container report-print-template" id="report-content">
                             <h1>RAISE LAB EQUIPMENT</h1>
                             <h2>TAP DENSITY - TEST REPORT</h2>
@@ -1052,8 +1019,9 @@
                                 </tr>
                             </table>
                             <div id="report-approve-panel" class="report-approve-panel" style="display: none;">
-                                <h3>Test report approval</h3>
-                                <p class="section-subtitle">Reviewer or Admin: select Pass or Fail and add approval remarks.</p>
+                                <h3 id="report-approve-panel-title">Test report approval</h3>
+                                <p id="report-approve-panel-subtitle" class="section-subtitle report-approve-panel-subtitle">Reviewer or Admin: select Pass or Fail, add approval remarks, then sign with your User ID and password or fingerprint. You do not need to log in.</p>
+                                <p id="report-approve-operator-hint" class="report-approve-operator-hint" style="display: none;">You cannot approve your own report. Ask a Reviewer or Admin to sign below.</p>
                                 <div class="form-group report-approve-passfail-group">
                                     <span class="report-approve-passfail-label">Outcome</span>
                                     <div class="report-approve-passfail-cards" role="radiogroup" aria-label="Pass or Fail">
@@ -1069,9 +1037,33 @@
                                 </div>
                                 <div class="form-group full-width">
                                     <label for="report-approve-remarks-input">Approval remarks</label>
-                                    <textarea id="report-approve-remarks-input" class="input-field" rows="3" placeholder="Approval remarks"></textarea>
+                                    <textarea id="report-approve-remarks-input" class="input-field" rows="3" placeholder="Approval remarks"
+                                        onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)"></textarea>
                                 </div>
-                                <button type="button" class="btn btn-primary" onclick="submitReportApprove()">Submit approval</button>
+                                <h4 class="report-approve-signature-heading">Electronic signature (Reviewer / Admin)</h4>
+                                <p class="section-subtitle report-approve-signature-help">Approve using <strong>credentials</strong> or <strong>fingerprint</strong>. The reviewer does not need to log in; either method acts as electronic sign-off.</p>
+                                <div id="report-approve-credentials-block" class="report-approve-credentials-block">
+                                    <p class="report-approve-method-label">Option 1 — Credentials</p>
+                                    <div class="report-approve-signature-fields form-grid">
+                                        <div class="form-group full-width">
+                                            <label for="report-approve-verifier-username">Verifier User ID</label>
+                                            <input type="text" id="report-approve-verifier-username" class="input-field report-approve-verifier-field" placeholder="Reviewer or Admin User ID" autocomplete="off"
+                                                onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                        </div>
+                                        <div class="form-group full-width">
+                                            <label for="report-approve-verifier-password">Verifier password</label>
+                                            <input type="password" id="report-approve-verifier-password" class="input-field report-approve-verifier-field" placeholder="Password" autocomplete="off"
+                                                onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                        </div>
+                                    </div>
+                                    <button type="button" id="btn-report-approve-submit" class="btn btn-primary report-approve-submit-credentials" onclick="submitReportApprove()">Submit approval (credentials)</button>
+                                </div>
+                                <p class="report-approve-sign-or" aria-hidden="true">— or —</p>
+                                <div id="report-approve-biometric-wrap" class="report-approve-biometric-wrap">
+                                    <p class="report-approve-method-label">Option 2 — Fingerprint</p>
+                                    <button type="button" id="btn-report-approve-biometric" class="btn btn-secondary report-approve-submit-biometric" onclick="submitReportApproveBiometric()">Approve with fingerprint</button>
+                                </div>
+                                <p id="report-approve-verify-error" class="report-approve-verify-error" style="display: none;"></p>                                </div>
                             </div>
                         </div>
                         <div class="report-preview-actions" id="report-preview-actions">
@@ -1763,7 +1755,7 @@
                             </div>
                         </div>
                         <div class="member-biometric-instructions">
-                            Save is complete. Register the fingerprint for this user on this screen.
+                            Register this user's fingerprint using two scans of the same finger: place finger once, remove it, then place the same finger again.
                         </div>
                         <button type="button" id="member-biometric-enroll-btn" class="login-biometric-btn" onclick="enrollMemberBiometric()">
                             <div class="biometric-icon">
@@ -1935,8 +1927,8 @@
     </div>
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=2"></script>
-    <script src="rbac.js?v=2"></script>
-    <script src="script.js?v=6"></script>
+    <script src="rbac.js?v=3"></script>
+    <script src="script.js?v=24"></script>
 </body>
 
 </html>

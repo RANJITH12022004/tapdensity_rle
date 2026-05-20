@@ -1,33 +1,6 @@
 {
-  "name": "chandra",
-  "username": "AD",
-  "role": "Admin",
-  "featureOverrides": {
-    "allow": [
-      "perm_audit_view",
-      "perm_datetime",
-      "perm_export_approve",
-      "perm_export_usb",
-      "perm_profile_admin",
-      "perm_recipe_approve",
-      "perm_recipe_manage",
-      "perm_reports_view",
-      "perm_test_access",
-      "perm_test_report_approve",
-      "perm_validation_report_approve",
-      "perm_validation_test"
-    ],
-    "deny": []
-  },
-  "id": 3,
-  "status": "active",
-  "failedAttempts": 0,
-  "createdAt": "2026-05-14T16:36:19.839358Z",
-  "passwordLastChangedAt": "2026-05-14T16:38:07.856327Z",
-  "mustChangePassword": false,
-  "biometricEnabled": true,
-  "fingerprintTemplateId": null,
-  "biometricEnrolledAt": null,
-  "biometricEnrollmentStatus": "not_enrolled",
-  "permissionsVersion": 2
+  "id": -1,
+  "name": "Test (comma)",
+  "username": ",",
+  "role": "Factory"
 }

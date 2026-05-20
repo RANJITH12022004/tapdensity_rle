@@ -1,0 +1,26 @@
+
+TAP DENSITY VALIDATION REPORT
+
+Company: RAM
+Model No: THYY
+Serial No: THY
+Location: dd
+Instrument ID: qq
+Last Validation Date: 20-05-2026
+Next Validation Due: 20-08-2026
+
+Date / Time: 20/05/2026 18:21:31
+USP: USP 2
+Taps/Min: 250
+Drop Height (mm): 3
+Expected Tap Count: 250
+Actual Tap Count: 250
+Status: Pass
+
+Operated by: Test (comma)
+Employee ID: ,
+Approval Status: pending
+Approval Result: --
+Approved By: --
+Approved At: --
+Approval Remarks: 

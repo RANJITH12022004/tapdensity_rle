@@ -458,6 +458,50 @@ def log_structured_event(
         conn.close()
 
 
+
+
+def prune_power_interruption_overflow(keep: int = 50) -> int:
+    """Remove excess power-interruption rows so real audit events remain visible."""
+    if not _audit_db_path or not _audit_db_path.exists():
+        return 0
+    keep = max(1, int(keep or 50))
+    conn = _db_connect()
+    if not conn:
+        return 0
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM audit_entries WHERE action = ?",
+            ("Power interruption",),
+        ).fetchone()
+        total = int(row["c"] if row else 0)
+        if total <= keep:
+            return 0
+        with conn:
+            cur = conn.execute(
+                """
+                DELETE FROM audit_entries
+                WHERE action = ?
+                AND id NOT IN (
+                    SELECT id FROM audit_entries
+                    WHERE action = ?
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT ?
+                )
+                """,
+                ("Power interruption", "Power interruption", keep),
+            )
+        removed = cur.rowcount if cur.rowcount is not None else 0
+        try:
+            conn.execute("VACUUM")
+        except Exception:
+            pass
+        return int(removed)
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
+
 def clear_entries_before(cutoff_ms: Optional[int]) -> int:
     """Delete every audit row strictly older than cutoff_ms.
 

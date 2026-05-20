@@ -92,11 +92,10 @@ String checkAdapter()
         return "usp1,ok*";
     }
     else if (usp2Detected && !usp1Detected) {
-        // USP2 alone - treat as error
-        currentAdapter = "";
-        DEBUG.println("USP2 adapter detected - ERROR (only USP1 allowed for normal operation)");
+        currentAdapter = "usp2";
+        DEBUG.println("USP2 adapter detected");
         adapterErrorReported = false;
-        return "adapt,error*";
+        return "usp2,ok*";
     }
     else if (usp1Detected && usp2Detected) {
         // Both adapters detected - treat as USP2

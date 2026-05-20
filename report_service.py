@@ -165,6 +165,13 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
         "reportApprovalStatus": report.get("reportApprovalStatus"),
         "approvalPassFail": report.get("approvalPassFail"),
         "approvalRemarks": report.get("approvalRemarks"),
+        "operatedByUsername": report.get("operatedByUsername")
+        or (td.get("operatedByUsername") if isinstance(td, dict) else None)
+        or (td.get("employeeId") if isinstance(td, dict) else None),
+        "operatorName": report.get("operatorName")
+        or (td.get("operatorName") if isinstance(td, dict) else None),
+        "employeeId": report.get("employeeId")
+        or (td.get("employeeId") if isinstance(td, dict) else None),
     }
     if report.get("type") == "validation":
         preview["validationSubtype"] = report.get("validationSubtype")
@@ -173,6 +180,11 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
         preview["dropHeight"] = report.get("dropHeight")
         preview["expectedTapCount"] = report.get("expectedTapCount")
         preview["actualTapCount"] = report.get("actualTapCount")
+        runs = report.get("validationRuns")
+        if not runs and isinstance(td, dict):
+            runs = td.get("validationRuns")
+        if runs:
+            preview["validationRuns"] = runs
     return preview
 
 
