@@ -106,6 +106,66 @@ def _root_pkname() -> Optional[str]:
     return pathlib.Path(real).name or None
 
 
+def _internal_mount_path(env: Optional[Dict[str, str]] = None) -> str:
+    env = env if env is not None else os.environ  # type: ignore[assignment]
+    return (env.get("INTERNAL_USB_PATH") or "/media/usb_internal").strip()
+
+
+def _internal_partition_from_mount(mountpoint: str) -> Optional[str]:
+    """Block device mounted at internal path (e.g. /dev/sda1)."""
+    if not mountpoint:
+        return None
+    rc, out, _ = _run(["findmnt", "-n", "-o", "SOURCE", "--target", mountpoint])
+    if rc != 0:
+        return None
+    src = (out or "").strip().splitlines()[0] if (out or "").strip() else ""
+    if not src.startswith("/dev/"):
+        return None
+    try:
+        return os.path.realpath(src)
+    except OSError:
+        return src
+
+
+def _internal_pkname_from_env_or_mount(env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    env = env if env is not None else os.environ  # type: ignore[assignment]
+    pk = (env.get("INTERNAL_USB_PKNAME") or "").strip()
+    if pk:
+        return pk
+    part = (env.get("INTERNAL_USB_PARTITION") or "").strip()
+    if part.startswith("/dev/"):
+        rc, out, _ = _run(["lsblk", "-no", "PKNAME", part])
+        pk = (out or "").strip()
+        if pk:
+            return pk
+    mountpoint = _internal_mount_path(env)
+    internal_part = _internal_partition_from_mount(mountpoint)
+    if internal_part:
+        rc, out, _ = _run(["lsblk", "-no", "PKNAME", internal_part])
+        pk = (out or "").strip()
+        if pk:
+            return pk
+    # Default kiosk layout: internal pendrive is the first SCSI USB disk (sda).
+    return "sda"
+
+
+def _internal_partition_paths(env: Optional[Dict[str, str]] = None) -> Set[str]:
+    """Partition block paths that must never be export targets."""
+    env = env if env is not None else os.environ  # type: ignore[assignment]
+    paths: Set[str] = set()
+    explicit = (env.get("INTERNAL_USB_PARTITION") or "").strip()
+    if explicit.startswith("/dev/"):
+        paths.add(explicit)
+    mountpoint = _internal_mount_path(env)
+    auto = _internal_partition_from_mount(mountpoint)
+    if auto:
+        paths.add(auto)
+    pk = _internal_pkname_from_env_or_mount(env)
+    if pk:
+        paths.add("/dev/{}1".format(pk))  # common single-partition layout (sda1)
+    return paths
+
+
 def _internal_uuids_from_env() -> Set[str]:
     raw = (os.environ.get("INTERNAL_USB_UUIDS") or "").strip()
     if not raw:
@@ -153,11 +213,19 @@ def _internal_uuids(env: Optional[Dict[str, str]] = None) -> Set[str]:
     return uuids
 
 
-def _is_node_internal(node: Dict[str, Any], root_pk: Optional[str], internal_uuids: Set[str]) -> bool:
+def _is_node_internal(
+    node: Dict[str, Any],
+    root_pk: Optional[str],
+    internal_uuids: Set[str],
+    internal_mount_path: str,
+    internal_pkname: Optional[str],
+    internal_partitions: Set[str],
+) -> bool:
     path = node.get("path") or ""
     name = node.get("name") or ""
     pkname = (node.get("pkname") or "").strip()
     fs_uuid = (node.get("uuid") or "").strip()
+    mountpoint = (node.get("mountpoint") or "").strip()
     # Always exclude eMMC / SD card hosting OS
     if "mmcblk" in path or "mmcblk" in name:
         return True
@@ -167,6 +235,15 @@ def _is_node_internal(node: Dict[str, Any], root_pk: Optional[str], internal_uui
         # If the node itself IS the root disk
         if name == root_pk:
             return True
+    # Internal storage volume (mounted at /media/usb_internal)
+    if internal_mount_path and mountpoint == internal_mount_path:
+        return True
+    if path and path in internal_partitions:
+        return True
+    if internal_pkname and pkname == internal_pkname:
+        return True
+    if internal_pkname and name == internal_pkname:
+        return True
     if fs_uuid and fs_uuid in internal_uuids:
         return True
     return False
@@ -181,6 +258,9 @@ def list_external_pendrives() -> List[Dict[str, Any]]:
     flat = _lsblk_tree()
     root_pk = _root_pkname()
     internal_uuids = _internal_uuids()
+    internal_mount_path = _internal_mount_path()
+    internal_pkname = _internal_pkname_from_env_or_mount()
+    internal_partitions = _internal_partition_paths()
     out: List[Dict[str, Any]] = []
     for node in flat:
         node_type = (node.get("type") or "").lower()
@@ -192,7 +272,10 @@ def list_external_pendrives() -> List[Dict[str, Any]]:
         path = node.get("path") or ""
         if not _is_export_block_path(path):
             continue
-        if _is_node_internal(node, root_pk, internal_uuids):
+        if _is_node_internal(
+            node, root_pk, internal_uuids,
+            internal_mount_path, internal_pkname, internal_partitions,
+        ):
             continue
         fs_type = (node.get("fstype") or "").strip().lower()
         if not fs_type or fs_type in ("swap", "linux_raid_member"):
@@ -266,7 +349,29 @@ def ensure_pendrive_mounted(device_path: str, timeout_sec: float = 20.0) -> Dict
         mp = _udisksctl_mountpoint_of(device_path)
         if mp:
             return {"ok": True, "mountpoint": mp, "already_mounted": True}
-    return {"ok": False, "error": text or ("udisksctl rc=%s" % rc)}
+    # Fallback: direct mount(8) when udisks/polkit is unavailable (e.g. headless edge cases).
+    parent = pathlib.Path("/media") / os.environ.get("USER", "rle")
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    label = ""
+    rc_id, uuid_out, _ = _run(["blkid", "-o", "value", "-s", "UUID", device_path])
+    if rc_id == 0:
+        label = (uuid_out or "").strip()
+    mount_dir = parent / (label or pathlib.Path(device_path).name)
+    try:
+        mount_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"ok": False, "error": text or ("udisksctl rc=%s" % rc), "mkdir_error": str(e)}
+    rc_m, out_m, err_m = _run(
+        ["mount", "-t", "auto", "-o", "rw,uid=1000,gid=1000,umask=0000", device_path, str(mount_dir)],
+        timeout=timeout_sec,
+    )
+    if rc_m == 0:
+        mp = _udisksctl_mountpoint_of(device_path) or str(mount_dir)
+        return {"ok": True, "mountpoint": mp, "already_mounted": False, "mount_method": "mount"}
+    return {"ok": False, "error": text or ("udisksctl rc=%s" % rc), "mount_fallback": (out_m + err_m).strip()}
 
 
 def _disk_parent_device(part_device: str) -> Optional[str]:

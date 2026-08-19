@@ -1,0 +1,16 @@
+.git.corrupt/
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env
+*.db
+*.db.bak*
+*.log
+reports/*.pdf
+reports/*_a4.txt
+reports/*_thermal.txt
+storage/
+export/
+db/
+uart_communications.log

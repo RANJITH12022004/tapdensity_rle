@@ -1,23 +1,31 @@
 [Unit]
-Description=Tablet Hardness Tester kiosk API (Flask)
-After=network.target local-fs.target
-Wants=network.target
+Description=Tap Density kiosk API (Flask app.py)
+After=local-fs.target
+Wants=local-fs.target
 
 [Service]
 Type=simple
 User=rle
 Group=rle
 Environment=PYTHONUNBUFFERED=1
+Environment=INTERNAL_USB_PATH=/media/usb_internal
+Environment=INTERNAL_USB_PKNAME=sda
+Environment=INTERNAL_USB_PARTITION=/dev/sda1
+# STORAGE_DIR / REPORTS_DIR / AUDIT_DB_DIR are set by run_kiosk_app.sh at launch:
+# USB if mounted, SD-card fallback (/opt/kiosk/storage) if USB is absent or read-only.
 WorkingDirectory=/opt/kiosk
 
-# Free stale listeners on Flask port before bind (Harmless if nothing holds the port.)
-ExecStartPre=/opt/kiosk/scripts/kiosk_pre_start_port.sh
+ExecStartPre=/bin/bash /opt/kiosk/scripts/kiosk_harden_permissions.sh
+ExecStartPre=/bin/bash /opt/kiosk/scripts/kiosk_mount_internal_usb.sh
+ExecStartPre=/bin/bash /opt/kiosk/scripts/kiosk_pre_start_port.sh
+ExecStartPre=/bin/bash /opt/kiosk/scripts/kiosk_rtc_boot.sh
 
-ExecStart=/opt/kiosk/run_hardness_bridge.sh
+ExecStart=/bin/bash /opt/kiosk/run_kiosk_app.sh
 Restart=always
 RestartSec=3
+TimeoutStopSec=5
+KillMode=mixed
 
-# Logs (rle-owned path; avoids permission issues with /var/log)
 StandardOutput=append:/home/rle/kiosk_bridge.log
 StandardError=append:/home/rle/kiosk_bridge.log
 

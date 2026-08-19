@@ -1,8 +1,8 @@
 /**
  * rbac.js - Role-Based Access Control for Tap Density
  *
- * Non-Factory users: capability is driven only by permission cards stored in
- * featureOverrides.allow (whitelist). Role no longer grants implicit feature access.
+ * Non-Factory users (including Admin): capability is driven only by permission cards
+ * stored in featureOverrides.allow. Role name does not grant feature access.
  * Factory / RLERLT: full access except factory-only routes handled separately.
  */
 
@@ -10,7 +10,6 @@ var ROLE_RESTRICTIONS = {
   admin: {
     'factory-settings': 'no-access',
     'factory-reset': 'no-access',
-    'disable-recipes': 'full-access',
   },
   supervisor: {
     'user-manage': 'view-only',
@@ -65,9 +64,9 @@ var PERMISSION_CARD_KEYS = [
  * Internal keys are unique strings (screen map, action checks, or explicit gates).
  */
 var PERM_CARD_EXPAND = {
-  perm_test_access: ['quick-test', 'recipe-list', 'recipe-test', 'recipe-edit'],
+  perm_test_access: ['quick-test', 'recipe-test'],
   perm_test_report_approve: ['test-report-approve'],
-  perm_recipe_manage: ['recipe-list', 'recipe-edit', 'settings'],
+  perm_recipe_manage: ['recipe-manage', 'recipe-list', 'recipe-edit', 'settings'],
   perm_recipe_approve: ['recipe-approve'],
   perm_profile_admin: [
     'user-manage',
@@ -97,7 +96,7 @@ var PERMISSION_CARD_CATALOG = [
   { key: 'perm_validation_report_approve', label: 'Validation report approval', description: 'Approve pending validation reports.', accent: 6 },
   { key: 'perm_datetime', label: 'Edit date and time', description: 'Change system date, time, and RTC.', accent: 7 },
   { key: 'perm_reports_view', label: 'View and print reports', description: 'Open, preview, and print reports.', accent: 8 },
-  { key: 'perm_audit_view', label: 'View and print audit trails', description: 'View audit log and print audit trails (does not include test/validation reports list).', accent: 9 },
+  { key: 'perm_audit_view', label: 'View and export audit trails', description: 'View audit log and export audit trails to USB (does not include test/validation reports list).', accent: 9 },
   { key: 'perm_export_usb', label: 'Export reports and audit (USB)', description: 'Export to USB (requires report or audit access for the data being exported).', accent: 10 },
   { key: 'perm_export_approve', label: 'Export approval', description: 'Verify another user’s USB export (secondary approval).', accent: 11 },
 ];
@@ -106,6 +105,7 @@ var PERMISSION_CARD_CATALOG = [
 var LEGACY_INTERNAL_KEYS = [
   'quick-test',
   'recipe-list',
+  'recipe-manage',
   'recipe-edit',
   'recipe-delete',
   'reports-view',
@@ -131,7 +131,7 @@ var SCREEN_FEATURE_MAP = {
   'quick-test': 'quick-test',
   'quick-test-steps': 'quick-test',
   'test-run': 'recipe-test',
-  'manage-recipes': 'recipe-list',
+  'manage-recipes': 'recipe-manage',
   'create-recipe-step1': 'recipe-edit',
   'create-recipe-step2': 'recipe-edit',
   'create-recipe-step3': 'recipe-edit',
@@ -150,6 +150,8 @@ var SCREEN_FEATURE_MAP = {
   'distance-zero-calibration': 'calibration-menu',
   settings: 'settings',
   'factory-settings': 'factory-settings',
+  'ip-config': 'settings',
+  'ip-configure': 'settings',
   datetime: 'edit-datetime',
   'user-profile': 'profile',
   'manage-members': 'user-manage',
@@ -163,6 +165,7 @@ var SCREEN_FEATURE_MAP = {
 
 var ACTION_FEATURE_MAP = {
   'add-member': 'user-add',
+  'edit-member': 'user-manage',
   'delete-member': 'user-delete',
   'unlock-member': 'user-unlock',
   'enable-member': 'user-enable',
@@ -305,8 +308,12 @@ function getEffectiveRestriction(roleOrUser, featureKey) {
   }
 
   var expanded = getExpandedInternalKeysForUser(userObj);
-  if (expanded.indexOf(featureKey) !== -1) return 'full-access';
-  return 'no-access';
+  if (expanded.indexOf(featureKey) === -1) return 'no-access';
+
+  var roleCap = getRestriction(role, featureKey);
+  if (roleCap === 'no-access') return 'no-access';
+  if (roleCap === 'view-only') return 'view-only';
+  return 'full-access';
 }
 
 function canAccess(roleOrUser, featureKey) {
@@ -333,5 +340,9 @@ function checkNavigationAccess(screenId) {
   var role = getCurrentRole();
   if (!role) return false;
   var featureKey = SCREEN_FEATURE_MAP[screenId] || screenId;
+  if (screenId === 'manage-recipes') {
+    var mode = (typeof window !== 'undefined' && window.recipeListMode) ? window.recipeListMode : 'manage';
+    featureKey = mode === 'load' ? 'recipe-test' : 'recipe-manage';
+  }
   return canAccess(window.currentUser || role, featureKey);
 }

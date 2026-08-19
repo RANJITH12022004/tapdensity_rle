@@ -1,0 +1,2 @@
+# Allow kiosk user to reload RealVNC after X starts (installed to /etc/sudoers.d/kiosk-vnc).
+rle ALL=(root) NOPASSWD: /usr/bin/vncserver-x11 -service -reload

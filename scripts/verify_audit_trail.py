@@ -16,10 +16,17 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_ROOT))
 
 BASE = os.environ.get("KIOSK_API_BASE", "http://127.0.0.1:5000")
-TEST_USER = os.environ.get("AUDIT_TEST_USER", "Test@123")
-TEST_PASS = os.environ.get("AUDIT_TEST_PASS", "Test@1234")
+TEST_USER = os.environ.get("AUDIT_TEST_USER", "ADMIN")
+TEST_PASS = os.environ.get("AUDIT_TEST_PASS", "Rle@1234")
+WRONG_PASS_USER = os.environ.get("AUDIT_WRONG_PASS_USER", "USER")
+WRONG_PASS = os.environ.get("AUDIT_WRONG_PASS", "wrong-password-smoke")
 FACTORY_USER = "RLERLT"
 FACTORY_PASS = os.environ.get("FACTORY_PASS", "Rahul")
+ADMIN_USER = os.environ.get("SMOKE_ADMIN_USER", "ADMIN")
+ADMIN_PASS = os.environ.get("SMOKE_ADMIN_PASS", "Rle@1234")
+STORAGE_DIR = Path(os.environ.get("STORAGE_DIR", "/media/usb_internal/storage"))
+REPORTS_DIR = Path(os.environ.get("REPORTS_DIR", "/media/usb_internal/reports"))
+AUDIT_DB_DIR = Path(os.environ.get("AUDIT_DB_DIR", "/media/usb_internal/db"))
 
 # Actions exercised in this run (simulates UI button flows via audit-log/event + server routes)
 EXPECTED_ACTIONS = [
@@ -32,8 +39,8 @@ EXPECTED_ACTIONS = [
     "Test finished",
     "Test aborted",
     "Test auto-aborted",
-    "USP 1 adapter error",
-    "USP 2 adapter error",
+    "holder error",
+    "check adaptor and holder",
     "Opened Load Recipe",
     "Loaded recipe",
     "Validation started",
@@ -43,6 +50,12 @@ EXPECTED_ACTIONS = [
     "Logout",
     "Logout (inactivity timeout)",
     "Power interruption",
+    "Power interruption logout",
+    "Report aborted (power loss)",
+    "User disabled",
+    "User enabled",
+    "User unlocked",
+    "Desktop login",
     "Test performed",
     "Adapter check error",
 ]
@@ -107,10 +120,20 @@ class Client:
         data = r.json()
         if not data.get("success") and "user" not in data:
             raise RuntimeError(f"login failed: {data}")
-        return data.get("user") or data
+        user = data.get("user") or data
+        if isinstance(user, dict):
+            role = user.get("role")
+            if role:
+                self._headers["X-User-Role"] = str(role)
+            if user.get("username"):
+                self._headers["X-User-Username"] = str(user["username"])
+            if user.get("name"):
+                self._headers["X-User-Name"] = str(user["name"])
+        return user
 
     def logout(self, reason: str = "user") -> None:
         self._request("POST", "/api/data/auth/logout", {"reason": reason})
+        self._headers = {"Content-Type": "application/json"}
 
     def audit_event(self, action: str, details: str = "", **extra) -> _Resp:
         body = {
@@ -185,7 +208,7 @@ def simulate_ui_flow(c: Client, res: RunResult) -> None:
     c.audit_event("Test aborted", "User aborted test run", eventType="lifecycle")
     c.audit_event("Test auto-aborted", "Adapter removed during test run", outcome="failed", extra={"stepIndex": 2})
     c.audit_event(
-        "USP 1 adapter error",
+        "holder error",
         "Adapter check failed for test run",
         outcome="failed",
         entityType="hardware",
@@ -197,7 +220,7 @@ def simulate_ui_flow(c: Client, res: RunResult) -> None:
     c.audit_event("Validation finished", "USP 1 validation: Pass", entityType="validation", extra={"status": "Pass"})
     c.audit_event("Validation aborted", "USP 1 validation aborted by user", entityType="validation")
     c.audit_event(
-        "USP 2 adapter error",
+        "check adaptor and holder",
         "Adapter check failed for USP 2 validation",
         outcome="failed",
         entityType="hardware",
@@ -257,7 +280,11 @@ def verify_logout_variants(c: Client, res: RunResult, since_ms: int) -> None:
         import audit_service
 
         audit_service.init(
-            {"STORAGE_DIR": APP_ROOT / "storage", "REPORTS_DIR": APP_ROOT / "reports"}
+            {
+                "STORAGE_DIR": str(STORAGE_DIR),
+                "REPORTS_DIR": str(REPORTS_DIR),
+                "AUDIT_DB_DIR": str(AUDIT_DB_DIR),
+            }
         )
         recent = {
             str(e.get("action") or "").strip()
@@ -275,11 +302,16 @@ def verify_power_interruption(res: RunResult, since_ms: int) -> None:
     import data_service
     import audit_service
 
-    config = {"STORAGE_DIR": APP_ROOT / "storage", "REPORTS_DIR": APP_ROOT / "reports"}
+    config = {
+        "STORAGE_DIR": str(STORAGE_DIR),
+        "REPORTS_DIR": str(REPORTS_DIR),
+        "AUDIT_DB_DIR": str(AUDIT_DB_DIR),
+        "APP_ROOT": str(APP_ROOT),
+    }
     data_service.init(config)
     audit_service.init(config)
 
-    flag = APP_ROOT / "storage" / "app_clean_stop.flag"
+    flag = STORAGE_DIR / "app_clean_stop.flag"
     if flag.exists():
         flag.unlink()
 
@@ -295,12 +327,117 @@ def verify_power_interruption(res: RunResult, since_ms: int) -> None:
     pi = [e for e in entries if e.get("action") == "Power interruption"]
     if pi:
         res.ok(f"Power interruption logged ({len(pi)} row(s))")
-        if "kiosk-bridge" in (pi[-1].get("details") or "").lower() or "restarted" in (pi[-1].get("details") or "").lower():
-            res.ok("Power interruption details mention restart/shutdown")
-        else:
-            res.note_warn("Power interruption row present but details lack restart wording")
     else:
         res.fail("Power interruption not logged after simulated unclean startup")
+    pil = [e for e in entries if e.get("action") == "Power interruption logout"]
+    if pil:
+        res.ok(f"Power interruption logout logged ({len(pil)} row(s))")
+    else:
+        res.fail("Power interruption logout not logged after simulated unclean startup")
+
+
+def _unlock_member(c: Client, username: str) -> bool:
+    r = c._request("GET", "/api/data/members")
+    if r.status_code != 200:
+        return False
+    members = (r.json() or {}).get("members") or []
+    for m in members:
+        if str(m.get("username") or "").upper() == username.upper():
+            mid = m.get("id")
+            if mid is None:
+                return False
+            if str(m.get("status") or "").lower() == "locked":
+                c._request("POST", f"/api/data/members/{mid}/unlock", {})
+            if str(m.get("status") or "").lower() == "disabled":
+                c._request("POST", f"/api/data/members/{mid}/enable", {})
+            return True
+    return False
+
+
+def verify_wrong_password_audit(c: Client, res: RunResult, since_ms: int) -> None:
+    """Three failed logins should produce attempt 1/3, 2/3, 3/3 audit rows."""
+    target = WRONG_PASS_USER
+    try:
+        c.login(FACTORY_USER, FACTORY_PASS)
+        _unlock_member(c, target)
+        _unlock_member(c, ADMIN_USER)
+        c.logout("user")
+    except Exception as exc:
+        res.note_warn(f"factory prep for wrong-password test: {exc}")
+    # Ensure target is active before lockout test
+    prep = c._request("POST", "/api/data/auth/login", {"username": target, "password": TEST_PASS})
+    if prep.status_code == 403 and "locked" in str((prep.json() or {}).get("error", "")).lower():
+        try:
+            c.login(FACTORY_USER, FACTORY_PASS)
+            _unlock_member(c, target)
+            c.logout("user")
+        except Exception:
+            pass
+    for _ in range(3):
+        r = c._request("POST", "/api/data/auth/login", {"username": target, "password": WRONG_PASS})
+        if r.status_code == 200:
+            res.fail("wrong password unexpectedly succeeded")
+            return
+    time.sleep(0.3)
+    try:
+        c.login(FACTORY_USER, FACTORY_PASS)
+    except Exception as exc:
+        res.fail(f"factory login to read audit after wrong-password test: {exc}")
+        return
+    entries = entries_since(c.audit_log(), since_ms)
+    details = [str(e.get("details") or "") for e in entries if e.get("action") == "Login"]
+    joined = " | ".join(details)
+    for needle in ("attempt 1/3", "attempt 2/3", "attempt 3/3"):
+        if needle not in joined:
+            res.fail(f"missing login audit detail '{needle}' in recent Login rows")
+            return
+    res.ok("wrong-password audit shows attempt 1/3, 2/3, 3/3")
+    try:
+        c.login(FACTORY_USER, FACTORY_PASS)
+        if _unlock_member(c, target):
+            res.ok(f"unlocked {target} after wrong-password smoke")
+        _unlock_member(c, ADMIN_USER)
+        c.logout("user")
+    except Exception as exc:
+        res.note_warn(f"could not unlock after wrong-password test: {exc}")
+
+
+def verify_user_disabled_audit(c: Client, res: RunResult, since_ms: int) -> None:
+    try:
+        c.login(FACTORY_USER, FACTORY_PASS)
+        _unlock_member(c, ADMIN_USER)
+        c.logout("user")
+    except Exception as exc:
+        res.note_warn(f"factory unlock admin before disable test: {exc}")
+    try:
+        c.login(ADMIN_USER, ADMIN_PASS)
+    except Exception as exc:
+        res.fail(f"admin login for disable test: {exc}")
+        return
+    r = c._request("GET", "/api/data/members")
+    members = ((r.json() or {}).get("members") or []) if r.status_code == 200 else []
+    target = next((m for m in members if str(m.get("username") or "").upper() == "USER"), None)
+    if not target:
+        res.note_warn("USER not found — skip User disabled audit check")
+        c.logout("user")
+        return
+    mid = int(target["id"])
+    if str(target.get("status") or "").lower() == "disabled":
+        c._request("POST", f"/api/data/members/{mid}/enable", {})
+        time.sleep(0.2)
+    dr = c._request("DELETE", f"/api/data/members/{mid}")
+    if dr.status_code >= 400:
+        res.note_warn(f"disable USER failed HTTP {dr.status_code}: {dr.json()}")
+        c.logout("user")
+        return
+    time.sleep(0.3)
+    entries = actions_in(entries_since(c.audit_log(), since_ms, ADMIN_USER))
+    if "User disabled" in entries:
+        res.ok("User disabled audit recorded")
+    else:
+        res.fail("User disabled audit missing after DELETE member")
+    c._request("POST", f"/api/data/members/{mid}/enable", {})
+    c.logout("user")
 
 
 def verify_hardware_routes(c: Client, res: RunResult, since_ms: int) -> None:
@@ -310,7 +447,7 @@ def verify_hardware_routes(c: Client, res: RunResult, since_ms: int) -> None:
     for mode in ("usp1", "usp2"):
         r = c.validation_start(mode)
         if r.status_code == 400 and (r.json() or {}).get("error") == "adapter_mismatch":
-            action = "USP 1 adapter error" if mode == "usp1" else "USP 2 adapter error"
+            action = "holder error" if mode == "usp1" else "check adaptor and holder"
             res.ok(f"validation/load/start mode={mode} → adapter_mismatch (400)")
         elif r.status_code == 200:
             res.note_warn(f"validation/load/start mode={mode} succeeded (adapter matched hardware)")
@@ -319,8 +456,8 @@ def verify_hardware_routes(c: Client, res: RunResult, since_ms: int) -> None:
             res.note_warn(f"validation/load/start mode={mode} → HTTP {r.status_code}: {(r.json() or {}).get('error')}")
     time.sleep(0.3)
     entries = actions_in(entries_since(c.audit_log(), since_ms, TEST_USER))
-    if "USP 1 adapter error" in entries or "USP 2 adapter error" in entries:
-        res.ok("Server-side USP adapter error action in audit log")
+    if "holder error" in entries or "check adaptor and holder" in entries:
+        res.ok("Server-side adapter/holder error action in audit log")
     else:
         res.note_warn("No USP adapter error from hardware (adapter may match device)")
 
@@ -361,7 +498,11 @@ def verify_pdf_html(res: RunResult, since_ms: int) -> None:
     import data_service
     from app import _build_audit_trail_html
 
-    config = {"STORAGE_DIR": APP_ROOT / "storage", "REPORTS_DIR": APP_ROOT / "reports"}
+    config = {
+        "STORAGE_DIR": str(STORAGE_DIR),
+        "REPORTS_DIR": str(REPORTS_DIR),
+        "AUDIT_DB_DIR": str(AUDIT_DB_DIR),
+    }
     data_service.init(config)
     audit_service.init(config)
     entries = audit_service.list_entries({"from": since_ms})
@@ -401,6 +542,12 @@ def main() -> int:
     verify_report_audit(c, res, since_ms)
     verify_logout_variants(c, res, since_ms)
     verify_hardware_routes(c, res, since_ms)
+
+    wrong_since = ts_ms() - 1000
+    verify_wrong_password_audit(c, res, wrong_since)
+
+    disable_since = ts_ms() - 1000
+    verify_user_disabled_audit(c, res, disable_since)
 
     factory_since = ts_ms() - 1000
     verify_factory_suppression(c, res, factory_since)

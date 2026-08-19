@@ -1,0 +1,3 @@
+# Tap Density kiosk: RealVNC shares the Chromium X session on :0.
+# Installed to /etc/vnc/config.custom by install_kiosk_system.sh
+display=:0

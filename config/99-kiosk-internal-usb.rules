@@ -1,0 +1,2 @@
+# Remount internal kiosk USB when the pendrive is plugged in after boot.
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_FS_UUID}=="D444-057C", TAG+="systemd", ENV{SYSTEMD_WANTS}="kiosk-internal-usb-mount.service"

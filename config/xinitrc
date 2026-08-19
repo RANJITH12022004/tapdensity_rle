@@ -1,0 +1,28 @@
+#!/bin/bash
+# Managed by /opt/kiosk/scripts/install_kiosk_system.sh — do not edit on device; edit this template.
+
+# Ensure HDMI shows this VT once X is starting.
+if command -v chvt >/dev/null 2>&1; then
+  chvt 2 2>/dev/null || true
+fi
+
+xset -dpms 2>/dev/null || true
+xset s off 2>/dev/null || true
+xset s noblank 2>/dev/null || true
+
+command -v unclutter >/dev/null 2>&1 && unclutter -idle 0 -root &
+
+# RealVNC: share this X session with remote viewers.
+if [ -x /opt/kiosk/scripts/kiosk_vnc_configure.sh ]; then
+  /bin/bash /opt/kiosk/scripts/kiosk_vnc_configure.sh &
+fi
+
+KIOSK_URL="${KIOSK_URL:-http://127.0.0.1:5000/}"
+for _ in $(seq 1 60); do
+  if curl -sf --connect-timeout 1 "${KIOSK_URL}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+
+exec /bin/bash /opt/kiosk/scripts/launch_chromium_kiosk.sh

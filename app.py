@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ #!/usr/bin/env python3
 """
 app.py - Flask application for Tap Density
 Serves static files and REST API for data, auth, audit, reports, and print.
@@ -7,6 +7,7 @@ Serves static files and REST API for data, auth, audit, reports, and print.
 import json
 import os
 import pathlib
+import re
 import secrets
 import atexit
 import signal
@@ -14,13 +15,22 @@ import subprocess
 import sys
 import time
 import threading
-from datetime import datetime
-from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
+import tempfile
+import zipfile
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+from functools import wraps
+from flask import Flask, after_this_request, jsonify, request, send_file, send_from_directory, Response, stream_with_context
 
 try:
     from flask_cors import CORS
 except ImportError:
     CORS = None
+
+try:
+    from flask_sock import Sock
+except ImportError:
+    Sock = None
 
 import data_service
 import rbac_service
@@ -32,13 +42,45 @@ import hardware_service
 import biometric_service
 import rtc_service
 import usb_export
+import network_service
 import pdf_generator
 
 # ======================= CONFIG ==========================
 
 APP_ROOT = pathlib.Path(os.environ.get("APP_ROOT", os.path.dirname(os.path.abspath(__file__))))
-STORAGE_DIR = pathlib.Path(os.environ.get("STORAGE_DIR", str(APP_ROOT / "storage")))
-REPORTS_DIR = pathlib.Path(os.environ.get("REPORTS_DIR", str(APP_ROOT / "reports")))
+INTERNAL_USB_PATH = pathlib.Path(os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal"))
+
+
+def _default_storage_dir() -> pathlib.Path:
+    """Prefer internal USB (sda1 at /media/usb_internal) when mounted; else APP_ROOT/storage."""
+    if os.environ.get("STORAGE_DIR"):
+        return pathlib.Path(os.environ["STORAGE_DIR"])
+    if INTERNAL_USB_PATH.is_dir():
+        return INTERNAL_USB_PATH / "storage"
+    return APP_ROOT / "storage"
+
+
+def _default_reports_dir() -> pathlib.Path:
+    """Prefer internal USB when mounted; else APP_ROOT/reports."""
+    if os.environ.get("REPORTS_DIR"):
+        return pathlib.Path(os.environ["REPORTS_DIR"])
+    if INTERNAL_USB_PATH.is_dir():
+        return INTERNAL_USB_PATH / "reports"
+    return APP_ROOT / "reports"
+
+
+def _default_audit_db_dir() -> pathlib.Path:
+    """Audit SQLite DB: sibling of storage/ on internal USB, else APP_ROOT/db."""
+    if os.environ.get("AUDIT_DB_DIR"):
+        return pathlib.Path(os.environ["AUDIT_DB_DIR"])
+    if INTERNAL_USB_PATH.is_dir():
+        return INTERNAL_USB_PATH / "db"
+    return APP_ROOT / "db"
+
+
+STORAGE_DIR = _default_storage_dir()
+REPORTS_DIR = _default_reports_dir()
+AUDIT_DB_DIR = _default_audit_db_dir()
 EXPORT_USB_PATH = os.environ.get("EXPORT_USB_PATH", str(APP_ROOT / "export"))
 ESP_PORT = os.environ.get("ESP_PORT", "/dev/serial0")
 ESP_BAUD = int(os.environ.get("ESP_BAUD", "9600"))
@@ -51,22 +93,27 @@ FLASK_PORT = int(os.environ.get("FLASK_PORT", "5000"))
 EXPORT_SUBFOLDER = "TapDensity-Reports-Exported"
 DATETIME_STORAGE = STORAGE_DIR / "datetime.json"
 APPROVAL_VERIFY_TTL_SECONDS = int(os.environ.get("APPROVAL_VERIFY_TTL_SECONDS", "180"))
+AUDIT_EXPORT_PURGE_CHECK_SECONDS = int(os.environ.get("AUDIT_EXPORT_PURGE_CHECK_SECONDS", "60"))
 
 # ==========================================================
 
 app = Flask(__name__)
 if CORS:
     CORS(app)
+sock = Sock(app) if Sock else None
 
 try:
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    AUDIT_DB_DIR.mkdir(parents=True, exist_ok=True)
 except Exception:
     pass
 
 config = {
+    "APP_ROOT": str(APP_ROOT),
     "STORAGE_DIR": STORAGE_DIR,
     "REPORTS_DIR": REPORTS_DIR,
+    "AUDIT_DB_DIR": AUDIT_DB_DIR,
     "A4_PORT": os.environ.get("A4_PORT", "/dev/ttyAMA4"),
     "A4_BAUD": int(os.environ.get("A4_BAUD", "9600")),
     "THERMAL_PORT": os.environ.get("THERMAL_PORT", "/dev/ttyAMA3"),
@@ -92,6 +139,17 @@ _enroll_sessions_lock = threading.Lock()
 biometric_service.init(app, config)
 rtc_service.init(app.logger)
 rtc_service.schedule_rtc_startup_sync()
+
+import logging as _logging
+
+_cfg_log = _logging.getLogger(__name__)
+_cfg_log.info(
+    "[CONFIG] INTERNAL_USB_PATH=%s STORAGE_DIR=%s REPORTS_DIR=%s AUDIT_DB_DIR=%s",
+    INTERNAL_USB_PATH,
+    STORAGE_DIR,
+    REPORTS_DIR,
+    AUDIT_DB_DIR,
+)
 
 
 def _audit(user, role, action, details=""):
@@ -173,6 +231,35 @@ def _changed_fields(before_obj, after_obj):
     return changed
 
 
+def _audit_member_permissions_if_changed(before_member, after_member, *, member_id, signature):
+    """Log a dedicated audit row when permission cards and/or role change."""
+    payload = rbac_service.build_permission_change_audit(
+        before_member,
+        after_member,
+        target_username=str(
+            (after_member or {}).get("username") or (after_member or {}).get("name") or ""
+        ).strip(),
+    )
+    if not payload:
+        return
+    uname = str(
+        (after_member or {}).get("username") or (after_member or {}).get("name") or ""
+    ).strip()
+    _audit_event(
+        action="User permissions updated",
+        outcome="success",
+        entity_type="member",
+        entity_id=member_id,
+        entity_name=uname,
+        details=payload.get("details") or "User permissions updated",
+        target_user=uname,
+        before=payload.get("before"),
+        after=payload.get("after"),
+        signature=signature,
+        extra=payload.get("extra"),
+    )
+
+
 def _audit_event(
     *,
     action,
@@ -223,87 +310,628 @@ def _audit_event(
 
 
 
-def _abort_pending_reports_after_power_loss(session_username):
-    """Mark in-progress pending reports as aborted after unclean shutdown (power loss)."""
-    un = _norm_username(session_username)
-    if not un:
-        return 0
+def _disabled_login_audit_details(member, username):
+    member = member or {}
+    attempted_username = str(member.get("username") or username or "").strip() or "--"
+    attempted_name = str(member.get("name") or "").strip() or "--"
+    return "Disabled account {} ({}) tried to log in".format(attempted_username, attempted_name)
+
+
+def _locked_login_audit_details(member, username):
+    member = member or {}
+    attempted_username = str(member.get("username") or username or "").strip() or "--"
+    attempted_name = str(member.get("name") or "").strip() or "--"
+    return "Locked account {} ({}) tried to log in".format(attempted_username, attempted_name)
+
+
+def _wrong_password_audit_details(member, username, attempt, maximum):
+    member = member or {}
+    attempted_username = str(member.get("username") or username or "").strip() or "--"
+    attempted_name = str(member.get("name") or "").strip() or "--"
+    detail = "User {} ({}) entered the wrong password - attempt {}/{}".format(
+        attempted_username,
+        attempted_name,
+        attempt,
+        maximum,
+    )
+    if int(attempt) >= int(maximum):
+        detail += "; account locked"
+    return detail
+
+
+def _member_status_change_audit_detail(verb_past, target_member, actor):
+    """Human-readable audit line for enable/disable/unlock."""
+    target_name = str((target_member or {}).get("name") or "").strip() or "--"
+    target_username = str((target_member or {}).get("username") or "").strip() or "--"
+    actor_name = str((actor or {}).get("name") or (actor or {}).get("user") or "").strip() or "--"
+    actor_username = str((actor or {}).get("user") or (actor or {}).get("name") or "").strip() or "--"
+    verb_past = str(verb_past or "updated").strip().lower()
+    return "Member {}: {} ({}) | {} by: {} ({})".format(
+        verb_past,
+        target_name,
+        target_username,
+        verb_past.capitalize(),
+        actor_name,
+        actor_username,
+    )
+
+
+POWER_INTERRUPTION_REMARKS = "Auto-Approved – Power Failure"
+
+
+def _parse_report_dt(raw):
+    """Parse ISO-ish timestamps from reports/checkpoints into datetime (best-effort)."""
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _format_duration_hms(seconds) -> str:
+    try:
+        total = max(0, int(seconds))
+    except (TypeError, ValueError):
+        return "00:00:00"
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return "{:02d}:{:02d}:{:02d}".format(h, m, s)
+
+
+def _power_loss_end_iso(checkpoint: dict = None, report: dict = None) -> str:
+    """Last known live test time: checkpoint stamp beats post-boot wall clock."""
+    cp = checkpoint if isinstance(checkpoint, dict) else {}
+    rp = report if isinstance(report, dict) else {}
+    td = rp.get("testData") if isinstance(rp.get("testData"), dict) else {}
+    cp_td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+    for raw in (
+        cp.get("_checkpointAt"),
+        cp.get("testEndTime"),
+        cp_td.get("testEndTime"),
+        cp.get("_espCommandSentAt"),
+        td.get("testEndTime"),
+        rp.get("testEndTime"),
+        rp.get("completedAt"),
+    ):
+        if raw:
+            return str(raw).strip()
+    return _utc_now_iso()
+
+
+def _read_duration_seconds_candidate(*dicts) -> Optional[int]:
+    for d in dicts:
+        if not isinstance(d, dict):
+            continue
+        for key in ("durationSeconds", "elapsedSeconds", "durationSec"):
+            raw = d.get(key)
+            if raw is None:
+                continue
+            try:
+                return max(0, int(raw))
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _apply_power_loss_duration(report: dict, checkpoint: dict = None) -> dict:
+    """Stamp exact duration of the test that ran before power loss onto the report."""
+    report = dict(report or {})
+    td = report.get("testData")
+    td = dict(td) if isinstance(td, dict) else {}
+    cp = checkpoint if isinstance(checkpoint, dict) else {}
+    cp_td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+
+    elapsed = _read_duration_seconds_candidate(cp, cp_td, td, report)
+
+    start_raw = (
+        cp.get("testStartTime")
+        or cp_td.get("testStartTime")
+        or td.get("testStartTime")
+        or report.get("testStartTime")
+    )
+    end_raw = _power_loss_end_iso(cp, report)
+    start_dt = _parse_report_dt(start_raw)
+    end_dt = _parse_report_dt(end_raw)
+
+    duration = None
+    if start_dt is not None and end_dt is not None:
+        if start_dt.tzinfo and not end_dt.tzinfo:
+            end_dt = end_dt.replace(tzinfo=start_dt.tzinfo)
+        elif end_dt.tzinfo and not start_dt.tzinfo:
+            start_dt = start_dt.replace(tzinfo=end_dt.tzinfo)
+        delta = int((end_dt - start_dt).total_seconds())
+        if abs(delta) <= 2 and elapsed is not None and elapsed > 2:
+            try:
+                start_dt = end_dt - timedelta(seconds=elapsed)
+                start_raw = start_dt.isoformat().replace("+00:00", "Z")
+                duration = elapsed
+            except Exception:
+                duration = elapsed
+        else:
+            duration = elapsed if (elapsed is not None and elapsed >= 0) else max(0, delta)
+            if elapsed is not None and elapsed > max(0, delta) + 2:
+                duration = elapsed
+                if abs(delta) <= 2:
+                    try:
+                        start_dt = end_dt - timedelta(seconds=elapsed)
+                        start_raw = start_dt.isoformat().replace("+00:00", "Z")
+                    except Exception:
+                        pass
+    elif elapsed is not None:
+        duration = elapsed
+        if end_dt is not None and start_dt is None and elapsed > 0:
+            try:
+                start_dt = end_dt - timedelta(seconds=elapsed)
+                start_raw = start_dt.isoformat().replace("+00:00", "Z")
+            except Exception:
+                pass
+        elif start_dt is not None and end_dt is None and elapsed > 0:
+            try:
+                end_dt = start_dt + timedelta(seconds=elapsed)
+                end_raw = end_dt.isoformat().replace("+00:00", "Z")
+            except Exception:
+                pass
+
+    if start_raw:
+        start_iso = str(start_raw).strip()
+        td["testStartTime"] = start_iso
+        report["testStartTime"] = start_iso
+    end_iso = str(end_raw).strip() if end_raw else _utc_now_iso()
+    td["testEndTime"] = end_iso
+    report["testEndTime"] = end_iso
+    if duration is not None:
+        td["durationSeconds"] = duration
+        report["durationSeconds"] = duration
+    report["testData"] = td
+    return report
+
+
+def _apply_power_loss_abort_to_report(report: dict, checkpoint: dict = None) -> dict:
+    """Mark a report aborted after power loss with mandatory power-interruption remarks."""
+    report = _apply_power_loss_duration(dict(report or {}), checkpoint)
+    td = report.get("testData")
+    if not isinstance(td, dict):
+        td = {}
+    else:
+        td = dict(td)
+    td["status"] = "aborted"
+    td["remarks"] = POWER_INTERRUPTION_REMARKS
+    for k in ("approvalPassFail", "drumPassFail"):
+        td.pop(k, None)
+    results = td.get("stepResults")
+    if isinstance(results, list):
+        for idx, row in enumerate(results):
+            if not isinstance(row, dict):
+                continue
+            row = dict(row)
+            row["resultText"] = "Aborted"
+            row.pop("approvalPassFail", None)
+            if not row.get("drumLabel"):
+                row["drumLabel"] = "Drum {}".format(idx + 1)
+            results[idx] = row
+        td["stepResults"] = results
+    val_runs = td.get("validationRuns")
+    if isinstance(val_runs, list):
+        for idx, run in enumerate(val_runs):
+            if not isinstance(run, dict):
+                continue
+            run = dict(run)
+            run["status"] = "Aborted"
+            val_runs[idx] = run
+        td["validationRuns"] = val_runs
+    report["testData"] = td
+    report["remarks"] = POWER_INTERRUPTION_REMARKS
+    report["status"] = "Aborted"
+    report["approvalRemarks"] = POWER_INTERRUPTION_REMARKS
+    report["reportApprovalStatus"] = "aborted"
+    report["approvedBy"] = "System (power interruption)"
+    report["approvedByUsername"] = "system"
+    report["approvedAt"] = _utc_now_iso()
+    for k in ("approvalPassFail", "drumPassFail"):
+        report.pop(k, None)
+    val_runs_top = report.get("validationRuns")
+    if isinstance(val_runs_top, list):
+        for idx, run in enumerate(val_runs_top):
+            if not isinstance(run, dict):
+                continue
+            run = dict(run)
+            run["status"] = "Aborted"
+            val_runs_top[idx] = run
+        report["validationRuns"] = val_runs_top
+    if not report.get("completedAt"):
+        report["completedAt"] = report.get("testEndTime") or _utc_now_iso()
+    return report
+
+
+def _persist_power_loss_aborted_report(report: dict, checkpoint: dict = None) -> dict:
+    """Save power-loss aborted report and write print artifacts (no Pass/Fail)."""
+    report = _apply_power_loss_abort_to_report(report, checkpoint)
+    report_id = report.get("id")
+    if report_id is None:
+        report_id = data_service.save_report(report)
+        report["id"] = report_id
+    else:
+        data_service.save_report(report)
+    try:
+        print_service.save_report_text_files(report, int(report_id), REPORTS_DIR)
+    except Exception:
+        app.logger.exception("Failed to save report text files after power-loss abort for id %s", report_id)
+    try:
+        _generate_report_pdf_file(int(report_id), write_audit=False)
+    except Exception:
+        app.logger.exception("Failed to generate PDF after power-loss abort for id %s", report_id)
+    return report
+
+
+def _audit_power_loss_aborted_report(report: dict) -> None:
+    """Audit: power interruption report saved (with exact duration) + report aborted."""
+    rid = report.get("id")
+    if rid is None:
+        return
+    ctx = _format_report_audit_details(int(rid), report)
+    td = report.get("testData") if isinstance(report.get("testData"), dict) else {}
+    duration = td.get("durationSeconds")
+    if duration is None:
+        duration = report.get("durationSeconds")
+    try:
+        duration_i = int(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration_i = None
+    dur_txt = _format_duration_hms(duration_i) if duration_i is not None else "--"
+    start_txt = td.get("testStartTime") or report.get("testStartTime") or "--"
+    end_txt = td.get("testEndTime") or report.get("testEndTime") or "--"
+    pl_detail = (
+        "Power interruption report saved | {} | duration: {} | "
+        "start: {} | end: {} | unclean shutdown | status: aborted | remarks: {} | "
+        "approved by System (power interruption)"
+    ).format(ctx, dur_txt, start_txt, end_txt, POWER_INTERRUPTION_REMARKS)
+    audit_time = _audit_time_fields()
+    common = dict(
+        user="--",
+        role="--",
+        details=pl_detail,
+        event_type="compliance",
+        entity_type="report",
+        entity_id=rid,
+        entity_name=(report.get("name") or report.get("productName") or ""),
+        outcome="success",
+        request_source="system/startup",
+        timestamp_ms=audit_time.get("timestamp_ms"),
+        date_time=audit_time.get("date_time"),
+        extra={
+            "reportApprovalStatus": "aborted",
+            "approvedBy": "System (power interruption)",
+            "durationSeconds": duration_i,
+            "durationHms": dur_txt,
+        },
+    )
+    audit_service.log_structured_event(action="Power interruption", **common)
+    audit_service.log_structured_event(action="Report aborted (power loss)", **common)
+
+
+def _checkpoint_is_mid_test(cp) -> bool:
+    """True when an in-progress / awaiting-approval checkpoint should recover on boot."""
+    if not isinstance(cp, dict) or not cp:
+        return False
+    rtype = str(cp.get("type") or "").strip().lower()
+    if rtype not in ("test", "validation", "calibration"):
+        return False
+    phase = str(cp.get("_checkpointPhase") or "").strip().lower()
+    if phase in ("running", "awaiting-approval"):
+        return True
+    if cp.get("_pendingReportId") is not None:
+        return True
+    return False
+
+
+def _checkpoint_operator_user(cp) -> dict:
+    """Best-effort operator identity from a mid-test checkpoint for power-loss logout."""
+    if not isinstance(cp, dict):
+        return {}
+    td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+    username = (
+        cp.get("operatedByUsername")
+        or td.get("operatedByUsername")
+        or cp.get("employeeId")
+        or td.get("employeeId")
+        or cp.get("username")
+        or ""
+    )
+    name = cp.get("operatedBy") or td.get("operatedBy") or username
+    role = cp.get("operatedByRole") or td.get("operatedByRole") or cp.get("role") or ""
+    out = {
+        "username": str(username or "").strip(),
+        "name": str(name or "").strip(),
+        "role": str(role or "").strip(),
+    }
+    return out if out.get("username") or out.get("name") else {}
+
+
+def _audit_test_started_from_checkpoint(cp) -> None:
+    """Ensure a Test started audit exists for a power-loss mid-test recovery."""
+    if not isinstance(cp, dict) or not cp:
+        return
+    if cp.get("_testStartedAudited"):
+        return
+    rtype = str(cp.get("type") or "test").strip().lower()
+    action = "Quick test started" if cp.get("isQuickTest") or (isinstance(cp.get("testData"), dict) and cp.get("testData").get("isQuickTest")) else "Test started"
+    if rtype == "validation":
+        action = "Validation started"
+    elif rtype == "calibration":
+        action = "Calibration started"
+    product = cp.get("productName") or (cp.get("recipe") or {}).get("productName") or ""
+    batch = cp.get("batchNumber") or (cp.get("recipe") or {}).get("batchNumber") or ""
+    details_parts = [p for p in (product, batch) if p]
+    details = ", ".join(details_parts) if details_parts else "Test run in progress"
+    start = cp.get("testStartTime") or ((cp.get("testData") or {}) if isinstance(cp.get("testData"), dict) else {}).get("testStartTime")
+    if start:
+        details = "{} | start: {}".format(details, start)
+    op = _checkpoint_operator_user(cp)
+    audit_time = _audit_time_fields()
+    user = op.get("username") or op.get("name") or "--"
+    role = op.get("role") or "--"
+    if audit_service.is_hidden_factory_actor(user, role):
+        user, role = "--", "--"
+    audit_service.log_structured_event(
+        user=user,
+        role=role,
+        action=action,
+        details=details,
+        event_type="lifecycle",
+        entity_type="test" if rtype == "test" else rtype,
+        entity_name=product or "test",
+        outcome="success",
+        request_source="system/startup",
+        timestamp_ms=audit_time.get("timestamp_ms"),
+        date_time=audit_time.get("date_time"),
+        extra={"recoveredAfterPowerLoss": True, "testStartTime": start} if start else {"recoveredAfterPowerLoss": True},
+    )
+
+
+def _audit_power_interruption_logout(user_info: dict, request_source: str = "system/startup") -> None:
+    """Audit: user logged out due to power interruption."""
+    user_info = user_info if isinstance(user_info, dict) else {}
+    un = (user_info.get("username") or user_info.get("name") or "").strip()
+    role = (user_info.get("role") or "").strip()
+    audit_time = _audit_time_fields()
+    if audit_service.is_hidden_factory_actor(un, role):
+        details = "Privileged factory session was active when power was interrupted or the system restarted."
+        actor_user, actor_role = "--", "--"
+    elif un:
+        details = "User logged out due to {}: {}".format(POWER_INTERRUPTION_REMARKS, un)
+        actor_user, actor_role = un, (role or "--")
+        if audit_service.is_hidden_factory_actor(actor_user, actor_role):
+            actor_user, actor_role = "--", "--"
+    else:
+        details = "User logged out due to {}".format(POWER_INTERRUPTION_REMARKS)
+        actor_user, actor_role = "--", "--"
+    audit_service.log_structured_event(
+        user=actor_user,
+        role=actor_role,
+        action="Power interruption logout",
+        outcome="success",
+        entity_type="session",
+        entity_name="logout",
+        details=details,
+        event_type="compliance",
+        reason=POWER_INTERRUPTION_REMARKS,
+        target_user=un or None,
+        extra={"lastKnownRole": role} if role else None,
+        request_source=request_source,
+        timestamp_ms=audit_time.get("timestamp_ms"),
+        date_time=audit_time.get("date_time"),
+    )
+    try:
+        key = (un or "--").strip().lower()
+        last_map = getattr(app, "_last_power_interrupt_logout_ms", None)
+        if not isinstance(last_map, dict):
+            last_map = {}
+        last_map[key] = int(time.time() * 1000)
+        app._last_power_interrupt_logout_ms = last_map
+    except Exception:
+        pass
+
+
+def _mark_checkpoint_esp_command(command_label: str) -> None:
+    """Once START checkpoint exists, any ESP tap command commits the run as started."""
+    try:
+        cp = data_service.get_test_run_data()
+        if not isinstance(cp, dict) or not cp:
+            return
+        if not _checkpoint_is_mid_test(cp):
+            return
+        now_iso = _utc_now_iso()
+        changed = False
+        if not cp.get("testStartTime"):
+            cp["testStartTime"] = now_iso
+            td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+            td = dict(td)
+            td.setdefault("testStartTime", now_iso)
+            cp["testData"] = td
+            changed = True
+        if not cp.get("_espCommandSentAt"):
+            cp["_espCommandSentAt"] = now_iso
+            cp["_espCommand"] = str(command_label or "")[:32]
+            changed = True
+        if str(cp.get("_checkpointPhase") or "").strip().lower() != "running":
+            if str(cp.get("_checkpointPhase") or "").strip().lower() != "awaiting-approval":
+                cp["_checkpointPhase"] = "running"
+                changed = True
+        cp["_checkpointAt"] = now_iso
+        if changed or True:
+            data_service.save_test_run_data(cp)
+    except Exception:
+        app.logger.exception("Failed to mark ESP command on test checkpoint")
+
+
+def _audit_test_started_on_checkpoint_save(body: dict) -> dict:
+    """On first running checkpoint after START, persist Test started audit immediately."""
+    body = dict(body or {})
+    phase = str(body.get("_checkpointPhase") or "").strip().lower()
+    if phase not in ("running", "awaiting-approval"):
+        return body
+    if body.get("_testStartedAudited"):
+        return body
+    prev = data_service.get_test_run_data()
+    if isinstance(prev, dict) and prev.get("_testStartedAudited"):
+        body["_testStartedAudited"] = True
+        return body
+    if not body.get("testStartTime"):
+        body["testStartTime"] = _utc_now_iso()
+    td = body.get("testData") if isinstance(body.get("testData"), dict) else {}
+    td = dict(td)
+    td.setdefault("testStartTime", body.get("testStartTime"))
+    body["testData"] = td
+    rtype = str(body.get("type") or "test").strip().lower()
+    action = "Quick test started" if body.get("isQuickTest") or td.get("isQuickTest") else "Test started"
+    if rtype == "validation":
+        action = "Validation started"
+    product = body.get("productName") or (body.get("recipe") or {}).get("productName") or ""
+    batch = body.get("batchNumber") or (body.get("recipe") or {}).get("batchNumber") or ""
+    details_parts = [p for p in (product, batch) if p]
+    details = ", ".join(details_parts) if details_parts else "Test run started"
+    details = "{} | start: {}".format(details, body.get("testStartTime"))
+    try:
+        actor = _audit_actor()
+    except Exception:
+        cur = data_service.get_current_user() or {}
+        actor = {
+            "user": cur.get("username") or cur.get("name") or "--",
+            "role": cur.get("role") or "--",
+        }
+    audit_time = _audit_time_fields()
+    audit_service.log_structured_event(
+        user=actor.get("user"),
+        role=actor.get("role"),
+        action=action,
+        details=details,
+        event_type="lifecycle",
+        entity_type="test" if rtype == "test" else rtype,
+        entity_name=product or "test",
+        outcome="success",
+        request_source="PUT /api/data/test-run/checkpoint",
+        timestamp_ms=audit_time.get("timestamp_ms"),
+        date_time=audit_time.get("date_time"),
+        extra={"testStartTime": body.get("testStartTime")},
+    )
+    body["_testStartedAudited"] = True
+    return body
+
+
+def _abort_pending_reports_after_power_loss(session_username=None, checkpoint: dict = None):
+    """Mark pending test/validation reports as aborted after unclean shutdown (machine-wide)."""
     aborted = 0
     for report in data_service.list_reports("all") or []:
         rtype = (report.get("type") or "").strip().lower()
-        if rtype not in ("test", "validation"):
+        if rtype not in ("test", "validation", "calibration"):
             continue
         if (report.get("reportApprovalStatus") or "").strip().lower() != "pending":
             continue
-        if _report_operated_by_username(report) != un:
-            continue
-        td = report.get("testData")
-        if not isinstance(td, dict):
-            td = {}
-        else:
-            td = dict(td)
-        td["status"] = "aborted"
-        report["testData"] = td
-        report["status"] = "aborted"
-        report["reportApprovalStatus"] = "aborted"
-        if not report.get("completedAt"):
-            report["completedAt"] = _utc_now_iso()
-        rid = report.get("id")
-        data_service.save_report(report)
-        if rid is not None:
-            ctx = _format_report_audit_details(int(rid), report)
-            try:
-                pdf_ok = _generate_report_pdf_file(int(rid), write_audit=False)
-            except Exception:
-                pdf_ok = False
-                app.logger.exception("Aborted-report PDF after power loss failed for id %s", rid)
-            pl_detail = "{} | unclean shutdown".format(ctx)
-            if pdf_ok:
-                pl_detail = "{} | aborted PDF saved".format(pl_detail)
-            _audit(None, None, "Report aborted (power loss)", pl_detail)
-            if pdf_ok:
-                _audit_report_pdf_generated(int(rid), report)
+        report = _persist_power_loss_aborted_report(report, checkpoint)
+        _audit_power_loss_aborted_report(report)
         aborted += 1
     return aborted
 
+
+def _create_aborted_report_from_power_loss_checkpoint(session_username=None):
+    """If a test/validation was in progress (checkpoint) but no pending report existed, save an aborted report."""
+    cp = data_service.get_test_run_data()
+    if not isinstance(cp, dict) or not cp:
+        return 0
+    pending_id = cp.get("_pendingReportId") or cp.get("id")
+    if pending_id is not None:
+        try:
+            existing = data_service.get_report(int(pending_id))
+        except Exception:
+            existing = None
+        if existing and str(existing.get("reportApprovalStatus") or "").strip().lower() == "pending":
+            report = _persist_power_loss_aborted_report(existing, cp)
+            _audit_power_loss_aborted_report(report)
+            data_service.clear_test_run_data()
+            return 1
+        if existing and str(existing.get("reportApprovalStatus") or "").strip().lower() == "aborted":
+            data_service.clear_test_run_data()
+            return 0
+    rtype = (cp.get("type") or "").strip().lower()
+    if rtype not in ("test", "validation", "calibration"):
+        data_service.clear_test_run_data()
+        return 0
+    td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+    report_data = dict(cp)
+    for k in ("_checkpointAt", "_checkpointPhase", "_pendingReportId", "_testStartedAudited", "_espCommandSentAt", "_espCommand"):
+        report_data.pop(k, None)
+    recipe = report_data.get("recipe") or (td.get("recipe") if isinstance(td, dict) else None)
+    enriched = report_service.generate_report(
+        report_data,
+        recipe=recipe,
+        factory_settings=report_data.get("factorySettings"),
+    )
+    enriched = _stamp_report_operator(enriched)
+    enriched = _persist_power_loss_aborted_report(enriched, cp)
+    _audit_power_loss_aborted_report(enriched)
+    data_service.clear_test_run_data()
+    return 1
+
+
 def _startup_session_power_audit():
-    """If the last run ended without a clean stop while a session was active, log one power-interruption row."""
+    """If the last run ended without a clean stop while a session was active, log power-interruption rows."""
     try:
         had_clean_shutdown = data_service.consume_app_clean_stop_flag()
         pending = data_service.read_session_power_audit_pending()
-        if pending and not had_clean_shutdown:
-            if not pending.get("powerAuditLogged"):
-                un = (pending.get("username") or "").strip()
-                role = (pending.get("role") or "").strip()
-                audit_time = _audit_time_fields()
-                if audit_service.is_hidden_factory_actor(un, role):
-                    pi_details = "Privileged factory session was active when power was interrupted or the system restarted."
-                elif un:
-                    pi_details = "Unclean shutdown while {} was logged in".format(un)
-                else:
-                    pi_details = "Unclean shutdown during active session"
-                audit_service.log_structured_event(
-                    user="--",
-                    role="--",
-                    action="Power interruption",
-                    outcome="success",
-                    entity_type="session",
-                    entity_name="power",
-                    details=pi_details,
-                    event_type="compliance",
-                    target_user=un,
-                    extra={"lastKnownRole": role} if role else None,
-                    request_source="system/startup",
-                    timestamp_ms=audit_time.get("timestamp_ms"),
-                    date_time=audit_time.get("date_time"),
-                )
-                pending = dict(pending)
-                pending["powerAuditLogged"] = True
-                data_service.write_session_power_audit_pending(pending)
+        checkpoint = data_service.get_test_run_data()
+        mid_test = _checkpoint_is_mid_test(checkpoint)
+        if had_clean_shutdown and mid_test:
+            had_clean_shutdown = False
+            app.logger.warning(
+                "Ignoring stale clean-stop flag; mid-test checkpoint present — treating as unclean shutdown"
+            )
+
+        should_recover_reports = mid_test or ((not had_clean_shutdown) and bool(pending))
+        if not had_clean_shutdown and not should_recover_reports:
+            try:
+                for report in data_service.list_reports("all") or []:
+                    rtype = (report.get("type") or "").strip().lower()
+                    if rtype not in ("test", "validation", "calibration"):
+                        continue
+                    if (report.get("reportApprovalStatus") or "").strip().lower() == "pending":
+                        should_recover_reports = True
+                        break
+            except Exception:
+                pass
+
+        if should_recover_reports:
+            if mid_test:
                 try:
-                    _abort_pending_reports_after_power_loss(un)
+                    _audit_test_started_from_checkpoint(checkpoint)
                 except Exception:
-                    app.logger.exception("Abort pending reports after power loss failed")
+                    app.logger.exception("Test started recovery audit failed")
+            try:
+                _abort_pending_reports_after_power_loss(None, checkpoint if mid_test else None)
+                _create_aborted_report_from_power_loss_checkpoint(None)
+            except Exception:
+                app.logger.exception("Abort pending reports after power loss failed")
+            logout_user = None
+            if pending and (pending.get("username") or pending.get("name")):
+                logout_user = pending
+            else:
+                logout_user = _checkpoint_operator_user(checkpoint) or data_service.get_current_user()
+            if logout_user and not (isinstance(pending, dict) and pending.get("powerAuditLogged")):
+                try:
+                    _audit_power_interruption_logout(logout_user)
+                except Exception:
+                    app.logger.exception("Power interruption logout audit failed")
+                if pending:
+                    pending = dict(pending)
+                    pending["powerAuditLogged"] = True
+                    data_service.write_session_power_audit_pending(pending)
         elif pending and had_clean_shutdown and pending.get("powerAuditLogged"):
             pending = dict(pending)
             pending.pop("powerAuditLogged", None)
@@ -315,6 +943,7 @@ def _startup_session_power_audit():
         else:
             data_service.delete_session_power_audit_pending()
         audit_service.prune_power_interruption_overflow(keep=10)
+        data_service.clear_current_user()
     except Exception:
         app.logger.exception("Startup session power audit failed")
 
@@ -343,6 +972,7 @@ def _register_clean_shutdown_signals():
             data_service.touch_app_clean_stop_flag()
         except Exception:
             pass
+        sys.exit(0)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
@@ -355,23 +985,61 @@ def _require_user_admin_verification():
     return _consume_approval_verify_token("user_admin")
 
 
-def _approval_verifier_eligible_for_recipe(verifier_role):
-    """Recipe approval: QA or Admin when active QA exists; otherwise Admin only."""
-    vr = str(verifier_role or "").strip().lower()
-    session = (request.headers.get("X-User-Role") or "").strip().lower()
-    if session == "factory":
-        return vr == "factory"
-    if data_service.count_active_qa_members() >= 1:
-        return vr in ("qa", "admin")
-    return vr == "admin"
+def _approval_verifier_member(verifier: dict) -> dict:
+    """Resolve verifier to a member row with featureOverrides for permission checks."""
+    if not verifier:
+        return {}
+    role = str(verifier.get("role") or "").strip().lower()
+    if role == "factory":
+        return verifier
+    un = str(verifier.get("username") or "").strip()
+    m = data_service.get_member_by_username(un) if un else None
+    return m if m else verifier
 
 
-def _approval_verifier_eligible_for_report(verifier_role):
-    """Test report approval: Reviewer (supervisor), Admin, or factory may verify; not QA or User.
+def _approval_verifier_eligible_for_recipe(verifier: dict) -> bool:
+    """Recipe approval: verifier must have recipe-approve permission (Factory bypass)."""
+    vm = _approval_verifier_member(verifier)
+    role = str(vm.get("role") or "").strip().lower()
+    if role == "factory":
+        return True
+    return rbac_service.member_has_internal(vm, "recipe-approve")
 
-    Independent of session and reviewer count so factory UI sessions and edge counts cannot block valid verifiers."""
-    vr = str(verifier_role or "").strip().lower()
-    return vr in ("supervisor", "admin", "factory")
+
+def _approval_verifier_eligible_for_report(verifier: dict) -> bool:
+    """Test report approval: verifier must have test-report-approve permission (Factory bypass)."""
+    vm = _approval_verifier_member(verifier)
+    role = str(vm.get("role") or "").strip().lower()
+    if role == "factory":
+        return True
+    return rbac_service.member_has_internal(vm, "test-report-approve")
+
+
+def _approval_verifier_eligible_for_user_admin(verifier: dict) -> bool:
+    """User disable / admin actions: verifier must have profile-management permission."""
+    vm = _approval_verifier_member(verifier)
+    role = str(vm.get("role") or "").strip().lower()
+    if role == "factory":
+        return True
+    return rbac_service.member_has_internal(vm, "user-manage")
+
+
+def _approval_verifier_eligible_for_export(verifier: dict) -> bool:
+    """USB export approval: verifier must have export-approve permission (Factory bypass)."""
+    vm = _approval_verifier_member(verifier)
+    role = str(vm.get("role") or "").strip().lower()
+    if role == "factory":
+        return True
+    return rbac_service.member_has_internal(vm, "export-approve")
+
+
+def _approval_verifier_eligible_for_validation_report(verifier: dict) -> bool:
+    """Validation report approval: verifier must have validation-report-approve (Factory bypass)."""
+    vm = _approval_verifier_member(verifier)
+    role = str(vm.get("role") or "").strip().lower()
+    if role == "factory":
+        return True
+    return rbac_service.member_has_internal(vm, "validation-report-approve")
 
 
 def _utc_now_iso():
@@ -494,6 +1162,25 @@ def _require_auth():
     return None
 
 
+def _require_auth_or_kiosk_headers():
+    """Accept server session or validated X-User-* headers from the kiosk UI."""
+    if data_service.get_current_user():
+        return None
+    un = (request.headers.get("X-User-Username") or request.headers.get("X-User-Name") or "").strip()
+    if not un:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    role = (request.headers.get("X-User-Role") or "").strip().lower()
+    if role == "factory" or un.upper() == data_service.FACTORY_USERNAME.upper():
+        return None
+    member = data_service.get_member_by_username(un)
+    if not member:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    st = str(member.get("status") or "active").strip().lower()
+    if st != "active":
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    return None
+
+
 def _session_member_id():
     """Logged-in member id from session, or None (e.g. factory stub)."""
     cur = data_service.get_current_user() or {}
@@ -551,6 +1238,51 @@ def _self_profile_payload_from_request(existing: dict, payload: dict) -> dict:
             raise ValueError(pwd_err)
         out["password"] = str(new_pwd)
     return out
+
+
+def _self_payload_tries_permission_change(payload: dict) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if "featureOverrides" in payload:
+        return True
+    if "role" in payload and str(payload.get("role") or "").strip():
+        return True
+    return False
+
+
+def _session_username_key():
+    cur = data_service.get_current_user() or {}
+    return _norm_username(
+        (request.headers.get("X-User-Username") or "").strip()
+        or (cur.get("username") or "").strip()
+        or (cur.get("name") or "").strip()
+    )
+
+
+def _stamp_recipe_actor(processed, is_create=False):
+    un = _session_username_key()
+    if is_create and not processed.get("createdByUsername"):
+        processed["createdByUsername"] = un
+    processed["lastEditedByUsername"] = un
+
+
+def _recipe_creator_or_editor_username(recipe):
+    return _norm_username(
+        (recipe or {}).get("lastEditedByUsername")
+        or (recipe or {}).get("createdByUsername")
+    )
+
+
+def _recipe_self_approve_blocked(recipe, verified_username):
+    if _effective_request_role() == "factory":
+        return False
+    creator = _recipe_creator_or_editor_username(recipe)
+    return bool(creator) and creator == _norm_username(verified_username)
+
+
+def _role_sees_all_reports():
+    role = (_effective_request_role() or "").strip().lower()
+    return role in ("admin", "factory", "supervisor", "qa", "reviewer")
 
 
 def _resolve_session_member_record():
@@ -666,8 +1398,9 @@ def _is_biometric_transient_error(message):
 
 
 def _can_assign_feature_overrides():
-    role = _effective_request_role()
-    return role in ("factory", "admin")
+    if _effective_request_role() == "factory":
+        return True
+    return _session_has_internal("user-add")
 
 
 def _payload_has_protected_feature_overrides(member_data):
@@ -688,6 +1421,7 @@ def _payload_has_protected_feature_overrides(member_data):
 
 def _apply_recipe_approval_for_session_creator(processed):
     """Factory saves: approve immediately (no QA/Admin verification). Others: pending."""
+    _stamp_recipe_actor(processed, is_create=not processed.get("id"))
     if _effective_request_role() != "factory":
         processed["recipeApprovalStatus"] = "pending"
         for k in (
@@ -717,59 +1451,48 @@ def _apply_recipe_approval_for_session_creator(processed):
     processed["recipeApprovalRemarks"] = ""
 
 
+def _apply_recipe_approval_verify_token(processed, remarks=""):
+    """
+    When X-Approval-Verify-Token is present, approve a pending recipe in the same save
+    (avoids save-then-approve creating duplicate recipes or double writes).
+    Returns (error_message or None, applied_via_token bool).
+    """
+    if (request.headers.get("X-Approval-Verify-Token") or "").strip() == "":
+        return None, False
+    if processed.get("recipeApprovalStatus") != "pending":
+        return None, False
+    verified, verify_err = _consume_approval_verify_token("recipe")
+    if verify_err:
+        return verify_err, False
+    verified_name = (verified.get("name") or verified.get("username") or "—").strip()
+    verified_role = (verified.get("role") or "").strip()
+    verified_username = _norm_username(verified.get("username"))
+    if _recipe_self_approve_blocked(processed, verified_username):
+        return "Creator cannot approve their own recipe.", False
+    by_line = verified_name
+    if verified_role:
+        by_line = "{} ({})".format(verified_name, _display_role_label(verified_role))
+    processed["recipeApprovalStatus"] = "approved"
+    processed["recipeApprovedAt"] = _utc_now_iso()
+    processed["recipeApprovedBy"] = by_line
+    processed["recipeApprovedByUsername"] = verified_username
+    processed["recipeApprovalRemarks"] = (remarks or "").strip()
+    return None, True
+
+
 _approval_verify_tokens = {}
 
 
 def _cleanup_approval_verify_tokens():
-    now = int(time.time())
-    stale = [token for token, payload in _approval_verify_tokens.items() if int(payload.get("expiresAt", 0)) <= now]
-    for token in stale:
-        _approval_verify_tokens.pop(token, None)
+    pass
 
 
 def _issue_approval_verify_token(verifier_user, purpose):
-    _cleanup_approval_verify_tokens()
-    now = int(time.time())
-    token = secrets.token_urlsafe(24)
-    payload = {
-        "username": verifier_user.get("username") or "",
-        "name": verifier_user.get("name") or verifier_user.get("username") or "",
-        "role": str(verifier_user.get("role") or "").strip().lower(),
-        "purpose": str(purpose or "recipe").strip().lower(),
-        "issuedAt": now,
-        "expiresAt": now + APPROVAL_VERIFY_TTL_SECONDS,
-    }
-    _approval_verify_tokens[token] = payload
-    return token, payload
+    return auth_store.issue_approval_verify_token(verifier_user, purpose)
 
 
 def _consume_approval_verify_token(expected_purpose):
-    _cleanup_approval_verify_tokens()
-    token = (request.headers.get("X-Approval-Verify-Token") or "").strip()
-    if not token:
-        return None, "Approval verification is required."
-    payload = _approval_verify_tokens.pop(token, None)
-    if not payload:
-        return None, "Approval verification is invalid or expired."
-    exp = str(expected_purpose or "").strip().lower()
-    got = str(payload.get("purpose") or "").strip().lower()
-    if got != exp:
-        return None, "Approval verification was issued for a different action."
-    if exp == "report":
-        if not _verifier_payload_has_internal(payload, "test-report-approve"):
-            return None, "Verifier does not have test report approval permission."
-    elif exp == "recipe":
-        if not _verifier_payload_has_internal(payload, "recipe-approve"):
-            return None, "Verifier does not have recipe approval permission."
-    elif exp == "user_admin":
-        if str(payload.get("role") or "").strip().lower() not in ("admin", "factory"):
-            return None, "Verification role does not match approval policy."
-    elif exp == "export":
-        if not _verifier_payload_has_internal(payload, "export-approve"):
-            return None, "Verifier does not have export approval permission."
-    else:
-        return None, "Invalid approval purpose."
-    return payload, None
+    return auth_store.consume_approval_verify_token(expected_purpose)
 
 
 def _audit_report_pdf_generated(report_id, report=None) -> None:
@@ -827,12 +1550,547 @@ def _format_report_audit_details(report_id, enriched):
     return " | ".join(parts)
 
 
+def _recipe_label(recipe: dict) -> str:
+    if not isinstance(recipe, dict):
+        return ""
+    return str(recipe.get("productName") or recipe.get("name") or "").strip()
+
+
+def _recipe_audit_snapshot(recipe: dict) -> dict:
+    """Comparable recipe fields for audit before/after on edit."""
+    if not isinstance(recipe, dict):
+        return {}
+    steps = recipe.get("steps") or []
+    tap_parts = []
+    if isinstance(steps, list):
+        for step in steps:
+            if isinstance(step, dict):
+                tap_parts.append(str(step.get("tapCount", "?")))
+    cyl = recipe.get("cylinder") if isinstance(recipe.get("cylinder"), dict) else {}
+    usp = recipe.get("usp") or recipe.get("uspMode") or ""
+    return {
+        "productName": _recipe_label(recipe),
+        "speed": recipe.get("speed"),
+        "dropHeight": recipe.get("dropHeight"),
+        "usp": str(usp).strip(),
+        "stepCount": recipe.get("stepCount"),
+        "customTotalTaps": recipe.get("customTotalTaps"),
+        "cylinderMl": cyl.get("volume") if cyl.get("volume") is not None else cyl.get("volumeMl"),
+        "stepTaps": ",".join(tap_parts),
+    }
+
+
+def _recipe_audit_field_label(key: str) -> str:
+    return {
+        "productName": "product",
+        "speed": "speed",
+        "dropHeight": "drop height",
+        "usp": "USP mode",
+        "stepCount": "steps",
+        "customTotalTaps": "total taps",
+        "cylinderMl": "cylinder (ml)",
+        "stepTaps": "taps per step",
+    }.get(key, key)
+
+
+def _recipe_audit_value_display(val) -> str:
+    if val is None or val == "":
+        return "—"
+    return str(val)
+
+
+def _format_recipe_edit_change_details(before_snap: dict, after_snap: dict) -> str:
+    parts = []
+    for key in sorted(set((before_snap or {}).keys()) | set((after_snap or {}).keys())):
+        b = (before_snap or {}).get(key)
+        a = (after_snap or {}).get(key)
+        if b != a:
+            parts.append(
+                "{}: {} → {}".format(
+                    _recipe_audit_field_label(key),
+                    _recipe_audit_value_display(b),
+                    _recipe_audit_value_display(a),
+                )
+            )
+    return "; ".join(parts)
+
+
+def _audit_recipe_edited(before_recipe: dict, after_recipe: dict, recipe_id: int) -> None:
+    before_snap = _recipe_audit_snapshot(before_recipe)
+    after_snap = _recipe_audit_snapshot(after_recipe)
+    changes = _format_recipe_edit_change_details(before_snap, after_snap)
+    rlabel = _recipe_label(after_recipe) or _recipe_label(before_recipe) or "id {}".format(recipe_id)
+    if changes:
+        details = "Recipe edited — {} (id {}): {}".format(rlabel, recipe_id, changes)
+    else:
+        details = "Recipe edited — {} (id {})".format(rlabel, recipe_id)
+    _audit_event(
+        action="Recipe edited",
+        outcome="success",
+        entity_type="recipe",
+        entity_id=recipe_id,
+        entity_name=rlabel,
+        details=details,
+        before=before_snap,
+        after=after_snap,
+        event_type="compliance",
+    )
+
+
+def _audit_recipe_created(recipe: dict, recipe_id: int) -> None:
+    after_snap = _recipe_audit_snapshot(recipe)
+    rlabel = _recipe_label(recipe) or "id {}".format(recipe_id)
+    details = "Recipe created — {} (id {})".format(rlabel, recipe_id)
+    _audit_event(
+        action="Recipe created",
+        outcome="success",
+        entity_type="recipe",
+        entity_id=recipe_id,
+        entity_name=rlabel,
+        details=details,
+        after=after_snap,
+        event_type="compliance",
+    )
+
+
 # =================== STATIC ==========================
 
 
 @app.route("/api/health")
 def health():
     return jsonify({"status": "ok"}), 200
+
+
+# =================== DESKTOP API ==========================
+# Token/session state lives in desktop_api.auth_store (shared with blueprint routes
+# such as /embed/issue). Legacy handlers below delegate to auth_store so login
+# tokens work for recipe embed and other blueprint-only endpoints.
+
+from desktop_api import auth_store
+
+DESKTOP_TOKEN_TTL_SECONDS = int(os.environ.get("DESKTOP_TOKEN_TTL_SECONDS", str(8 * 60 * 60)))
+
+
+def _desktop_now() -> int:
+    return int(time.time())
+
+
+def _desktop_token_from_request() -> str:
+    return auth_store.token_from_request()
+
+
+def _desktop_user_snapshot(user: dict) -> dict:
+    return auth_store.user_snapshot(user)
+
+
+def _desktop_issue_token(user: dict) -> tuple[str, dict]:
+    return auth_store.issue_token(user)
+
+
+def _desktop_revoke_token(token: str) -> None:
+    auth_store.revoke_token(token)
+
+
+def _desktop_current_user():
+    return auth_store.current_user()
+
+
+def _desktop_require_auth(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        token, user = _desktop_current_user()
+        if not user:
+            return jsonify({"error": "Unauthorized"}), 401
+        return fn(user, *args, **kwargs)
+    return wrapper
+
+
+def _desktop_has_internal(user: dict, internal_key: str) -> bool:
+    return rbac_service.member_has_internal(user or {}, internal_key)
+
+
+def _desktop_require_internal(internal_key: str):
+    def decorator(fn):
+        @wraps(fn)
+        @_desktop_require_auth
+        def wrapper(user, *args, **kwargs):
+            if not _desktop_has_internal(user, internal_key):
+                return jsonify({"error": "Forbidden"}), 403
+            return fn(user, *args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def _desktop_filter_range(filters: dict) -> dict:
+    out = {}
+    for key in ("user", "role", "action", "type", "range"):
+        value = filters.get(key)
+        if value:
+            out[key] = value
+    for key in ("from", "to"):
+        value = filters.get(key)
+        if not value:
+            continue
+        try:
+            out[key] = int(value)
+        except (TypeError, ValueError):
+            out[key] = value
+    return out
+
+
+def _desktop_send_temp(path, download_name, mimetype):
+    path = pathlib.Path(path)
+
+    @after_this_request
+    def _cleanup(response):
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return response
+
+    return send_file(path, mimetype=mimetype, as_attachment=True, download_name=download_name)
+
+
+def _desktop_is_display_ipv4(ip: str) -> bool:
+    """IPv4 suitable for display: skip loopback and Tailscale (100.x.x.x)."""
+    value = str(ip or "").strip()
+    if not value or value.startswith("127.") or value.startswith("100."):
+        return False
+    parts = value.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        return all(0 <= int(part) <= 255 for part in parts)
+    except (TypeError, ValueError):
+        return False
+
+
+def _desktop_collect_ipv4_addresses():
+    """Best-effort LAN IPv4 addresses via hostname -I, then iproute2."""
+    found = []
+    seen = set()
+    source = ""
+
+    def add_ip(ip):
+        if not _desktop_is_display_ipv4(ip):
+            return
+        if ip in seen:
+            return
+        seen.add(ip)
+        found.append(ip)
+
+    try:
+        proc = subprocess.run(
+            ["hostname", "-I"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        raw = (proc.stdout or "").strip()
+        if raw:
+            source = "hostname -I"
+            for part in raw.split():
+                add_ip(part)
+    except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    if not found:
+        for ip_cmd in (
+            ["ip", "-4", "-o", "addr", "show", "scope", "global"],
+            ["/sbin/ip", "-4", "-o", "addr", "show", "scope", "global"],
+        ):
+            try:
+                proc = subprocess.run(
+                    ip_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if proc.returncode != 0:
+                    continue
+                matches = re.findall(r"\binet (\d+\.\d+\.\d+\.\d+)/", proc.stdout or "")
+                if matches:
+                    source = " ".join(ip_cmd)
+                    for ip in matches:
+                        add_ip(ip)
+                    break
+            except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+
+    return {"addresses": found, "source": source}
+
+
+def _desktop_zip_paths(zip_path: pathlib.Path, roots: list[tuple[pathlib.Path, str]]) -> None:
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for root, prefix in roots:
+            root = pathlib.Path(root)
+            if root.is_file():
+                zf.write(root, "{}/{}".format(prefix, root.name))
+                continue
+            if not root.exists():
+                continue
+            for item in root.rglob("*"):
+                if item.is_file():
+                    rel = item.relative_to(root)
+                    zf.write(item, str(pathlib.PurePosixPath(prefix) / rel.as_posix()))
+
+
+@app.route("/api/desktop/v1/health", methods=["GET"])
+def desktop_health():
+    try:
+        factory = data_service.get_factory_settings() or {}
+    except Exception:
+        factory = {}
+    return jsonify({
+        "ok": True,
+        "status": "ok",
+        "app": "Tap Density",
+        "model": factory.get("modelNo") or factory.get("model") or "",
+        "serial": factory.get("serialNo") or factory.get("serial") or "",
+        "time": datetime.now().isoformat(),
+    }), 200
+
+
+@app.route("/api/desktop/v1/auth/login", methods=["POST"])
+def desktop_auth_login():
+    try:
+        credentials = request.get_json(force=True, silent=True) or {}
+        username = str(credentials.get("username") or "").strip()
+        password = credentials.get("password") if isinstance(credentials.get("password"), str) else str(credentials.get("password") or "")
+        member = data_service.get_member_by_username(username)
+        if member:
+            status = str(member.get("status") or "active").strip().lower()
+            if status == "locked":
+                return jsonify({"error": "Account locked. Contact admin."}), 403
+            if status == "disabled":
+                return jsonify({"error": "Account disabled by admin."}), 403
+        user = data_service.authenticate_user(username, password)
+        if not user:
+            updated = data_service.record_failed_login(username)
+            remaining = None
+            if updated:
+                status = str(updated.get("status") or "").strip().lower()
+                if status == "locked":
+                    return jsonify({"error": "Account locked. Contact admin.", "remainingAttempts": 0}), 403
+                try:
+                    remaining = max(0, 3 - int(updated.get("failedAttempts") or 0))
+                except (TypeError, ValueError):
+                    remaining = None
+            body = {"error": "Invalid username or password."}
+            if remaining is not None:
+                body["remainingAttempts"] = remaining
+            return jsonify(body), 401
+        if username.upper() != data_service.FACTORY_USERNAME.upper():
+            member = data_service.get_member_by_username(username)
+            if member:
+                if bool(member.get("mustChangePassword")):
+                    return jsonify({"error": "Password change required before login.", "passwordChangeRequired": True}), 403
+                expiry = data_service.get_member_password_expiry_state(member)
+                if bool(expiry.get("expired")):
+                    return jsonify({"error": "Password expired. Reset required.", "passwordExpired": True, "expiry": expiry}), 403
+        data_service.record_successful_login(username)
+        token, safe_user = _desktop_issue_token(user)
+        _audit_event(
+            action="Desktop login",
+            outcome="success",
+            entity_type="session",
+            entity_name="desktop",
+            details="Desktop user logged in: {}".format(username),
+            target_user=username,
+            after={"username": safe_user.get("username"), "role": safe_user.get("role")},
+        )
+        return jsonify({"success": True, "token": token, "user": safe_user}), 200
+    except Exception as e:
+        app.logger.exception("Desktop login failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/desktop/v1/auth/me", methods=["GET"])
+@_desktop_require_auth
+def desktop_auth_me(user):
+    return jsonify({"user": user}), 200
+
+
+@app.route("/api/desktop/v1/auth/logout", methods=["POST"])
+@_desktop_require_auth
+def desktop_auth_logout(user):
+    token = _desktop_token_from_request()
+    _desktop_revoke_token(token)
+    _audit_event(
+        action="Desktop logout",
+        outcome="success",
+        entity_type="session",
+        entity_name="desktop",
+        details="Desktop user logged out: {}".format(user.get("username") or user.get("name") or "--"),
+        target_user=user.get("username") or user.get("name"),
+    )
+    return jsonify({"success": True}), 200
+
+
+@app.route("/api/desktop/v1/reports", methods=["GET"])
+@_desktop_require_internal("reports-view")
+def desktop_reports(user):
+    filter_type = (request.args.get("type") or "all").strip().lower() or "all"
+    reports = data_service.list_reports(filter_type if filter_type in ("test", "validation") else "all")
+    query_user = (request.args.get("user") or "").strip().lower()
+    query_role = (request.args.get("role") or "").strip().lower()
+    if query_user:
+        reports = [r for r in reports if query_user in str(r.get("username") or r.get("operatorName") or r.get("employeeId") or "").lower()]
+    if query_role:
+        reports = [r for r in reports if query_role in str(r.get("role") or r.get("operatorRole") or "").lower()]
+    return jsonify({"reports": reports}), 200
+
+
+@app.route("/api/desktop/v1/reports/<int:report_id>/pdf", methods=["GET"])
+@_desktop_require_internal("reports-view")
+def desktop_report_pdf(user, report_id):
+    report = data_service.get_report(report_id)
+    if not report:
+        return jsonify({"error": "Report not found"}), 404
+    if not _report_pdf_status_allowed(report):
+        return jsonify({"error": "PDF is available only after the report is approved or marked aborted."}), 403
+    if not _generate_report_pdf_file(report_id, write_audit=True):
+        return jsonify({"error": "PDF generation failed"}), 500
+    path = _report_pdf_path(report_id)
+    return send_file(path, mimetype="application/pdf", as_attachment=True, download_name="report-{}.pdf".format(report_id))
+
+
+@app.route("/api/desktop/v1/reports/download", methods=["POST"])
+@_desktop_require_internal("reports-view")
+def desktop_reports_download(user):
+    payload = request.get_json(force=True, silent=True) or {}
+    report_ids = payload.get("report_ids") or payload.get("reportIds")
+    if report_ids:
+        wanted = []
+        for rid in report_ids:
+            try:
+                wanted.append(int(rid))
+            except (TypeError, ValueError):
+                pass
+        reports = [data_service.get_report(rid) for rid in wanted]
+        reports = [r for r in reports if r]
+    else:
+        filter_type = str(payload.get("type") or "all").strip().lower()
+        reports = data_service.list_reports(filter_type if filter_type in ("test", "validation") else "all")
+    if not reports:
+        return jsonify({"error": "No reports found"}), 404
+    tmp = pathlib.Path(tempfile.NamedTemporaryFile(delete=False, suffix=".zip").name)
+    try:
+        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for report in reports:
+                rid = int(report.get("id"))
+                if not _report_pdf_status_allowed(report):
+                    continue
+                if _generate_report_pdf_file(rid, write_audit=True):
+                    pdf = _report_pdf_path(rid)
+                    if pdf.exists():
+                        zf.write(pdf, "reports/report-{}.pdf".format(rid))
+        return _desktop_send_temp(tmp, "reports-download.zip", "application/zip")
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+@app.route("/api/desktop/v1/audit", methods=["GET"])
+@_desktop_require_internal("audit-view")
+def desktop_audit(user):
+    filters = _desktop_filter_range(dict(request.args))
+    entries = _prepare_audit_entries_for_display(audit_service.list_entries(filters))
+    return jsonify({"entries": entries}), 200
+
+
+@app.route("/api/desktop/v1/audit/download", methods=["POST"])
+@_desktop_require_internal("audit-view")
+def desktop_audit_download(user):
+    payload = request.get_json(force=True, silent=True) or {}
+    filters = _desktop_filter_range(payload.get("filters") or payload)
+    entries = _prepare_audit_entries_for_display(audit_service.list_entries(filters))
+    factory = data_service.get_factory_settings() or {}
+    html = _build_audit_trail_html(entries, filters, factory, export_meta={"exported_by": user, "approved_by": user})
+    tmp = pathlib.Path(tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name)
+    try:
+        pdf_generator.render_html_to_pdf(html, tmp)
+        _audit(user.get("username") or user.get("name"), user.get("role"), "Desktop audit downloaded", "{} entries".format(len(entries)))
+        return _desktop_send_temp(tmp, "audit-download.pdf", "application/pdf")
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+@app.route("/api/desktop/v1/audit/desktop-print", methods=["POST"])
+@_desktop_require_internal("reports-view")
+def desktop_audit_print(user):
+    payload = request.get_json(force=True, silent=True) or {}
+    report_id = payload.get("reportId") or payload.get("report_id")
+    details = "Desktop print"
+    if report_id:
+        details += " | report id {}".format(report_id)
+    _audit(user.get("username") or user.get("name"), user.get("role"), "Desktop print", details)
+    return jsonify({"success": True, "logged": True}), 200
+
+
+@app.route("/api/desktop/v1/network/ips", methods=["GET"])
+@_desktop_require_auth
+def desktop_network_ips(user):
+    try:
+        payload = _desktop_collect_ipv4_addresses()
+        return jsonify({
+            "ok": True,
+            "addresses": payload.get("addresses") or [],
+            "source": payload.get("source") or "",
+        }), 200
+    except Exception as e:
+        app.logger.exception("desktop_network_ips")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/desktop/v1/backup/download", methods=["POST"])
+@_desktop_require_auth
+def desktop_backup_download(user):
+    timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    tmp = pathlib.Path(tempfile.NamedTemporaryFile(delete=False, suffix=".zip").name)
+    try:
+        roots = [
+            (STORAGE_DIR, "storage"),
+            (REPORTS_DIR, "reports"),
+            (AUDIT_DB_DIR, "db"),
+        ]
+        _desktop_zip_paths(tmp, roots)
+        _audit(user.get("username") or user.get("name"), user.get("role"), "Desktop backup downloaded", "backup {}".format(timestamp))
+        return _desktop_send_temp(tmp, "machine-backup-{}.zip".format(timestamp), "application/zip")
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+if sock:
+    @sock.route("/api/desktop/v1/ws")
+    def desktop_ws(ws):
+        token, user = _desktop_current_user()
+        if not user:
+            ws.close()
+            return
+        while True:
+            try:
+                ws.send(json.dumps({
+                    "type": "status",
+                    "status": "ok",
+                    "time": datetime.now().isoformat(),
+                    "user": user.get("username") or user.get("name"),
+                }))
+                time.sleep(5)
+            except Exception:
+                break
 
 
 @app.route("/")
@@ -857,7 +2115,10 @@ def get_recipes():
         )
         if gate:
             return gate
-        recipes = data_service.list_recipes()
+        status = str(request.args.get("status") or "active").strip().lower()
+        if status not in ("active", "disabled", "all"):
+            status = "active"
+        recipes = data_service.list_recipes(status=status)
         return jsonify({"recipes": recipes}), 200
     except Exception as e:
         app.logger.exception("Error listing recipes")
@@ -867,8 +2128,8 @@ def get_recipes():
 @app.route("/api/data/recipes", methods=["POST"])
 def create_recipe():
     try:
-        gate = _require_any_session_internal(
-            ["recipe-edit", "recipe-list"],
+        gate = _require_session_internal(
+            "recipe-manage",
             "Forbidden. You do not have permission to create recipes.",
         )
         if gate:
@@ -879,15 +2140,23 @@ def create_recipe():
             return jsonify({"error": validation_result.get("error", "Invalid recipe data")}), 400
         processed = calculation_service.process_recipe_form_data(recipe_data)
         _apply_recipe_approval_for_session_creator(processed)
+        remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
+        tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
+        if tok_err:
+            code = 403 if "cannot approve their own recipe" in str(tok_err).lower() else 401
+            return jsonify({"error": tok_err}), code
         recipe_id = data_service.save_recipe(processed)
-        rlabel = processed.get("name") or processed.get("productName") or ""
-        rd = "Recipe created: {}".format(rlabel or ("id {}".format(recipe_id)))
-        if recipe_id:
-            rd = "{} (id {})".format(rd, recipe_id)
-        _audit(None, None, "Recipe created", rd)
+        _audit_recipe_created(processed, recipe_id)
+        rlabel = _recipe_label(processed) or "id {}".format(recipe_id)
+        rd = "Recipe created — {} (id {})".format(rlabel, recipe_id)
         if processed.get("recipeApprovalStatus") == "approved":
-            au = (request.headers.get("X-User-Username") or "").strip() or "--"
-            _audit(au, "factory", "Recipe approved", rd)
+            if via_token:
+                v_user = processed.get("recipeApprovedByUsername") or "--"
+                v_role = (request.headers.get("X-User-Role") or "").strip() or "--"
+                _audit(v_user, v_role, "Recipe approved", rd)
+            elif _effective_request_role() == "factory":
+                au = (request.headers.get("X-User-Username") or "").strip() or "--"
+                _audit(au, "factory", "Recipe approved", rd)
         return jsonify({"id": recipe_id, "recipe": processed}), 201
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -905,7 +2174,8 @@ def get_recipe(recipe_id):
         )
         if gate:
             return gate
-        recipe = data_service.get_recipe(recipe_id)
+        include_disabled = str(request.args.get("includeDisabled") or "").strip().lower() in ("1", "true", "yes")
+        recipe = data_service.get_recipe(recipe_id, include_disabled=include_disabled)
         if recipe:
             return jsonify({"recipe": recipe}), 200
         return jsonify({"error": "Recipe not found"}), 404
@@ -917,25 +2187,42 @@ def get_recipe(recipe_id):
 @app.route("/api/data/recipes/<int:recipe_id>", methods=["PUT"])
 def update_recipe(recipe_id):
     try:
-        gate = _require_session_internal("recipe-edit", "Forbidden. You do not have permission to edit recipes.")
+        gate = _require_session_internal(
+            "recipe-manage",
+            "Forbidden. You do not have permission to edit recipes.",
+        )
         if gate:
             return gate
         recipe_data = request.get_json(force=True, silent=True) or {}
         recipe_data["id"] = recipe_id
+        before_recipe = data_service.get_recipe(recipe_id, include_disabled=True)
+        if not before_recipe:
+            return jsonify({"error": "Recipe not found"}), 404
         validation_result = calculation_service.validate_recipe(recipe_data)
         if not validation_result.get("valid", False):
             return jsonify({"error": validation_result.get("error", "Invalid recipe data")}), 400
         processed = calculation_service.process_recipe_form_data(recipe_data)
+        processed["id"] = recipe_id
+        if before_recipe.get("createdByUsername"):
+            processed["createdByUsername"] = before_recipe.get("createdByUsername")
         _apply_recipe_approval_for_session_creator(processed)
+        remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
+        tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
+        if tok_err:
+            code = 403 if "cannot approve their own recipe" in str(tok_err).lower() else 401
+            return jsonify({"error": tok_err}), code
         data_service.save_recipe(processed)
-        rlabel = processed.get("name") or processed.get("productName") or ""
-        rd = "Recipe id {}".format(recipe_id)
-        if rlabel:
-            rd = "{}: {}".format(rd, rlabel)
-        _audit(None, None, "Recipe edited", rd)
+        _audit_recipe_edited(before_recipe, processed, recipe_id)
+        rlabel = _recipe_label(processed) or "id {}".format(recipe_id)
+        rd = "Recipe edited — {} (id {})".format(rlabel, recipe_id)
         if processed.get("recipeApprovalStatus") == "approved":
-            au = (request.headers.get("X-User-Username") or "").strip() or "--"
-            _audit(au, "factory", "Recipe approved", rd)
+            if via_token:
+                v_user = processed.get("recipeApprovedByUsername") or "--"
+                v_role = (request.headers.get("X-User-Role") or "").strip() or "--"
+                _audit(v_user, v_role, "Recipe approved", rd)
+            elif _effective_request_role() == "factory":
+                au = (request.headers.get("X-User-Username") or "").strip() or "--"
+                _audit(au, "factory", "Recipe approved", rd)
         return jsonify({"id": recipe_id, "recipe": processed}), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -953,9 +2240,13 @@ def delete_recipe(recipe_id):
         )
         if gate:
             return gate
-        existing = data_service.get_recipe(recipe_id)
-        success = data_service.delete_recipe(recipe_id)
-        if success:
+        existing = data_service.get_recipe(recipe_id, include_disabled=True)
+        updated = data_service.disable_recipe(
+            recipe_id,
+            disabled_by=((request.headers.get("X-User-Name") or request.headers.get("X-User-Username") or "").strip() or "--"),
+            disabled_by_username=((request.headers.get("X-User-Username") or "").strip() or "--"),
+        )
+        if updated:
             rlabel = ""
             if existing:
                 rlabel = existing.get("productName") or existing.get("name") or ""
@@ -963,10 +2254,33 @@ def delete_recipe(recipe_id):
             if rlabel:
                 details = "{}: {}".format(details, rlabel)
             _audit(None, None, "Disable Recipe", details)
-            return jsonify({"success": True}), 200
+            return jsonify({"success": True, "recipe": updated}), 200
         return jsonify({"error": "Recipe not found"}), 404
     except Exception as e:
         app.logger.exception("Error deleting recipe")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/recipes/<int:recipe_id>/enable", methods=["POST"])
+def enable_recipe(recipe_id):
+    try:
+        gate = _require_any_session_internal(
+            ["recipe-delete", "disable-recipes"],
+            "Forbidden. You do not have permission to enable recipes.",
+        )
+        if gate:
+            return gate
+        updated = data_service.enable_recipe(recipe_id)
+        if updated:
+            rlabel = updated.get("productName") or updated.get("name") or ""
+            details = "Recipe id {}".format(recipe_id)
+            if rlabel:
+                details = "{}: {}".format(details, rlabel)
+            _audit(None, None, "Enable Recipe", details)
+            return jsonify({"success": True, "recipe": updated}), 200
+        return jsonify({"error": "Recipe not found"}), 404
+    except Exception as e:
+        app.logger.exception("Error enabling recipe")
         return jsonify({"error": str(e)}), 500
 
 
@@ -984,6 +2298,8 @@ def approve_recipe(recipe_id):
         if not recipe:
             return jsonify({"ok": False, "error": "Recipe not found"}), 404
         verified_username = _norm_username(verified.get("username"))
+        if _recipe_self_approve_blocked(recipe, verified_username):
+            return jsonify({"ok": False, "error": "Creator cannot approve their own recipe."}), 403
         st = recipe.get("recipeApprovalStatus")
         if st == "approved":
             existing_approver = _norm_username(recipe.get("recipeApprovedByUsername"))
@@ -1006,7 +2322,9 @@ def approve_recipe(recipe_id):
         recipe["recipeApprovalRemarks"] = remarks
         data_service.save_recipe(recipe)
         rname = (recipe.get("productName") or recipe.get("name") or "").strip()
-        rdetail = "Recipe id {} | verified by {}".format(recipe_id, verified_name)
+        rdetail = "Recipe id {} | verified by {} | creator {}".format(
+            recipe_id, verified_name, recipe.get("createdByUsername") or recipe.get("lastEditedByUsername") or "--"
+        )
         if rname:
             rdetail = "{} | recipe: {}".format(rdetail, rname)
         batch = recipe.get("batchNumber")
@@ -1026,17 +2344,110 @@ def approve_recipe(recipe_id):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/data/recipes/<int:recipe_id>/reject", methods=["POST"])
+def reject_recipe(recipe_id):
+    try:
+        verified, verify_err = _consume_approval_verify_token("recipe")
+        if verify_err:
+            return jsonify({"ok": False, "error": verify_err}), 401
+        body = request.get_json(force=True, silent=True) or {}
+        remarks = (body.get("remarks") or "").strip()
+        recipe = data_service.get_recipe(recipe_id)
+        if not recipe:
+            return jsonify({"ok": False, "error": "Recipe not found"}), 404
+        verified_username = _norm_username(verified.get("username"))
+        if _recipe_self_approve_blocked(recipe, verified_username):
+            return jsonify({"ok": False, "error": "Creator cannot reject their own recipe."}), 403
+        st = recipe.get("recipeApprovalStatus")
+        if st not in (None, "pending"):
+            return jsonify({"ok": False, "error": "Invalid approval state"}), 400
+        if st is None:
+            return jsonify({"ok": False, "error": "Legacy recipe does not require approval"}), 400
+        verified_name = (verified.get("name") or verified.get("username") or "—").strip()
+        verified_role = (verified.get("role") or "").strip()
+        by_line = verified_name
+        if verified_role:
+            by_line = "{} ({})".format(verified_name, _display_role_label(verified_role))
+        recipe["recipeApprovalStatus"] = "rejected"
+        recipe["recipeRejectedAt"] = _utc_now_iso()
+        recipe["recipeRejectedBy"] = by_line
+        recipe["recipeRejectedByUsername"] = verified_username
+        recipe["recipeApprovalRemarks"] = remarks
+        data_service.save_recipe(recipe)
+        rname = (recipe.get("productName") or recipe.get("name") or "").strip()
+        rdetail = "Recipe id {} | rejected by {}".format(recipe_id, verified_name)
+        if rname:
+            rdetail = "{} | recipe: {}".format(rdetail, rname)
+        _audit(
+            verified.get("username") or verified_username or verified_name,
+            (verified.get("role") or "").strip() or "--",
+            "Recipe rejected",
+            rdetail,
+        )
+        return jsonify({"ok": True, "recipe": recipe}), 200
+    except Exception as e:
+        app.logger.exception("Error rejecting recipe")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# =================== DATA: TEST RUN CHECKPOINT (power-loss recovery) ==========================
+
+
+@app.route("/api/data/test-run/checkpoint", methods=["PUT"])
+def put_test_run_checkpoint():
+    """Persist in-progress test run so a report can be saved after unclean shutdown."""
+    try:
+        gate = _require_auth()
+        if gate:
+            return gate
+        gate = _require_any_session_internal(
+            ["quick-test", "recipe-test"],
+            "Forbidden. You do not have permission to run tests.",
+        )
+        if gate:
+            return gate
+        body = request.get_json(force=True, silent=True) or {}
+        if not body:
+            return jsonify({"ok": False, "error": "Checkpoint body required"}), 400
+        body = _audit_test_started_on_checkpoint_save(body)
+        data_service.save_test_run_data(body)
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        app.logger.exception("Error saving test run checkpoint")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/data/test-run/checkpoint", methods=["DELETE"])
+def delete_test_run_checkpoint():
+    try:
+        gate = _require_auth()
+        if gate:
+            return gate
+        data_service.clear_test_run_data()
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        app.logger.exception("Error clearing test run checkpoint")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # =================== DATA: REPORTS ==========================
 
 
 @app.route("/api/data/reports", methods=["GET"])
 def get_reports():
     try:
+        _maybe_purge_scheduled_report_export()
         gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to view reports.")
         if gate:
             return gate
         filter_type = request.args.get("filter", "all")
         reports = data_service.list_reports(filter_type)
+        if not _role_sees_all_reports():
+            me = _session_username_key()
+            reports = [
+                r for r in (reports or [])
+                if _report_operated_by_username(r) == me
+            ]
         return jsonify({"reports": reports}), 200
     except Exception as e:
         app.logger.exception("Error listing reports")
@@ -1132,6 +2543,72 @@ def create_report():
         return jsonify({"error": str(e)}), 500
 
 
+def _apply_pending_report_approval(report_id, verified, pf, remarks, approver_name="", role_header=""):
+    """Approve a pending report and generate its PDF. Does not log the verifier in.
+
+    Returns (report, error, status_code, pdf_ok).
+    """
+    pf = (pf or "").strip().upper()
+    if pf not in ("PASS", "FAIL"):
+        return None, "passFail must be PASS or FAIL", 400, False
+    remarks = (remarks or "").strip()
+    report = data_service.get_report(report_id)
+    if not report:
+        return None, "Report not found", 404, False
+    verified = verified or {}
+    verified_username = _norm_username(verified.get("username"))
+    st = report.get("reportApprovalStatus")
+    if st is None:
+        return None, "Report does not require approval", 400, False
+    if st == "approved":
+        existing_approver = _norm_username(report.get("approvedByUsername"))
+        if existing_approver and existing_approver == verified_username:
+            return None, "Same person cannot approve twice", 409, False
+        return report, None, 200, False
+    if st != "pending":
+        return None, "Invalid approval state", 400, False
+    op_username = _report_operated_by_username(report)
+    if op_username and verified_username == op_username and str(verified.get("role") or "").strip().lower() != "factory":
+        return None, "Operator cannot approve their own report.", 403, False
+    verified_name = (verified.get("name") or verified.get("username") or approver_name or "—").strip()
+    verified_role = (verified.get("role") or role_header or "").strip()
+    by_line = verified_name
+    if verified_role:
+        by_line = "{} ({})".format(verified_name, _display_role_label(verified_role))
+    report["reportApprovalStatus"] = "approved"
+    report["approvalPassFail"] = pf
+    report["approvalRemarks"] = remarks
+    report["approvedBy"] = by_line
+    report["approvedByUsername"] = verified_username
+    report["approvedAt"] = _utc_now_iso()
+    data_service.save_report(report)
+    rtype = (report.get("type") or "").strip().lower()
+    if rtype == "validation" and pf == "PASS":
+        try:
+            report_service.apply_pending_validation_due_dates(report)
+            data_service.save_report(report)
+        except Exception:
+            app.logger.exception("Failed to apply pending validation due dates for report %s", report_id)
+    pdf_ok = False
+    try:
+        pdf_ok = _generate_report_pdf_file(report_id, write_audit=False)
+    except Exception:
+        app.logger.exception("Approved-report PDF generation failed for id %s", report_id)
+    v_audit_user = verified.get("username") or verified_username or verified_name
+    v_audit_role = (verified.get("role") or "").strip() or "--"
+    ctx = _format_report_audit_details(report_id, report)
+    appr_detail = "{} | {} | verified by {}".format(ctx, pf, verified_name)
+    _audit(v_audit_user, v_audit_role, "Report approved", appr_detail)
+    if pdf_ok:
+        _audit(
+            v_audit_user,
+            v_audit_role,
+            "Report PDF generated",
+            "Report id {} | {} | approved PDF".format(report_id, pf),
+        )
+    return report, None, 200, pdf_ok
+
+
 @app.route("/api/data/reports/<int:report_id>/approve", methods=["POST"])
 def approve_report(report_id):
     try:
@@ -1162,57 +2639,14 @@ def approve_report(report_id):
             }
         body = request.get_json(force=True, silent=True) or {}
         pf = (body.get("passFail") or body.get("pass_fail") or "").strip().upper()
-        if pf not in ("PASS", "FAIL"):
-            return jsonify({"ok": False, "error": "passFail must be PASS or FAIL"}), 400
         remarks = (body.get("remarks") or "").strip()
         approver_name = (body.get("approverName") or "").strip()
         role_header = (request.headers.get("X-User-Role") or "").strip()
-        report = data_service.get_report(report_id)
-        if not report:
-            return jsonify({"ok": False, "error": "Report not found"}), 404
-        verified_username = _norm_username(verified.get("username"))
-        st = report.get("reportApprovalStatus")
-        if st is None:
-            return jsonify({"ok": False, "error": "Report does not require approval"}), 400
-        if st == "approved":
-            existing_approver = _norm_username(report.get("approvedByUsername"))
-            if existing_approver and existing_approver == verified_username:
-                return jsonify({"ok": False, "error": "Same person cannot approve twice"}), 409
-            return jsonify({"ok": True, "report": report}), 200
-        if st != "pending":
-            return jsonify({"ok": False, "error": "Invalid approval state"}), 400
-        op_username = _report_operated_by_username(report)
-        if op_username and verified_username == op_username and _effective_request_role() != "factory":
-            return jsonify({"ok": False, "error": "Operator cannot approve their own report."}), 403
-        verified_name = (verified.get("name") or verified.get("username") or approver_name or "—").strip()
-        verified_role = (verified.get("role") or role_header or "").strip()
-        by_line = verified_name
-        if verified_role:
-            by_line = "{} ({})".format(verified_name, _display_role_label(verified_role))
-        report["reportApprovalStatus"] = "approved"
-        report["approvalPassFail"] = pf
-        report["approvalRemarks"] = remarks
-        report["approvedBy"] = by_line
-        report["approvedByUsername"] = verified_username
-        report["approvedAt"] = _utc_now_iso()
-        data_service.save_report(report)
-        pdf_ok = False
-        try:
-            pdf_ok = _generate_report_pdf_file(report_id, write_audit=False)
-        except Exception:
-            app.logger.exception("Approved-report PDF generation failed for id %s", report_id)
-        if pdf_ok:
-            _audit_report_pdf_generated(report_id, report)
-        ctx = _format_report_audit_details(report_id, report)
-        appr_detail = "{} | {} | verified by {}".format(ctx, pf, verified_name)
-        v_audit_user = verified.get("username") or verified_username or verified_name
-        v_audit_role = (verified.get("role") or "").strip() or "--"
-        _audit(
-            v_audit_user,
-            v_audit_role,
-            "Report approved",
-            appr_detail,
+        report, err, code, _pdf_ok = _apply_pending_report_approval(
+            report_id, verified, pf, remarks, approver_name=approver_name, role_header=role_header
         )
+        if err:
+            return jsonify({"ok": False, "error": err}), code
         return jsonify({"ok": True, "report": report}), 200
     except Exception as e:
         app.logger.exception("Error approving report")
@@ -1362,11 +2796,12 @@ def create_member():
             entity_type="member",
             entity_id=member_id,
             entity_name=uname,
-            details="Added new user: {} ({})".format(uname, urole or "—"),
+            details="Added new user: {} ({})".format(uname, _display_role_label(urole) if urole else "—"),
             target_user=uname,
             after=data_service.sanitize_member_for_client(created) or created,
             signature=sig,
         )
+        _audit_member_permissions_if_changed(None, created, member_id=member_id, signature=sig)
         safe = data_service.sanitize_member_for_client(created) or dict(created)
         return jsonify({"id": member_id, "member": safe}), 201
     except ValueError as e:
@@ -1402,6 +2837,18 @@ def update_member(member_id):
         if not before_member:
             return jsonify({"error": "Member not found"}), 404
         is_self = _is_self_member(member_id)
+        if is_self and _self_payload_tries_permission_change(member_data):
+            uname = before_member.get("username") or before_member.get("name") or ""
+            _audit_event(
+                action="User permissions updated",
+                outcome="denied",
+                entity_type="member",
+                entity_id=member_id,
+                entity_name=uname,
+                details="Self-service change of role or permission cards is not allowed",
+                target_user=uname,
+            )
+            return jsonify({"error": "You cannot change your own role or permission cards."}), 403
         if is_self:
             try:
                 member_data = _self_profile_payload_from_request(before_member, member_data)
@@ -1434,6 +2881,9 @@ def update_member(member_id):
                 target_user=uname,
                 signature=sig,
             )
+        _audit_member_permissions_if_changed(
+            before_member, updated, member_id=member_id, signature=sig
+        )
         _audit_event(
             action="User update",
             outcome="success",
@@ -1464,6 +2914,10 @@ def delete_member(member_id):
         member = data_service.get_member(member_id)
         if not member:
             return jsonify({"error": "Member not found"}), 404
+        target_username = (member.get("username") or "").strip()
+        target_name = (member.get("name") or target_username or "").strip() or "--"
+        if str(target_username).strip().upper() == data_service.FACTORY_USERNAME.upper():
+            return jsonify({"error": "The factory profile cannot be disabled."}), 403
         verified, verify_err = _require_user_admin_verification()
         if not verified:
             _audit_event(
@@ -1471,12 +2925,21 @@ def delete_member(member_id):
                 outcome="denied",
                 entity_type="member",
                 entity_id=member_id,
-                entity_name=member.get("username") or member.get("name") or "",
+                entity_name=target_username or target_name,
                 details=verify_err or "Approval verification required",
-                target_user=member.get("username") or "",
+                target_user=target_username,
                 before=member,
             )
             return jsonify({"error": verify_err}), 403
+        actor = _audit_actor()
+        disabler_username = (actor.get("user") or "").strip() or "--"
+        disabler_name = (actor.get("name") or disabler_username).strip() or "--"
+        disabler_role = (actor.get("role") or "").strip() or "--"
+        sig = {
+            "mode": "password_reconfirm",
+            "username": verified.get("username") if verified else disabler_username,
+            "role": verified.get("role") if verified else disabler_role,
+        }
         before_member = dict(member)
         template_id = member.get("fingerprintTemplateId")
         if template_id is not None:
@@ -1500,18 +2963,26 @@ def delete_member(member_id):
                 }), 400
             data_service.clear_member_biometric(member_id)
         member = data_service.disable_member(member_id)
+        detail = _member_status_change_audit_detail("disabled", member, actor)
         _audit_event(
-            action="User disable",
+            action="User disabled",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
-            entity_name=member.get("username") or member.get("name") or "",
-            details="Member disabled",
-            target_user=member.get("username") or "",
+            entity_name=target_username or target_name,
+            details=detail,
+            target_user=target_username,
             before=before_member,
             after=member,
-            signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
-            extra={"templateIdFreed": template_id},
+            signature=sig,
+            extra={
+                "templateIdFreed": template_id,
+                "disabledMemberUsername": target_username,
+                "disabledMemberName": target_name,
+                "disabledByUsername": disabler_username,
+                "disabledByName": disabler_name,
+                "disabledByRole": disabler_role,
+            },
         )
         return jsonify({"success": True, "member": member}), 200
     except ValueError as e:
@@ -1534,13 +3005,15 @@ def unlock_member_route(member_id):
             "role": (cur.get("role") or "").strip() or "--",
         }
         member = data_service.unlock_member(member_id)
+        actor = _audit_actor()
+        detail = _member_status_change_audit_detail("unlocked", member, actor)
         _audit_event(
-            action="User unlock",
+            action="User unlocked",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
             entity_name=member.get("username") or member.get("name") or "",
-            details="Member unlocked",
+            details=detail,
             target_user=member.get("username") or "",
             before=data_service.sanitize_member_for_client(before_member) if before_member else None,
             after=data_service.sanitize_member_for_client(member) or member,
@@ -1568,13 +3041,15 @@ def enable_member_route(member_id):
             "role": (cur.get("role") or "").strip() or "--",
         }
         member = data_service.enable_member(member_id)
+        actor = _audit_actor()
+        detail = _member_status_change_audit_detail("enabled", member, actor)
         _audit_event(
-            action="User enable",
+            action="User enabled",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
             entity_name=member.get("username") or member.get("name") or "",
-            details="Member enabled",
+            details=detail,
             target_user=member.get("username") or "",
             before=data_service.sanitize_member_for_client(before_member) if before_member else None,
             after=data_service.sanitize_member_for_client(member) or member,
@@ -1606,12 +3081,125 @@ def get_factory_settings():
 def save_factory_settings():
     try:
         settings = request.get_json(force=True, silent=True) or {}
+        before = data_service.get_factory_settings() or {}
         data_service.save_factory_settings(settings)
-        _audit(None, None, "Factory settings changed", "")
-        return jsonify({"success": True, "settings": settings}), 200
+        merged = report_service.enrich_factory_settings(data_service.get_factory_settings() or {})
+        details = "maxUsers {}→{} | maxAdmins {}→{} | maxSupervisors {}→{} | maxQa {}→{}".format(
+            before.get("maxUsers"), merged.get("maxUsers"),
+            before.get("maxAdmins"), merged.get("maxAdmins"),
+            before.get("maxSupervisors"), merged.get("maxSupervisors"),
+            before.get("maxQa"), merged.get("maxQa"),
+        )
+        _audit(None, None, "Factory settings updated", details)
+        return jsonify({"success": True, "settings": merged}), 200
     except Exception as e:
         app.logger.exception("Error saving factory settings")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/factory-settings/validation-dates", methods=["POST"])
+def save_validation_due_dates():
+    """Persist last/next validation due dates without a Factory Settings audit."""
+    try:
+        gate = _require_any_session_internal(
+            ["validation-test", "validation-report-approve"],
+            "Forbidden. You do not have permission to update validation due dates.",
+        )
+        if gate:
+            return gate
+        body = request.get_json(force=True, silent=True) or {}
+        last = str(body.get("lastValidationDate") or "").strip()
+        nxt = str(body.get("nextValidationDate") or "").strip()
+        try:
+            months = int(body.get("months") or 0)
+        except (TypeError, ValueError):
+            months = 0
+        due_kind = str(body.get("dueKind") or body.get("due_kind") or "validation").strip().lower()
+        if due_kind not in ("validation", "calibration"):
+            due_kind = "validation"
+        if months not in (3, 6, 12):
+            return jsonify({"ok": False, "error": "months must be 3, 6, or 12"}), 400
+        if not last or not nxt:
+            return jsonify({"ok": False, "error": "lastValidationDate and nextValidationDate are required"}), 400
+        stored = data_service.get_factory_settings() or {}
+        before_last = stored.get("lastValidationDate")
+        before_next = stored.get("nextValidationDate")
+        before_months = stored.get("dueIntervalMonths")
+        before_kind = stored.get("dueKind")
+        updated = dict(stored)
+        updated["lastValidationDate"] = last
+        updated["nextValidationDate"] = nxt
+        updated["dueIntervalMonths"] = months
+        updated["dueKind"] = due_kind
+        data_service.save_factory_settings(updated)
+        if before_last != last or before_next != nxt or before_months != months or before_kind != due_kind:
+            _audit(
+                None,
+                None,
+                "Validation due date set",
+                "Last: {} | Next: {} | Interval: {} months".format(last, nxt, months),
+            )
+        saved = data_service.get_factory_settings() or {}
+        return jsonify({
+            "ok": True,
+            "lastValidationDate": saved.get("lastValidationDate"),
+            "nextValidationDate": saved.get("nextValidationDate"),
+            "dueIntervalMonths": saved.get("dueIntervalMonths"),
+            "dueKind": due_kind,
+        }), 200
+    except Exception as e:
+        app.logger.exception("Error saving validation due dates")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/data/reports/<int:report_id>/pending-due", methods=["POST"])
+def set_report_pending_validation_due(report_id):
+    """Stash operator-chosen due dates on the report until approval Pass."""
+    try:
+        gate = _require_any_session_internal(
+            ["validation-test", "validation-report-approve"],
+            "Forbidden. You do not have permission to set validation due dates.",
+        )
+        if gate:
+            return gate
+        report = data_service.get_report(report_id)
+        if not report:
+            return jsonify({"ok": False, "error": "Report not found"}), 404
+        rtype = str(report.get("type") or "").strip().lower()
+        if rtype != "validation":
+            return jsonify({"ok": False, "error": "Only validation reports accept pending due dates"}), 400
+        body = request.get_json(force=True, silent=True) or {}
+        try:
+            months = int(body.get("months") or 0)
+        except (TypeError, ValueError):
+            months = 0
+        if months not in (3, 6, 12):
+            return jsonify({"ok": False, "error": "months must be 3, 6, or 12"}), 400
+        last = str(body.get("lastValidationDate") or "").strip()
+        nxt = str(body.get("nextValidationDate") or "").strip()
+        due_kind = str(body.get("dueKind") or body.get("due_kind") or rtype).strip().lower()
+        if due_kind not in ("validation", "calibration"):
+            due_kind = rtype
+        if not last or not nxt:
+            return jsonify({"ok": False, "error": "lastValidationDate and nextValidationDate are required"}), 400
+        report["pendingValidationDue"] = {
+            "months": months,
+            "lastValidationDate": last,
+            "nextValidationDate": nxt,
+            "dueKind": due_kind,
+        }
+        fs = report.get("factorySettings") if isinstance(report.get("factorySettings"), dict) else {}
+        fs = dict(fs)
+        fs["lastValidationDate"] = last
+        fs["nextValidationDate"] = nxt
+        fs["dueIntervalMonths"] = months
+        fs["dueKind"] = due_kind
+        report["factorySettings"] = fs
+        data_service.save_report(report)
+        return jsonify({"ok": True, "pendingValidationDue": report["pendingValidationDue"]}), 200
+    except Exception as e:
+        app.logger.exception("Error setting pending validation due")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/data/factory-reset", methods=["POST"])
@@ -1689,21 +3277,6 @@ def login():
             password = ""
         else:
             password = str(raw_pw)
-        # Temporary test login "," / "," — same as factory (no member-table / lock / expiry path)
-        if data_service.is_test_comma_login(username, password):
-            user = data_service.get_test_comma_session_user()
-            data_service.save_current_user(user)
-            data_service.write_session_power_audit_pending(user)
-            _audit_event(
-                action="Login",
-                outcome="success",
-                entity_type="session",
-                entity_name="password",
-                details="Password login succeeded (test comma)",
-                target_user=username,
-                after={"username": user.get("username"), "role": user.get("role")},
-            )
-            return jsonify({"success": True, "user": data_service.sanitize_member_for_client(user) or user}), 200
         # Factory user: special case, not subject to lockout
         if username.upper() == data_service.FACTORY_USERNAME.upper():
             user = data_service.authenticate_user(username, password)
@@ -1720,6 +3293,16 @@ def login():
                     after={"username": user.get("username"), "role": user.get("role")},
                 )
                 return jsonify({"success": True, "user": data_service.sanitize_member_for_client(user) or user}), 200
+            _audit_event(
+                action="Login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="password",
+                details="User {} (Factory) entered the wrong password; attempt not counted for the factory account".format(
+                    username or data_service.FACTORY_USERNAME
+                ),
+                target_user=username or data_service.FACTORY_USERNAME,
+            )
             return jsonify({"error": "Invalid username or password"}), 401
 
         # Normal member: check status first
@@ -1727,10 +3310,10 @@ def login():
         if member:
             status = str(member.get("status") or "active").strip().lower()
             if status == "locked":
-                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account locked", target_user=username)
+                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details=_locked_login_audit_details(member, username), target_user=username)
                 return jsonify({"error": "Account locked. Contact admin."}), 403
             if status == "disabled":
-                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account disabled", target_user=username)
+                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details=_disabled_login_audit_details(member, username), target_user=username)
                 return jsonify({"error": "Account disabled by admin."}), 403
 
         # Try authenticate
@@ -1795,10 +3378,23 @@ def login():
                 fa = int(updated.get("failedAttempts") or 0)
             except (TypeError, ValueError):
                 fa = 0
-            remaining = max(0, 3 - fa)
-            # If this attempt caused the account to become locked, show lockout immediately
+            maximum = data_service.MAX_FAILED_LOGIN_ATTEMPTS
+            remaining = max(0, maximum - fa)
+            details = _wrong_password_audit_details(updated, username, fa, maximum)
+            _audit_event(
+                action="Login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="password",
+                details=details,
+                target_user=updated.get("username") or username,
+                extra={
+                    "failedAttempts": fa,
+                    "maximumAttempts": maximum,
+                    "remainingAttempts": remaining,
+                },
+            )
             if status == "locked":
-                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account locked after failed attempts", target_user=username)
                 return jsonify({
                     "error": "Account locked. Contact admin.",
                     "remainingAttempts": 0
@@ -1807,6 +3403,15 @@ def login():
                 "error": "Invalid username or password.",
                 "remainingAttempts": remaining
             }), 401
+        if username:
+            _audit_event(
+                action="Login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="password",
+                details="Invalid username or password for unknown user: {}".format(username),
+                target_user=username,
+            )
         return jsonify({"error": "Invalid username or password"}), 401
     except Exception as e:
         app.logger.exception("Error during login")
@@ -1985,6 +3590,25 @@ def login_biometric():
         return jsonify({"error": str(e)}), 500
 
 
+def _schedule_bridge_restart_after_logout() -> None:
+    """Restart kiosk-bridge in the background after logout (manual or idle timeout)."""
+    script = APP_ROOT / "scripts" / "restart_bridge_background.sh"
+    if not script.is_file():
+        app.logger.warning("Bridge restart script missing: %s", script)
+        return
+    try:
+        subprocess.Popen(
+            ["/bin/bash", str(script)],
+            start_new_session=True,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        app.logger.exception("Failed to schedule bridge restart after logout")
+
+
 @app.route("/api/data/auth/logout", methods=["POST"])
 def logout():
     try:
@@ -2017,10 +3641,7 @@ def logout():
                         mins = int(mins) if mins is not None else 0
                     except (TypeError, ValueError):
                         mins = 0
-                    detail = "User logged out due to inactivity timeout"
-                    if mins > 0:
-                        detail += " ({} min limit)".format(mins)
-                    detail += ": {}".format(un)
+                    detail = "User logged out due to inactivity timeout: {}".format(un)
                     _audit_event(
                         action="Logout (inactivity timeout)",
                         outcome="success",
@@ -2042,6 +3663,8 @@ def logout():
         data_service.touch_app_clean_stop_flag()
         data_service.delete_session_power_audit_pending()
         data_service.clear_current_user()
+        if reason in ("user", "inactivity"):
+            _schedule_bridge_restart_after_logout()
         return jsonify({"success": True}), 200
     except Exception as e:
         app.logger.exception("Error during logout")
@@ -2069,8 +3692,8 @@ def approval_verify():
         payload = request.get_json(force=True, silent=True) or {}
         method = str(payload.get("method") or "credentials").strip().lower()
         purpose = str(payload.get("purpose") or "recipe").strip().lower()
-        if purpose not in ("recipe", "report", "user_admin", "export"):
-            return jsonify({"ok": False, "error": "purpose must be recipe, report, or user_admin"}), 400
+        if purpose not in ("recipe", "report", "user_admin", "export", "validation"):
+            return jsonify({"ok": False, "error": "purpose must be recipe, report, user_admin, export, or validation"}), 400
         verifier = None
         username = (payload.get("username") or "").strip()
 
@@ -2149,22 +3772,26 @@ def approval_verify():
 
         verifier_role = str(verifier.get("role") or "").strip().lower()
         if purpose == "report":
-            eligible = _approval_verifier_eligible_for_report(verifier_role)
+            eligible = _approval_verifier_eligible_for_report(verifier)
         elif purpose == "recipe":
-            eligible = _approval_verifier_eligible_for_recipe(verifier_role)
+            eligible = _approval_verifier_eligible_for_recipe(verifier)
+        elif purpose == "export":
+            eligible = _approval_verifier_eligible_for_export(verifier)
+        elif purpose == "validation":
+            eligible = _approval_verifier_eligible_for_validation_report(verifier)
         else:
-            eligible = verifier_role in ("admin", "factory")
+            eligible = _approval_verifier_eligible_for_user_admin(verifier)
         if not eligible:
             _audit_event(
                 action="Approval verification",
                 outcome="denied",
                 entity_type="verification",
                 entity_name=purpose,
-                details="Role not eligible for approval",
+                details="Verifier lacks required permission",
                 target_user=verifier.get("username") or username,
                 extra={"purpose": purpose, "verifierRole": verifier_role, "method": method},
             )
-            return jsonify({"ok": False, "error": "Verifier role is not allowed for approval"}), 403
+            return jsonify({"ok": False, "error": "Verifier does not have permission for this approval"}), 403
 
         if verifier_role != "factory":
             member = data_service.get_member_by_username(verifier.get("username") or username)
@@ -2194,18 +3821,36 @@ def approval_verify():
             signature={"mode": method, "username": vname, "role": verifier_role},
             extra={"purpose": purpose, "method": method},
         )
-        return jsonify(
-            {
-                "ok": True,
-                "token": token,
-                "expiresInSec": APPROVAL_VERIFY_TTL_SECONDS,
-                "verifier": {
-                    "username": token_payload.get("username"),
-                    "name": token_payload.get("name"),
-                    "role": token_payload.get("role"),
-                },
-            }
-        ), 200
+        payload_out = {
+            "ok": True,
+            "token": token,
+            "expiresInSec": APPROVAL_VERIFY_TTL_SECONDS,
+            "verifier": {
+                "username": token_payload.get("username"),
+                "name": token_payload.get("name"),
+                "role": token_payload.get("role"),
+            },
+        }
+        # Operator stays logged in. Verifier is not logged in. If a pending
+        # report id + PASS/FAIL is supplied, generate the approved report now.
+        if purpose in ("report", "validation"):
+            raw_rid = payload.get("reportId")
+            if raw_rid is None:
+                raw_rid = payload.get("report_id")
+            pf = (payload.get("passFail") or payload.get("pass_fail") or "").strip().upper()
+            remarks = (payload.get("remarks") or "").strip()
+            if raw_rid not in (None, "") and pf in ("PASS", "FAIL"):
+                try:
+                    rid = int(raw_rid)
+                except (TypeError, ValueError):
+                    return jsonify({"ok": False, "error": "reportId must be an integer"}), 400
+                report, err, code, pdf_ok = _apply_pending_report_approval(rid, verifier, pf, remarks)
+                if err:
+                    return jsonify({"ok": False, "error": err, "token": token}), code
+                payload_out["approved"] = True
+                payload_out["pdfGenerated"] = bool(pdf_ok)
+                payload_out["report"] = report
+        return jsonify(payload_out), 200
     except Exception as e:
         app.logger.exception("Error during approval verification")
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -2312,24 +3957,158 @@ def update_own_profile():
 
 
 def _require_export_usb_and_verification_json():
+    """Return (error_response_or_None, export_approval_verifier_payload_or_None)."""
     cur = data_service.get_current_user()
     if not cur:
-        return jsonify({"success": False, "error": "Unauthorized"}), 401
+        return jsonify({"success": False, "error": "Unauthorized"}), 401, None
     data_service.refresh_current_user_from_member()
     if not _session_has_internal("export-usb"):
-        return jsonify({"success": False, "error": "Forbidden. Export to USB is not permitted for this account."}), 403
+        return jsonify({"success": False, "error": "Forbidden. Export to USB is not permitted for this account."}), 403, None
     role = str(cur.get("role") or "").strip().lower()
+    verifier = None
     if role != "factory":
         _verified, verify_err = _consume_approval_verify_token("export")
         if verify_err:
-            return jsonify({"success": False, "error": verify_err}), 401
-    return None
+            return jsonify({"success": False, "error": verify_err}), 401, None
+        verifier = _verified
+    return None, verifier
+
+
+def _resolve_employee_id(username: str, role: str = "") -> str:
+    """Employee ID for audit export labels (member field or login username)."""
+    uname = str(username or "").strip()
+    if not uname:
+        return "--"
+    member = data_service.get_member_by_username(uname)
+    if member:
+        emp = member.get("employeeId") or member.get("employee_id")
+        if emp is not None and str(emp).strip():
+            return str(emp).strip()
+    return uname
+
+
+def _export_actor_snapshot(user_dict: dict) -> dict:
+    username = str(user_dict.get("username") or user_dict.get("name") or "").strip() or "--"
+    role = str(user_dict.get("role") or "").strip() or "--"
+    return {
+        "username": username,
+        "employee_id": _resolve_employee_id(username, role),
+        "role": role,
+    }
+
+
+def _export_actor_from_verifier(verifier: dict) -> dict:
+    if not verifier:
+        return {}
+    return _export_actor_snapshot(
+        {
+            "username": verifier.get("username") or verifier.get("name"),
+            "role": verifier.get("role"),
+        }
+    )
+
+
+def _maybe_purge_scheduled_audit_export() -> None:
+    """Run due 24h post-verify purge and log audit cycle start."""
+    try:
+        purged = audit_service.run_due_audit_export_purge()
+    except Exception:
+        app.logger.exception("Audit export purge check failed")
+        return
+    if not purged:
+        return
+    exported = purged.get("exported_by") if isinstance(purged.get("exported_by"), dict) else {}
+    approved = purged.get("approved_by") if isinstance(purged.get("approved_by"), dict) else {}
+    ex_u = str(exported.get("username") or "--")
+    ex_e = str(exported.get("employee_id") or "--")
+    ap_u = str(approved.get("username") or "--")
+    ap_e = str(approved.get("employee_id") or "--")
+    details = (
+        "Audit cycle started | Exported by: {} ({}) | Approved by: {} ({})"
+    ).format(ex_u, ex_e, ap_u, ap_e)
+    _audit_event(
+        action="Audit cycle started",
+        outcome="success",
+        entity_type="audit",
+        details=details,
+        event_type="compliance",
+    )
+
+
+def _maybe_purge_scheduled_report_export() -> None:
+    """Run due 24h post-verify purge for exported reports and log cycle start."""
+    try:
+        purged = data_service.run_due_report_export_purge()
+    except Exception:
+        app.logger.exception("Report export purge check failed")
+        return
+    if not purged:
+        return
+    exported = purged.get("exported_by") if isinstance(purged.get("exported_by"), dict) else {}
+    approved = purged.get("approved_by") if isinstance(purged.get("approved_by"), dict) else {}
+    ex_u = str(exported.get("username") or "--")
+    ex_e = str(exported.get("employee_id") or "--")
+    ap_u = str(approved.get("username") or "--")
+    ap_e = str(approved.get("employee_id") or "--")
+    details = (
+        "Report cycle started | Exported by: {} ({}) | Approved by: {} ({})"
+    ).format(ex_u, ex_e, ap_u, ap_e)
+    _audit_event(
+        action="Report cycle started",
+        outcome="success",
+        entity_type="report",
+        details=details,
+        event_type="compliance",
+    )
+
+
+def _maybe_purge_scheduled_exports() -> None:
+    _maybe_purge_scheduled_audit_export()
+    _maybe_purge_scheduled_report_export()
+
+
+def _stage_report_usb_export(cur, verifier, exported_report_ids):
+    """Stage successfully USB-copied reports for operator verification."""
+    ids = []
+    for rid in exported_report_ids or []:
+        try:
+            n = int(rid)
+            if n > 0:
+                ids.append(n)
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return None, None, None
+    export_id = secrets.token_urlsafe(16)
+    exported_by = _export_actor_snapshot(cur or {})
+    approved_by = _export_actor_from_verifier(verifier) if verifier else dict(exported_by)
+    data_service.stage_report_export_pending(
+        export_id=export_id,
+        report_ids=ids,
+        exported_by=exported_by,
+        approved_by=approved_by,
+    )
+    return export_id, exported_by, approved_by
+
+
+def _audit_export_purge_loop():
+    while True:
+        try:
+            _maybe_purge_scheduled_exports()
+        except Exception:
+            app.logger.exception("Export purge loop error")
+        time.sleep(max(15, AUDIT_EXPORT_PURGE_CHECK_SECONDS))
+
+
+_audit_purge_thread = threading.Thread(target=_audit_export_purge_loop, name="audit-export-purge", daemon=True)
+_audit_purge_thread.start()
 
 
 @app.route("/api/data/audit-log", methods=["GET"])
 def get_audit_log():
     """Return audit log entries. Requires audit-view permission (Factory bypass in RBAC)."""
     try:
+        _maybe_purge_scheduled_audit_export()
         cur = data_service.get_current_user()
         if not cur:
             return jsonify({"error": "Unauthorized"}), 401
@@ -2457,7 +4236,7 @@ def _format_wall_datetime_for_audit(dt_value) -> str:
 def _humanize_audit_details(action: str, details: str) -> str:
     """Normalize verbose/internal audit detail text for UI and PDF export."""
     action = str(action or "").strip()
-    details = str(details or "").strip()
+    details = audit_service._details_audit_display(details)
     if not details:
         return details
     if action == "Power interruption":
@@ -2555,12 +4334,13 @@ def _prepare_audit_entries_for_display(entries):
         if _audit_entry_should_omit(entry):
             continue
         row = dict(entry)
+        row["role"] = _display_role_label(row.get("role"))
         row["details"] = _humanize_audit_details(row.get("action"), row.get("details"))
         out.append(row)
     return out
 
 
-def _build_audit_trail_html(entries, filters, factory):
+def _build_audit_trail_html(entries, filters, factory, export_meta=None):
     """Build a printable A4 audit-trail HTML document.
 
     Layout: branded header (company/model/serial from factory settings),
@@ -2575,6 +4355,27 @@ def _build_audit_trail_html(entries, filters, factory):
     location = _html_escape(factory.get("companyLocation") or factory.get("location") or "")
     instrument_no = _html_escape(factory.get("instrumentId") or "")
     generated_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    export_meta = export_meta if isinstance(export_meta, dict) else {}
+    exported_by = export_meta.get("exported_by") if isinstance(export_meta.get("exported_by"), dict) else {}
+    approved_by = export_meta.get("approved_by") if isinstance(export_meta.get("approved_by"), dict) else {}
+    export_lines = []
+    if exported_by:
+        export_lines.append(
+            "<div><strong>Exported by:</strong> "
+            + _html_escape(str(exported_by.get("username") or "--"))
+            + " ("
+            + _html_escape(str(exported_by.get("employee_id") or "--"))
+            + ")</div>"
+        )
+    if approved_by:
+        export_lines.append(
+            "<div><strong>Approved by:</strong> "
+            + _html_escape(str(approved_by.get("username") or "--"))
+            + " ("
+            + _html_escape(str(approved_by.get("employee_id") or "--"))
+            + ")</div>"
+        )
+    export_meta_html = "".join(export_lines)
 
     def _fmt_ts(ts):
         try:
@@ -2655,39 +4456,41 @@ def _build_audit_trail_html(entries, filters, factory):
     return (
         '<!doctype html><html><head><meta charset="utf-8"><title>Audit Trail Export</title>'
         '<style>'
-        '@page { size: A4 landscape; margin: 10mm 8mm; }'
+        '@page { size: A4 portrait; margin: 10mm; }'
         'html, body { margin: 0; padding: 0; background:#ffffff; color:#111;'
-        '   font-family: "Inter", "Segoe UI", Roboto, Arial, sans-serif; font-size: 9.5pt; }'
-        'h1 { font-size: 14pt; margin: 0 0 4px 0; letter-spacing: 0.5px; }'
-        'h2 { font-size: 11pt; margin: 0 0 8px 0; color:#444; font-weight: 600; }'
-        '.brand { display:flex; justify-content:space-between; align-items:flex-end; '
+        '   font-family: "Inter", "Segoe UI", Roboto, Arial, sans-serif; font-size: 10.5pt; }'
+        'body { text-align: center; }'
+        '.audit-sheet { width: 100%; max-width: 190mm; margin: 0 auto; text-align: left; box-sizing: border-box; }'
+        'h1 { font-size: 16pt; margin: 0 0 4px 0; letter-spacing: 0.5px; }'
+        'h2 { font-size: 12pt; margin: 0 0 8px 0; color:#444; font-weight: 600; }'
+        '.brand { display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:10px; '
         '         border-bottom: 2px solid #111; padding-bottom: 6px; margin-bottom: 8px; }'
         '.brand .meta { text-align: right; font-size: 9pt; color:#333; }'
         '.brand .meta div { line-height: 1.35; }'
         '.brand .meta strong { color:#111; }'
         '.chips { margin: 4px 0 8px 0; }'
         '.chip { display:inline-block; padding: 2px 8px; margin-right: 6px; margin-bottom: 4px;'
-        '        background:#eef2ff; color:#1e3a8a; border-radius: 12px; font-size: 8.5pt; }'
-        '.muted { color:#666; font-style: italic; font-size: 8.5pt; }'
+        '        background:#eef2ff; color:#1e3a8a; border-radius: 12px; font-size: 9.5pt; }'
+        '.muted { color:#666; font-style: italic; font-size: 9.5pt; }'
         'table { width:100%; border-collapse: collapse; table-layout: fixed; }'
-        'thead th { background:#111827; color:#fff; padding: 6px 6px; text-align: left;'
-        '           font-weight:600; font-size: 9pt; border: 1px solid #111827; }'
-        'tbody td { border: 1px solid #d1d5db; padding: 5px 6px; vertical-align: top;'
-        '           word-wrap: break-word; overflow-wrap: break-word; }'
+        'thead th { background:#111827; color:#fff; padding: 7px 8px; text-align: left;'
+        '           font-weight:600; font-size: 10pt; border: 1px solid #111827; }'
+        'tbody td { border: 1px solid #d1d5db; padding: 6px 8px; vertical-align: top;'
+        '           word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; }'
         'tbody tr:nth-child(even) td { background: #f9fafb; }'
         '.col-sl  { width: 4%; text-align: right; font-variant-numeric: tabular-nums; }'
-        '.col-dt  { width: 11%; font-variant-numeric: tabular-nums; line-height: 1.25; }'
+        '.col-dt  { width: 14%; font-variant-numeric: tabular-nums; line-height: 1.25; }'
         '.col-dt .dt-date { display: block; white-space: nowrap; font-weight: 600; }'
-        '.col-dt .dt-time { display: block; white-space: nowrap; font-size: 8.5pt; color: #444; }'
-        '.col-out { width: 9%; }'
-        '.col-det { width: 36%; }'
+        '.col-dt .dt-time { display: block; white-space: nowrap; font-size: 9.5pt; color: #444; }'
+        '.col-out { width: 11%; }'
+        '.col-det { width: 24%; }'
         '.empty { text-align: center; padding: 18px 0; color:#666; font-style: italic; }'
-        '.footer { margin-top: 10px; font-size: 8pt; color:#555; '
+        '.footer { margin-top: 10px; font-size: 9pt; color:#555; '
         '          border-top: 1px solid #d1d5db; padding-top: 6px; }'
         '.footer .left  { float: left; }'
         '.footer .right { float: right; }'
         '.footer::after { content: ""; display: block; clear: both; }'
-        '</style></head><body>'
+        '</style></head><body><div class="audit-sheet">'
         '<div class="brand">'
         '  <div>'
         '    <h1>AUDIT TRAIL EXPORT</h1>'
@@ -2700,6 +4503,7 @@ def _build_audit_trail_html(entries, filters, factory):
         '    <div><strong>Location:</strong> ' + (location or "--") + '</div>'
         '    <div><strong>Generated:</strong> ' + _html_escape(generated_at) + '</div>'
         '    <div><strong>Entries:</strong> ' + str(len(entries)) + '</div>'
+        + export_meta_html +
         '  </div>'
         '</div>'
         + chips_html +
@@ -2719,7 +4523,7 @@ def _build_audit_trail_html(entries, filters, factory):
         '  <span class="left">This document is auto-generated and write-protected (PDF).</span>'
         '  <span class="right">' + _html_escape(generated_at) + '</span>'
         '</div>'
-        '</body></html>'
+        '</div></body></html>'
     )
 
 
@@ -2732,7 +4536,8 @@ def export_audit_trails():
     """
     mounted_now = None
     try:
-        gate = _require_export_usb_and_verification_json()
+        _maybe_purge_scheduled_audit_export()
+        gate, verifier = _require_export_usb_and_verification_json()
         if gate is not None:
             return gate
         audit_gate = _require_session_internal(
@@ -2779,11 +4584,15 @@ def export_audit_trails():
         export_dir.mkdir(parents=True, exist_ok=True)
 
         entries = _prepare_audit_entries_for_display(audit_service.list_entries(filters))
+        entry_ids = [str(e.get("id")).strip() for e in entries if e.get("id")]
+        exported_by = _export_actor_snapshot(cur or {})
+        approved_by = _export_actor_from_verifier(verifier) if verifier else dict(exported_by)
+        export_meta = {"exported_by": exported_by, "approved_by": approved_by}
         try:
             factory = data_service.get_factory_settings() or {}
         except Exception:
             factory = {}
-        html = _build_audit_trail_html(entries, filters, factory)
+        html = _build_audit_trail_html(entries, filters, factory, export_meta=export_meta)
         timestamp = time.strftime("%Y-%m-%d_%H%M%S", time.localtime())
         out_path = export_dir / "audit_trail_{}.pdf".format(timestamp)
         pdf_generator.render_html_to_pdf(html, out_path)
@@ -2799,11 +4608,25 @@ def export_audit_trails():
             power_off = bool(data.get("power_off") or False)
             unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
 
+        export_id = secrets.token_urlsafe(16)
+        audit_service.stage_audit_export_pending(
+            export_id=export_id,
+            entry_ids=entry_ids,
+            exported_by=exported_by,
+            approved_by=approved_by,
+            pdf_path=str(out_path),
+        )
+        ex_u = exported_by.get("username") or "--"
+        ex_e = exported_by.get("employee_id") or "--"
+        ap_u = approved_by.get("username") or "--"
+        ap_e = approved_by.get("employee_id") or "--"
         _audit(
             cur.get("username") or cur.get("name"),
             cur.get("role"),
             "Audit trail exported",
-            "pdf {} | entries {}".format(out_path, len(entries)),
+            "pdf {} | entries {} | exported by {} ({}) | approved by {} ({})".format(
+                out_path, len(entries), ex_u, ex_e, ap_u, ap_e
+            ),
         )
         return jsonify({
             "success": True,
@@ -2811,6 +4634,7 @@ def export_audit_trails():
             "export_directory": str(export_dir),
             "format": "pdf",
             "entries": len(entries),
+            "export_id": export_id,
             "unmount_detail": unmount_detail,
         }), 200
     except Exception as e:
@@ -2823,6 +4647,88 @@ def export_audit_trails():
         return jsonify({"success": False, "error": _friendly_export_error(e)}), 500
 
 
+@app.route("/api/audit/export/confirm", methods=["POST"])
+def confirm_audit_export():
+    """Operator confirmed USB PDF verification; starts 24h retention timer for exported rows only."""
+    try:
+        _maybe_purge_scheduled_audit_export()
+        cur = data_service.get_current_user()
+        if not cur:
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
+        if not _session_has_internal("audit-view"):
+            return jsonify({"success": False, "error": "Forbidden."}), 403
+        data = request.get_json(force=True, silent=True) or {}
+        export_id = (data.get("export_id") or "").strip()
+        verified = bool(data.get("verified"))
+        if not verified:
+            return jsonify({"success": True, "verified": False, "scheduled": False}), 200
+        if not export_id:
+            return jsonify({"success": False, "error": "Missing export_id"}), 400
+        scheduled = audit_service.confirm_audit_export_verified(export_id)
+        if not scheduled:
+            return jsonify({"success": False, "error": "Export session expired or invalid. Export again."}), 400
+        purge_at_ms = int(scheduled.get("purge_at_ms") or 0)
+        _audit(
+            cur.get("username") or cur.get("name"),
+            cur.get("role"),
+            "Audit export verified",
+            "USB export verified; {} entries scheduled for removal after 24 hours".format(
+                len(scheduled.get("entry_ids") or [])
+            ),
+        )
+        return jsonify({
+            "success": True,
+            "verified": True,
+            "scheduled": True,
+            "purge_at_ms": purge_at_ms,
+            "entries_scheduled": len(scheduled.get("entry_ids") or []),
+        }), 200
+    except Exception as e:
+        app.logger.exception("Error confirming audit export")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/reports/export/confirm", methods=["POST"])
+def confirm_report_export():
+    """Operator confirmed USB report export; starts 24h retention timer for exported reports only."""
+    try:
+        _maybe_purge_scheduled_report_export()
+        cur = data_service.get_current_user()
+        if not cur:
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
+        if not _session_has_internal("export-usb"):
+            return jsonify({"success": False, "error": "Forbidden."}), 403
+        data = request.get_json(force=True, silent=True) or {}
+        export_id = (data.get("export_id") or "").strip()
+        verified = bool(data.get("verified"))
+        if not verified:
+            return jsonify({"success": True, "verified": False, "scheduled": False}), 200
+        if not export_id:
+            return jsonify({"success": False, "error": "Missing export_id"}), 400
+        scheduled = data_service.confirm_report_export_verified(export_id)
+        if not scheduled:
+            return jsonify({"success": False, "error": "Export session expired or invalid. Export again."}), 400
+        purge_at_ms = int(scheduled.get("purge_at_ms") or 0)
+        _audit(
+            cur.get("username") or cur.get("name"),
+            cur.get("role"),
+            "Report export verified",
+            "USB export verified; {} report(s) scheduled for removal after 24 hours".format(
+                len(scheduled.get("report_ids") or [])
+            ),
+        )
+        return jsonify({
+            "success": True,
+            "verified": True,
+            "scheduled": True,
+            "purge_at_ms": purge_at_ms,
+            "reports_scheduled": len(scheduled.get("report_ids") or []),
+        }), 200
+    except Exception as e:
+        app.logger.exception("Error confirming report export")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 # =================== CALCULATE ==========================
 
 
@@ -2830,7 +4736,7 @@ def export_audit_trails():
 def validate_recipe_endpoint():
     try:
         gate = _require_any_session_internal(
-            ["recipe-edit", "recipe-list", "quick-test"],
+            ["recipe-manage", "recipe-test", "quick-test"],
             "Forbidden. You do not have permission to manage recipes.",
         )
         if gate:
@@ -2869,6 +4775,25 @@ def get_report_preview(report_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/reports/<int:report_id>/a4-text", methods=["GET"])
+def get_report_a4_text(report_id):
+    """Return the A4 plain-text report body (same as print/export PDF)."""
+    try:
+        gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to view reports.")
+        if gate:
+            return gate
+        report = data_service.get_report(report_id)
+        if not report:
+            return jsonify({"error": "Report not found"}), 404
+        a4_text = report_service.get_report_a4_text(report)
+        if not a4_text:
+            return jsonify({"error": "Report preview is not available."}), 500
+        return jsonify({"a4Text": a4_text}), 200
+    except Exception as e:
+        app.logger.exception("Error getting report A4 text")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/usb/list", methods=["GET"])
 def list_usb_pendrives():
     """List external pendrives suitable for export (excludes OS root + internal USB)."""
@@ -2904,8 +4829,8 @@ def _remove_report_pdf_file(report_id: int) -> None:
         pass
 
 
-def _generate_report_pdf_file(report_id: int, html: str = None, write_audit: bool = True) -> bool:
-    """Render report PDF from client HTML or server-built HTML. Overwrites any existing file."""
+def _generate_report_pdf_file(report_id: int, write_audit: bool = True) -> bool:
+    """Render report PDF from A4 plain-text layout (same as dot-matrix print). Overwrites any existing file."""
     report = data_service.get_report(report_id)
     if not report:
         return False
@@ -2913,8 +4838,8 @@ def _generate_report_pdf_file(report_id: int, html: str = None, write_audit: boo
         _remove_report_pdf_file(report_id)
         return False
     try:
-        if not isinstance(html, str) or not html.strip():
-            html = report_service.build_report_pdf_html(report)
+        # CFR 21: always use server A4 text formatter (====, ----, ****), never UI preview HTML.
+        html = report_service.build_report_pdf_html(report)
         out_path = _report_pdf_path(report_id)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         pdf_generator.render_html_to_pdf(html, out_path)
@@ -2950,9 +4875,9 @@ def _friendly_export_error(exc_or_msg):
 
 @app.route("/api/reports/<int:report_id>/pdf", methods=["POST"])
 def save_report_pdf(report_id):
-    """Render the supplied HTML for a report to PDF and store it next to the .txt files.
+    """Render report PDF from A4 plain-text layout (same as dot-matrix print).
 
-    Body: { "html": "<full document or fragment>" }
+    Body is optional (legacy ``html`` field is ignored).
     """
     try:
         gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to view reports.")
@@ -2966,11 +4891,7 @@ def save_report_pdf(report_id):
                 "success": False,
                 "error": "PDF is available only after the report is approved or marked aborted.",
             }), 403
-        payload = request.get_json(force=True, silent=True) or {}
-        html = payload.get("html")
-        if not isinstance(html, str) or not html.strip():
-            return jsonify({"success": False, "error": "html is required"}), 400
-        if not _generate_report_pdf_file(report_id, html=html, write_audit=True):
+        if not _generate_report_pdf_file(report_id, write_audit=True):
             return jsonify({"success": False, "error": "PDF generation failed"}), 500
         out_path = _report_pdf_path(report_id)
         return jsonify({"success": True, "path": str(out_path), "size_bytes": out_path.stat().st_size}), 200
@@ -3023,13 +4944,15 @@ def export_reports():
     Body:
       report_ids:        [int, ...]                       (required)
       device_path:       "/dev/sdb1"                      (optional; required if multiple pendrives)
-      pdf_html_by_id:    { "<report_id>": "<html>", ... } (optional; auto-generate any missing PDFs)
       export_path:       "/abs/path"                      (optional; override mount detection for dev)
+
+    PDFs are generated server-side from the A4 plain-text layout (same as dot-matrix print).
 
     Returns 409 with `devices` list when multiple pendrives are connected and none chosen.
     """
     mounted_now = None
     try:
+        _maybe_purge_scheduled_exports()
         data = request.get_json(force=True, silent=True) or {}
         raw_ids = data.get("report_ids", [])
         report_ids = []
@@ -3040,18 +4963,14 @@ def export_reports():
                 continue
         if not report_ids:
             return jsonify({"success": False, "error": "No report IDs provided"}), 400
-        gate = _require_export_usb_and_verification_json()
+        gate, verifier = _require_export_usb_and_verification_json()
         if gate is not None:
             return gate
+        cur = data_service.get_current_user()
         device_path = (data.get("device_path") or "").strip() or None
         requested_export_path = (data.get("export_path") or "").strip() or None
-        pdf_html_by_id = data.get("pdf_html_by_id") or {}
-        if isinstance(pdf_html_by_id, dict):
-            pdf_html_by_id = {str(k): v for k, v in pdf_html_by_id.items() if isinstance(v, str) and v.strip()}
-        else:
-            pdf_html_by_id = {}
 
-        # Ensure PDFs exist (only approved/aborted reports may have PDF files).
+        # Regenerate PDFs from A4 plain-text layout (same as dot-matrix print).
         generated = []
         missing = []
         for rid in report_ids:
@@ -3061,18 +4980,7 @@ def export_reports():
                 if st == "pending":
                     missing.append(rid)
                     continue
-            pdf_path = _report_pdf_path(rid)
-            if pdf_path.exists() and pdf_path.stat().st_size > 0:
-                continue
-            html = pdf_html_by_id.get(str(rid))
-            if html and _report_pdf_status_allowed(report):
-                try:
-                    pdf_generator.render_html_to_pdf(html, pdf_path)
-                    generated.append(rid)
-                except Exception as e:
-                    app.logger.warning("[EXPORT] PDF generation failed for report %s: %s", rid, e)
-                    missing.append(rid)
-            elif _generate_report_pdf_file(rid):
+            if _generate_report_pdf_file(rid):
                 generated.append(rid)
             else:
                 missing.append(rid)
@@ -3101,6 +5009,7 @@ def export_reports():
 
         exported_files = []
         failed = []
+        exported_report_ids = []
         for rid in report_ids:
             src = _report_pdf_path(rid)
             if not src.exists():
@@ -3121,6 +5030,7 @@ def export_reports():
                             break
                         fout.write(chunk)
                 exported_files.append(str(dest))
+                exported_report_ids.append(int(rid))
             except Exception as e:
                 failed.append({"id": rid, "error": str(e)})
 
@@ -3132,12 +5042,25 @@ def export_reports():
             unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
 
         ok_count = len(exported_files)
-        _audit(
-            None, None,
-            "Reports exported",
-            "Exported {} report{} to USB".format(
+        export_id = None
+        if exported_report_ids:
+            export_id, exported_by, approved_by = _stage_report_usb_export(cur, verifier, exported_report_ids)
+            ex_u = (exported_by or {}).get("username") or "--"
+            ex_e = (exported_by or {}).get("employee_id") or "--"
+            ap_u = (approved_by or {}).get("username") or "--"
+            ap_e = (approved_by or {}).get("employee_id") or "--"
+            audit_detail = "Exported {} report{} to USB | exported by {} ({}) | approved by {} ({})".format(
+                ok_count, "" if ok_count == 1 else "s", ex_u, ex_e, ap_u, ap_e
+            )
+        else:
+            audit_detail = "Exported {} report{} to USB".format(
                 ok_count, "" if ok_count == 1 else "s"
-            ),
+            )
+        _audit(
+            cur.get("username") or cur.get("name") if cur else None,
+            cur.get("role") if cur else None,
+            "Reports exported",
+            audit_detail,
         )
         return jsonify({
             "success": (len(failed) == 0),
@@ -3148,6 +5071,8 @@ def export_reports():
             "generated_pdfs_now": generated,
             "unmount_detail": unmount_detail,
             "device_path": device_path or (devices[0]["path"] if len(devices) == 1 else None),
+            "export_id": export_id,
+            "reports_staged": len(exported_report_ids),
         }), 200
     except Exception as e:
         if mounted_now:
@@ -3185,16 +5110,13 @@ def export_reports_stream():
         return jsonify({"success": False, "error": "No report IDs provided"}), 400
     device_path = (data.get("device_path") or "").strip() or None
     requested_export_path = (data.get("export_path") or "").strip() or None
-    pdf_html_by_id_raw = data.get("pdf_html_by_id") or {}
-    if isinstance(pdf_html_by_id_raw, dict):
-        pdf_html_by_id = {str(k): v for k, v in pdf_html_by_id_raw.items() if isinstance(v, str) and v.strip()}
-    else:
-        pdf_html_by_id = {}
     power_off = bool(data.get("power_off") or False)
 
-    gate = _require_export_usb_and_verification_json()
+    _maybe_purge_scheduled_exports()
+    gate, verifier = _require_export_usb_and_verification_json()
     if gate is not None:
         return gate
+    cur = data_service.get_current_user()
     for rid in report_ids:
         blocked = _check_report_approved_for_print_export(report_id=rid)
         if blocked is not None:
@@ -3215,6 +5137,7 @@ def export_reports_stream():
             "ok": False,
             "count": 0,
             "exported_files": [],
+            "exported_report_ids": [],
             "failed": [],
             "export_directory": None,
             "device_path": None,
@@ -3258,29 +5181,18 @@ def export_reports_stream():
                                      "percent": int(next_progress_at), "id": rid,
                                      "status": "failed"})
                         continue
-                # 1) Ensure a PDF exists for this report (generate if needed).
+                # 1) Regenerate PDF from A4 plain-text layout (same as dot-matrix print).
                 pdf_src = _report_pdf_path(rid)
-                if not (pdf_src.exists() and pdf_src.stat().st_size > 0):
-                    html = pdf_html_by_id.get(str(rid))
+                yield _emit({"event": "report", "current": i, "total": total,
+                             "percent": int(this_progress_at + per_report_pct * 0.3), "id": rid,
+                             "status": "generating",
+                             "message": "Generating PDF for report {} of {}...".format(i, total)})
+                if not _generate_report_pdf_file(rid):
+                    result["failed"].append({"id": rid, "reason": "render"})
                     yield _emit({"event": "report", "current": i, "total": total,
-                                 "percent": int(this_progress_at + per_report_pct * 0.3), "id": rid,
-                                 "status": "generating",
-                                 "message": "Generating PDF for report {} of {}...".format(i, total)})
-                    ok = False
-                    if html and _report_pdf_status_allowed(report):
-                        try:
-                            pdf_generator.render_html_to_pdf(html, pdf_src)
-                            ok = pdf_src.exists() and pdf_src.stat().st_size > 0
-                        except Exception as e:
-                            app.logger.warning("[EXPORT-STREAM] PDF render failed for %s: %s", rid, e)
-                    if not ok:
-                        ok = _generate_report_pdf_file(rid)
-                    if not ok:
-                        result["failed"].append({"id": rid, "reason": "render"})
-                        yield _emit({"event": "report", "current": i, "total": total,
-                                     "percent": int(next_progress_at), "id": rid,
-                                     "status": "failed"})
-                        continue
+                                 "percent": int(next_progress_at), "id": rid,
+                                 "status": "failed"})
+                    continue
 
                 # 2) Copy to pendrive destination.
                 recipe = report.get("recipe") if isinstance(report.get("recipe"), dict) else {}
@@ -3296,6 +5208,7 @@ def export_reports_stream():
                 try:
                     pdf_generator._copy_to_destination(pdf_src, dest)  # robust chunked copy
                     result["exported_files"].append(str(dest))
+                    result["exported_report_ids"].append(int(rid))
                     result["count"] += 1
                     yield _emit({"event": "report", "current": i, "total": total,
                                  "percent": int(next_progress_at), "id": rid,
@@ -3315,15 +5228,32 @@ def export_reports_stream():
                 mounted_now = None
 
             ok_count = result["count"]
-            _audit(
-                None, None,
-                "Reports exported",
-                "Exported {} report{} to USB".format(
+            export_id = None
+            if result["exported_report_ids"]:
+                export_id, exported_by, approved_by = _stage_report_usb_export(
+                    cur, verifier, result["exported_report_ids"]
+                )
+                ex_u = (exported_by or {}).get("username") or "--"
+                ex_e = (exported_by or {}).get("employee_id") or "--"
+                ap_u = (approved_by or {}).get("username") or "--"
+                ap_e = (approved_by or {}).get("employee_id") or "--"
+                audit_detail = "Exported {} report{} to USB | exported by {} ({}) | approved by {} ({})".format(
+                    ok_count, "" if ok_count == 1 else "s", ex_u, ex_e, ap_u, ap_e
+                )
+            else:
+                audit_detail = "Exported {} report{} to USB".format(
                     ok_count, "" if ok_count == 1 else "s"
-                ),
+                )
+            _audit(
+                cur.get("username") or cur.get("name") if cur else None,
+                cur.get("role") if cur else None,
+                "Reports exported",
+                audit_detail,
             )
 
             result["ok"] = (len(result["failed"]) == 0 and result["count"] > 0)
+            result["export_id"] = export_id
+            result["reports_staged"] = len(result["exported_report_ids"])
             yield _emit({
                 "event": "done",
                 "percent": 100,
@@ -3334,6 +5264,8 @@ def export_reports_stream():
                 "export_directory": result["export_directory"],
                 "device_path": result["device_path"],
                 "unmount_detail": unmount_detail,
+                "export_id": export_id,
+                "reports_staged": len(result["exported_report_ids"]),
             })
         except Exception as e:
             app.logger.exception("[EXPORT-STREAM] Unexpected failure")
@@ -3373,6 +5305,25 @@ def _load_report_data_for_print(report_id, report_data_fallback=None):
 
 # =================== PRINT ==========================
 
+_print_in_flight = {}
+_print_in_flight_lock = threading.Lock()
+
+
+def _acquire_print_slot(report_id, print_type):
+    key = (report_id, print_type)
+    with _print_in_flight_lock:
+        if key in _print_in_flight:
+            return None
+        _print_in_flight[key] = True
+        return key
+
+
+def _release_print_slot(key):
+    if key is None:
+        return
+    with _print_in_flight_lock:
+        _print_in_flight.pop(key, None)
+
 
 @app.route("/api/print/a4", methods=["POST"])
 def print_a4():
@@ -3404,42 +5355,48 @@ def print_a4():
             return jsonify(result), 200
         report_data = data.get("report_data", {}) or {}
         report_id = report_data.get("id")
-        if report_id is not None:
-            blocked = _check_report_approved_for_print_export(report_id=report_id)
+        slot = _acquire_print_slot(report_id, "a4")
+        if slot is None:
+            return jsonify({"ok": False, "error": "Print already in progress"}), 409
+        try:
+            if report_id is not None:
+                blocked = _check_report_approved_for_print_export(report_id=report_id)
+                if blocked is not None:
+                    return blocked
+                loaded = _load_report_data_for_print(report_id, report_data)
+                if loaded:
+                    report_data = loaded
+                    try:
+                        print_service.save_report_text_files(report_data, int(report_id), REPORTS_DIR)
+                    except Exception:
+                        pass
+                    result = print_service.print_a4_report(report_data)
+                    if result.get("success"):
+                        _audit(None, None, "Print A4", "Report id {}".format(report_id))
+                    return jsonify(result), 200 if result.get("success") else 500
+            blocked = _check_report_approved_for_print_export(report_data=report_data)
             if blocked is not None:
                 return blocked
-            loaded = _load_report_data_for_print(report_id, report_data)
-            if loaded:
-                report_data = loaded
+            if not report_data.get("factorySettings"):
                 try:
-                    print_service.save_report_text_files(report_data, int(report_id), REPORTS_DIR)
+                    report_data = dict(report_data)
+                    report_data["factorySettings"] = report_service.enrich_factory_settings(
+                        data_service.get_factory_settings() or {}
+                    )
                 except Exception:
                     pass
-                result = print_service.print_a4_report(report_data)
-                if result.get("success"):
-                    _audit(None, None, "Print A4", "Report id {}".format(report_id))
-                return jsonify(result), 200 if result.get("success") else 500
-        blocked = _check_report_approved_for_print_export(report_data=report_data)
-        if blocked is not None:
-            return blocked
-        if not report_data.get("factorySettings"):
-            try:
-                report_data = dict(report_data)
-                report_data["factorySettings"] = report_service.enrich_factory_settings(
-                    data_service.get_factory_settings() or {}
-                )
-            except Exception:
-                pass
-        report_data = report_service.enrich_report_context(dict(report_data))
-        result = print_service.print_a4_report(report_data)
-        rid = report_data.get("id")
-        _audit(
-            None,
-            None,
-            "Print A4",
-            "Report id {}".format(rid if rid is not None else "—"),
-        )
-        return jsonify(result), 200
+            report_data = report_service.enrich_report_context(dict(report_data))
+            result = print_service.print_a4_report(report_data)
+            rid = report_data.get("id")
+            _audit(
+                None,
+                None,
+                "Print A4",
+                "Report id {}".format(rid if rid is not None else "—"),
+            )
+            return jsonify(result), 200
+        finally:
+            _release_print_slot(slot)
     except Exception as e:
         app.logger.exception("Error printing A4")
         return jsonify({"error": str(e)}), 500
@@ -3475,42 +5432,48 @@ def print_thermal():
             return jsonify(result), 200
         report_data = data.get("report_data", {}) or {}
         report_id = report_data.get("id")
-        if report_id is not None:
-            blocked = _check_report_approved_for_print_export(report_id=report_id)
+        slot = _acquire_print_slot(report_id, "thermal")
+        if slot is None:
+            return jsonify({"ok": False, "error": "Print already in progress"}), 409
+        try:
+            if report_id is not None:
+                blocked = _check_report_approved_for_print_export(report_id=report_id)
+                if blocked is not None:
+                    return blocked
+                loaded = _load_report_data_for_print(report_id, report_data)
+                if loaded:
+                    report_data = loaded
+                    try:
+                        print_service.save_report_text_files(report_data, int(report_id), REPORTS_DIR)
+                    except Exception:
+                        pass
+                    result = print_service.print_thermal_report(report_data)
+                    if result.get("success"):
+                        _audit(None, None, "Print thermal", "Report id {}".format(report_id))
+                    return jsonify(result), 200 if result.get("success") else 500
+            blocked = _check_report_approved_for_print_export(report_data=report_data)
             if blocked is not None:
                 return blocked
-            loaded = _load_report_data_for_print(report_id, report_data)
-            if loaded:
-                report_data = loaded
+            if not report_data.get("factorySettings"):
                 try:
-                    print_service.save_report_text_files(report_data, int(report_id), REPORTS_DIR)
+                    report_data = dict(report_data)
+                    report_data["factorySettings"] = report_service.enrich_factory_settings(
+                        data_service.get_factory_settings() or {}
+                    )
                 except Exception:
                     pass
-                result = print_service.print_thermal_report(report_data)
-                if result.get("success"):
-                    _audit(None, None, "Print thermal", "Report id {}".format(report_id))
-                return jsonify(result), 200 if result.get("success") else 500
-        blocked = _check_report_approved_for_print_export(report_data=report_data)
-        if blocked is not None:
-            return blocked
-        if not report_data.get("factorySettings"):
-            try:
-                report_data = dict(report_data)
-                report_data["factorySettings"] = report_service.enrich_factory_settings(
-                    data_service.get_factory_settings() or {}
-                )
-            except Exception:
-                pass
-        report_data = report_service.enrich_report_context(dict(report_data))
-        result = print_service.print_thermal_report(report_data)
-        rid = report_data.get("id")
-        _audit(
-            None,
-            None,
-            "Print thermal",
-            "Report id {}".format(rid if rid is not None else "—"),
-        )
-        return jsonify(result), 200
+            report_data = report_service.enrich_report_context(dict(report_data))
+            result = print_service.print_thermal_report(report_data)
+            rid = report_data.get("id")
+            _audit(
+                None,
+                None,
+                "Print thermal",
+                "Report id {}".format(rid if rid is not None else "—"),
+            )
+            return jsonify(result), 200
+        finally:
+            _release_print_slot(slot)
     except Exception as e:
         app.logger.exception("Error printing thermal")
         return jsonify({"error": str(e)}), 500
@@ -3618,12 +5581,19 @@ def validation_load_start():
     check = hardware_service.cmd_check_adapter()
     detected = _adapter_kind_from_check_result(check)
     if detected != mode:
-        usp_label = "USP 1" if mode == "usp1" else "USP 2"
+        audit_action = (
+            "check adaptor and holder" if mode == "usp2" else "holder error"
+        )
+        user_message = (
+            "Check adaptor and holder"
+            if mode == "usp2"
+            else "Holder error"
+        )
         _audit_event(
-            action="{} adapter error".format(usp_label),
+            action=audit_action,
             outcome="failed",
             entity_type="hardware",
-            entity_name="adapter",
+            entity_name="holder",
             details="Validation start blocked: expected {}, detected {}".format(
                 mode, detected or "none"
             ),
@@ -3634,7 +5604,7 @@ def validation_load_start():
             "error": "adapter_mismatch",
             "expected": mode,
             "detected": detected,
-            "message": "Please check the adapter",
+            "message": user_message,
             "response": (check.get("response") if check else None),
         }), 400
     result = hardware_service.cmd_start_validation(mode)
@@ -3661,11 +5631,11 @@ def hardware_check_adapter():
     detected = _adapter_kind_from_check_result(result)
     if detected == "error" or (result and not result.get("ok") and detected is None):
         _audit_event(
-            action="Adapter check error",
+            action="Holder check error",
             outcome="failed",
             entity_type="hardware",
-            entity_name="adapter",
-            details=(result.get("response") if isinstance(result, dict) else None) or "Adapter check failed",
+            entity_name="holder",
+            details=(result.get("response") if isinstance(result, dict) else None) or "Holder check failed",
             extra={"detected": detected, "response": result},
         )
     return jsonify(result)
@@ -3683,6 +5653,8 @@ def hardware_tap_start():
     speed_mode = data.get("speedMode")
     taps = data.get("tapCount")
     result = hardware_service.cmd_start_taps(speed_mode, taps)
+    if result.get("ok"):
+        _mark_checkpoint_esp_command("tap/start")
     return jsonify(result), (200 if result.get("ok") else 400)
 
 
@@ -3695,7 +5667,32 @@ def hardware_tap_stop():
     if gate:
         return gate
     result = hardware_service.cmd_stop()
+    if result.get("ok"):
+        _mark_checkpoint_esp_command("tap/stop")
     return jsonify(result)
+
+
+@app.route("/api/system/network-addresses", methods=["GET"])
+def get_network_addresses():
+    denied = _require_auth_or_kiosk_headers()
+    if denied:
+        return denied
+    try:
+        payload = network_service.list_non_tailscale_addresses()
+        if not isinstance(payload, dict):
+            payload = {"ok": False, "error": "Invalid network payload", "wlan": None, "lan": None}
+        elif payload.get("ok") is not False and "ok" not in payload:
+            payload["ok"] = True
+        _audit(
+            None,
+            None,
+            "IP addresses viewed",
+            "lan={} wlan={}".format(payload.get("lan") or "—", payload.get("wlan") or "—"),
+        )
+        return jsonify(payload), 200
+    except Exception as exc:
+        app.logger.exception("network-addresses failed")
+        return jsonify({"ok": False, "error": str(exc), "wlan": None, "lan": None}), 500
 
 
 # =================== BIOMETRIC ==========================
@@ -4020,7 +6017,6 @@ def set_rtc_date_route():
     if not dt_str:
         return jsonify({"success": False, "error": "datetime required"}), 400
     try:
-        from datetime import datetime
         dt_obj = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
     except Exception:
         return jsonify({"success": False, "error": "invalid datetime"}), 400

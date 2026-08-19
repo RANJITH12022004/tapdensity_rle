@@ -149,10 +149,13 @@ def _wrap_html_for_a4(html: str) -> str:
     appended; otherwise wrap a fragment in a full document."""
     snippet = html.strip()
     looks_like_doc = snippet.lower().startswith("<!doctype") or snippet.lower().startswith("<html")
+    lower = snippet.lower()
+    has_page_rule = "@page" in lower
+    page_rule = "" if has_page_rule else "@page { size: A4; margin: 10mm; }"
     a4_page_css = (
         "<style>"
-        "@page { size: A4; margin: 6mm 5mm; }"
-        "html, body { margin: 0; padding: 0; }"
+        + page_rule
+        + "html, body { margin: 0; padding: 0; }"
         "body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }"
         "</style>"
     )

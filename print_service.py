@@ -21,10 +21,56 @@ try:
 except ImportError:
     bridge_services = None
 
+try:
+    from report_service import (
+        build_test_report_derived,
+        completed_step_drop_counts,
+        format_duration_hhmmss,
+        performed_total_drops,
+        test_duration_seconds,
+        _format_derived_number,
+    )
+except ImportError:
+    def build_test_report_derived(td, recipe=None, report_id=None):
+        return {}
+
+    def performed_total_drops(td, recipe=None):
+        return None
+
+    def completed_step_drop_counts(td, recipe=None):
+        return []
+
+    def _format_derived_number(val, decimals=3):
+        return "--" if val is None else str(val)
+    def format_duration_hhmmss(seconds_val):
+        if seconds_val is None:
+            return "--"
+        try:
+            total_s = int(seconds_val)
+        except (TypeError, ValueError):
+            return "--"
+        if total_s < 0:
+            return "--"
+        h, rem = divmod(total_s, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def test_duration_seconds(td):
+        if not isinstance(td, dict):
+            return None
+        sec = td.get("durationSeconds")
+        if sec is not None:
+            try:
+                return max(0, int(sec))
+            except (TypeError, ValueError):
+                pass
+        return None
+
 A4_CANDIDATES = ["/dev/ttyAMA4", "/dev/ttyUSB0", "/dev/ttyUSB1", "COM3", "COM4"]
 THERMAL_CANDIDATES = ["/dev/ttyAMA3", "/dev/ttyUSB0", "/dev/ttyUSB1", "COM3", "COM4"]
 THERMAL_WIDTH = 32
 THERMAL_LINE_CHUNK = 32
+A4_TEXT_WIDTH = 80
 # Blank lines after content so date/time and footer clear the cutter (avoid half-cut).
 THERMAL_POST_PRINT_FEED_LINES = 10
 
@@ -245,6 +291,42 @@ def _wrap_lines(lines: list, width: int) -> list:
     return out
 
 
+def _truncate_with_ellipsis(value: Any, max_len: int) -> str:
+    s = "" if value is None else str(value)
+    if max_len <= 0:
+        return ""
+    if len(s) <= max_len:
+        return s
+    if max_len <= 3:
+        return "." * max_len
+    return s[: max_len - 3] + "..."
+
+
+def _append_two_column_pairs(lines: list, pairs: list, width: int) -> None:
+    """Append key/value pairs as two aligned columns for A4 text output."""
+    if width < 40:
+        for label, value in pairs:
+            lines.append(f"{label}: {value}")
+        return
+    gap = 4
+    col_w = max(18, (width - gap) // 2)
+    value_w = max(8, col_w - 2)
+
+    def _cell(label: Any, value: Any) -> str:
+        lbl = _truncate_with_ellipsis(label, 22)
+        val = _truncate_with_ellipsis(value, value_w)
+        text = f"{lbl}: {val}".strip()
+        return text.ljust(col_w)[:col_w]
+
+    normalized = [(str(k or "--"), str(v if v not in (None, "") else "--")) for k, v in pairs]
+    for i in range(0, len(normalized), 2):
+        left = _cell(normalized[i][0], normalized[i][1])
+        right = ""
+        if i + 1 < len(normalized):
+            right = _cell(normalized[i + 1][0], normalized[i + 1][1])
+        lines.append(left + (" " * gap) + right)
+
+
 
 def _fmt_density_val(val: Any) -> str:
     if val is None or val == "":
@@ -281,18 +363,20 @@ def _effective_step_row_count(td: Dict[str, Any]) -> int:
 def _section_sep(char: str, width: int, thermal: bool) -> str:
     if thermal:
         return _thermal_sep(char, width)
-    return char * min(width, 70)
+    return char * width
 
 
-def _thermal_test_data_row(sn: int, vol: str, dvol: str, bulk: str, tap: str) -> str:
-    """Thermal step row: one space after S.No., two spaces before Tap."""
-    return f"{sn:>2} {str(vol):>5} {str(dvol):>5} {str(bulk):>5}  {str(tap):>5}"
+def _thermal_test_data_row(sn: int, cnt: str, vol: str, dvol: str, bulk: str, tap: str) -> str:
+    """Thermal step row with per-step tap count."""
+    return f"{sn:>2} {str(cnt):>4} {str(vol):>5} {str(dvol):>4} {str(bulk):>4} {str(tap):>4}"
 
 
-_THERMAL_TEST_DATA_HEADER = f"{'#':>2} {'Vol':>5} {'dV':>5} {'Blk':>5}  {'Tap':>5}"
+_THERMAL_TEST_DATA_HEADER = f"{'#':>2} {'Cnt':>4} {'Vol':>5} {'dV':>4} {'Blk':>4} {'Tap':>4}"
 
 
-def _format_thermal_test_data_table(row_count: int, results: list, width: int = THERMAL_WIDTH) -> list:
+def _format_thermal_test_data_table(
+    row_count: int, results: list, steps: Optional[list] = None, width: int = THERMAL_WIDTH
+) -> list:
     """Compact fixed-width step table for 32-char thermal paper."""
     w = width
     lines = [
@@ -303,8 +387,12 @@ def _format_thermal_test_data_table(row_count: int, results: list, width: int = 
         _THERMAL_TEST_DATA_HEADER,
         _section_sep("-", w, True),
     ]
+    steps = steps if isinstance(steps, list) else []
     for i in range(row_count):
         r = results[i] if i < len(results) and isinstance(results[i], dict) else {}
+        cnt = "--"
+        if i < len(steps) and isinstance(steps[i], dict):
+            cnt = _cell_str(steps[i].get("tapCount"))
         vol = _cell_str(r.get("volumeMl"))
         dvol = r.get("volumeDeltaMl", "__")
         if dvol not in (None, "", "__"):
@@ -321,7 +409,7 @@ def _format_thermal_test_data_table(row_count: int, results: list, width: int = 
             tap = _fmt_density_val(tap)
         else:
             tap = _cell_str(tap)
-        lines.append(_thermal_test_data_row(i + 1, vol, dvol, bulk, tap))
+        lines.append(_thermal_test_data_row(i + 1, cnt, vol, dvol, bulk, tap))
     lines.extend(["", _section_sep("-", w, True), ""])
     return lines
 
@@ -362,6 +450,179 @@ def _recipe_total_tap_count(recipe: Dict[str, Any]) -> Optional[int]:
     return total if total > 0 else None
 
 
+def _recipe_total_taps_from_steps_only(recipe: Dict[str, Any]) -> Optional[int]:
+    """A4 text report helper: sum only per-step taps, ignore custom total taps."""
+    if not isinstance(recipe, dict):
+        return None
+    steps = recipe.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None
+    total = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        try:
+            total += int(step.get("tapCount") or 0)
+        except (TypeError, ValueError):
+            pass
+    return total if total > 0 else None
+
+
+def _performed_total_taps(td: Dict[str, Any], recipe: Dict[str, Any]) -> Optional[int]:
+    """Sum taps only for steps that were actually performed."""
+    if not isinstance(td, dict):
+        return None
+    results = td.get("stepResults") or []
+    if not isinstance(results, list) or not results:
+        return None
+    steps = recipe.get("steps") if isinstance(recipe, dict) else []
+    if not isinstance(steps, list):
+        steps = []
+    total = 0
+    found = False
+    for i in range(len(results)):
+        step_taps = None
+        if i < len(steps) and isinstance(steps[i], dict):
+            step_taps = steps[i].get("tapCount")
+        if step_taps in (None, "") and isinstance(results[i], dict):
+            step_taps = results[i].get("tapCount")
+        try:
+            n = int(step_taps)
+            if n > 0:
+                total += n
+                found = True
+        except (TypeError, ValueError):
+            continue
+    return total if found else None
+
+
+def _completed_steps_total_taps(td: Dict[str, Any], recipe: Dict[str, Any]) -> Optional[int]:
+    """
+    Fallback total taps from recipe steps limited to completed step count.
+    Keeps totals aligned with "completed/performed" semantics.
+    """
+    if not isinstance(td, dict) or not isinstance(recipe, dict):
+        return None
+    steps = recipe.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None
+    try:
+        completed = int(td.get("completedSteps"))
+    except (TypeError, ValueError):
+        return None
+    if completed <= 0:
+        return None
+    count = min(completed, len(steps))
+    total = 0
+    found = False
+    for i in range(count):
+        step = steps[i] if i < len(steps) and isinstance(steps[i], dict) else {}
+        try:
+            n = int(step.get("tapCount") or 0)
+            if n > 0:
+                total += n
+                found = True
+        except (TypeError, ValueError):
+            continue
+    return total if found else None
+
+
+def _performed_diff_last_two_steps(td: Dict[str, Any]) -> Any:
+    """
+    Difference between last two performed step volumes.
+    If only one performed step exists, use its available volume delta.
+    """
+    if not isinstance(td, dict):
+        return None
+    results = td.get("stepResults") or []
+    if not isinstance(results, list) or not results:
+        return None
+    if len(results) >= 2:
+        try:
+            v1 = float((results[-2] or {}).get("volumeMl"))
+            v2 = float((results[-1] or {}).get("volumeMl"))
+            return abs(v2 - v1)
+        except Exception:
+            return None
+    one = results[0] if isinstance(results[0], dict) else {}
+    try:
+        dv = one.get("volumeDeltaMl")
+        if dv in (None, ""):
+            return None
+        return abs(float(dv))
+    except Exception:
+        return None
+
+
+def _append_derived_test_summary_and_result(
+    lines: list, derived: Dict[str, Any], width: int, thermal: bool
+) -> None:
+    if not isinstance(derived, dict) or not derived:
+        return
+    eq = _section_sep("=", width, thermal)
+    dash = _section_sep("-", width, thermal)
+    total_taps = derived.get("totalTapsPerformed")
+    if total_taps is None:
+        total_taps = derived.get("totalDrops")
+    if total_taps is None:
+        total_taps = derived.get("totalTaps")
+    total_taps_str = str(total_taps) if total_taps is not None else "--"
+    if thermal:
+        lines.extend(
+            [
+                "",
+                eq,
+                "TEST SUMMARY",
+                dash,
+                f"Sample Weight (g): {_format_derived_number(derived.get('sampleWeightG'), 2)}",
+                f"Total No. of Drops: {total_taps_str}",
+                f"Initial Volume V0 (ml): {_format_derived_number(derived.get('initialVolumeMl'), 4)}",
+                f"Diff Last Two Vol (ml): {_format_derived_number(derived.get('diffLastTwoVolumesMl'), 4)}",
+                "",
+                eq,
+                "TEST RESULT",
+                dash,
+                f"Final Volume Vf (ml): {_format_derived_number(derived.get('finalVolumeMl'), 4)}",
+                f"Initial Density W/V0: {_format_derived_number(derived.get('initialDensityGPerMl'), 3)} g/mL",
+                f"Tapped Density W/Vf: {_format_derived_number(derived.get('tappedDensityGPerMl'), 3)} g/mL",
+                f"Compressibility Index: {_format_derived_number(derived.get('compressibilityIndexPct'), 2)} %",
+                f"Hausner Ratio V0/Vf: {_format_derived_number(derived.get('hausnerRatio'), 3)}",
+                "",
+            ]
+        )
+        return
+
+    lines.extend(["", eq, "TEST SUMMARY", dash])
+    _append_two_column_pairs(
+        lines,
+        [
+            ("Sample Weight (g)", _format_derived_number(derived.get("sampleWeightG"), 2)),
+            ("Total No. of Drops", total_taps_str),
+            ("Initial Volume V0 (ml)", _format_derived_number(derived.get("initialVolumeMl"), 4)),
+            (
+                "Diff Last Two Vol (ml)",
+                _format_derived_number(
+                    derived.get("diffLastTwoVolumesMlPerformed", derived.get("diffLastTwoVolumesMl")), 4
+                ),
+            ),
+        ],
+        width,
+    )
+    lines.extend(["", eq, "TEST RESULT", dash])
+    _append_two_column_pairs(
+        lines,
+        [
+            ("Final Volume Vf (ml)", _format_derived_number(derived.get("finalVolumeMl"), 4)),
+            ("Initial Density W/V0", f"{_format_derived_number(derived.get('initialDensityGPerMl'), 3)} g/mL"),
+            ("Tapped Density W/Vf", f"{_format_derived_number(derived.get('tappedDensityGPerMl'), 3)} g/mL"),
+            ("Compressibility Index", f"{_format_derived_number(derived.get('compressibilityIndexPct'), 2)} %"),
+            ("Hausner Ratio V0/Vf", _format_derived_number(derived.get("hausnerRatio"), 3)),
+        ],
+        width,
+    )
+    lines.append("")
+
+
 def _append_test_statistics_block(
     lines: list, stats: dict, width: int, thermal: bool, status_raw: str
 ) -> None:
@@ -374,6 +635,7 @@ def _append_test_statistics_block(
     eq = _section_sep("=", width, thermal)
     star = _section_sep("*", width, thermal)
     lines.extend(["", eq, "STATISTICS", dash])
+    a4_pairs = []
     for key, val in stats.items():
         if not isinstance(val, dict):
             continue
@@ -381,7 +643,12 @@ def _append_test_statistics_block(
         display = _stat_display_value(val)
         if display is None:
             continue
-        lines.append(f"{label}: {_fmt_density_val(display)}")
+        if thermal:
+            lines.append(f"{label}: {_fmt_density_val(display)}")
+        else:
+            a4_pairs.append((label, _fmt_density_val(display)))
+    if not thermal and a4_pairs:
+        _append_two_column_pairs(lines, a4_pairs, width)
     lines.extend(["", star, ""])
 
 
@@ -475,7 +742,7 @@ def _append_validation_report_details(
     remarks = report_data.get("remarks")
     if remarks is None:
         remarks = td.get("remarks")
-    dash = "" if thermal else ("-" * min(width, 70))
+    dash = "" if thermal else ("-" * width)
 
     if thermal:
         end_date, end_time = _split_ts_date_and_time(ts_end)
@@ -494,74 +761,113 @@ def _append_validation_report_details(
         else:
             lines.extend(["", "VALIDATION RESULTS", "No validation data", ""])
     else:
-        lines.extend(
+        lines.extend(["", "VALIDATION INFORMATION", dash if dash else ""])
+        _append_two_column_pairs(
+            lines,
             [
-                "",
-                "VALIDATION INFORMATION",
-                f"Overall Status: {overall_label}",
-                f"Completed: {_format_ts_readable(ts_end)}",
-                "",
-                "VALIDATION RESULTS",
-                dash if dash else "",
-            ]
+                ("Overall Status", overall_label),
+                ("Completed", _format_ts_readable(ts_end)),
+            ],
+            width,
         )
+        lines.extend(["", "VALIDATION RESULTS", dash if dash else ""])
         if not runs:
             lines.append("No validation data")
         for idx, run in enumerate(runs):
             if idx > 0:
                 lines.append("")
             lines.append(_validation_usp_label(run))
-            lines.append(f"  Taps/Min: {_cell_str(run.get('tapsMin'))}")
-            lines.append(f"  Drop (mm): {_cell_str(run.get('dropHeight'))}")
-            lines.append(f"  Expected: {_validation_expected_display(run)}")
-            lines.append(f"  Actual: {_cell_str(run.get('actualTapCount'))}")
+            run_pairs = [
+                ("Taps/Min", _cell_str(run.get("tapsMin"))),
+                ("Drop (mm)", _cell_str(run.get("dropHeight"))),
+                ("Expected", _validation_expected_display(run)),
+                ("Actual", _cell_str(run.get("actualTapCount"))),
+            ]
             dur = run.get("validationDurationSec")
             if dur is not None:
                 try:
-                    lines.append(f"  Duration: {int(dur)} s")
+                    run_pairs.append(("Duration", f"{int(dur)} s"))
                 except (TypeError, ValueError):
                     pass
-            lines.append(f"  Status: {_cell_str(run.get('status'))}")
+            run_pairs.append(("Status", _cell_str(run.get("status"))))
+            _append_two_column_pairs(lines, run_pairs, width)
         lines.append("")
 
     if remarks not in (None, ""):
-        lines.extend(["", "REMARKS:", str(remarks), ""])
+        if thermal:
+            lines.extend(["", "REMARKS:", str(remarks), ""])
+        else:
+            lines.extend(["", "REMARKS", dash if dash else ""])
+            _append_two_column_pairs(lines, [("Remarks", _truncate_with_ellipsis(remarks, max(16, width - 20)))], width)
+            lines.append("")
 
 
 def _append_test_report_details(lines: list, td: Dict[str, Any], report_data: Dict[str, Any], width: int, thermal: bool) -> None:
     """Append remarks, step results, and statistics (matches on-screen report preview)."""
-    dash = "" if thermal else ("-" * min(width, 70))
+    dash = "" if thermal else ("-" * width)
     remarks = report_data.get("remarks")
     if remarks is None and isinstance(td, dict):
         remarks = td.get("remarks")
+    status_raw = str(td.get("status") or report_data.get("status") or "").strip().lower() if isinstance(td, dict) else ""
+    remarks_label = "ABORT REMARKS" if status_raw == "aborted" else "REMARKS"
     if remarks not in (None, ""):
-        lines.extend(["", "REMARKS:", str(remarks), ""])
+        if thermal:
+            lines.extend(["", remarks_label + ":", str(remarks), ""])
+        else:
+            lines.extend(["", remarks_label, dash if dash else ""])
+            _append_two_column_pairs(lines, [("Comments", _truncate_with_ellipsis(remarks, max(16, width - 20)))], width)
+            lines.append("")
 
     if not isinstance(td, dict):
         td = {}
     results = td.get("stepResults") or []
     row_count = _effective_step_row_count(td)
 
-    duration_sec = td.get("durationSeconds")
+    duration_sec = test_duration_seconds(td)
     if duration_sec is not None:
-        try:
-            lines.append(f"Test Duration: {int(duration_sec)} s")
-        except (TypeError, ValueError):
-            pass
+        if thermal:
+            lines.append(f"Test Duration: {format_duration_hhmmss(duration_sec)}")
+        else:
+            _append_two_column_pairs(lines, [("Test Duration", format_duration_hhmmss(duration_sec))], width)
 
     status_raw = str(td.get("status") or report_data.get("status") or "").lower()
+    recipe = report_data.get("recipe") or td.get("recipe") or {}
+    if not isinstance(recipe, dict):
+        recipe = {}
+    steps = recipe.get("steps") or td.get("steps") or []
+    derived = report_data.get("reportDerived")
+    if not isinstance(derived, dict) or not derived:
+        derived = build_test_report_derived(td, recipe, report_data.get("id"))
+    else:
+        derived = dict(derived)
+
+    taps_performed = performed_total_drops(td, recipe)
+    if taps_performed is None:
+        taps_performed = _performed_total_taps(td, recipe)
+    if taps_performed is None:
+        taps_performed = _completed_steps_total_taps(td, recipe)
+    if taps_performed is not None:
+        derived["totalTapsPerformed"] = taps_performed
+        derived["totalDrops"] = taps_performed
+    diff_performed = _performed_diff_last_two_steps(td)
+    if diff_performed is not None:
+        derived["diffLastTwoVolumesMlPerformed"] = diff_performed
+
     if row_count > 0:
         if thermal:
-            lines.extend(_format_thermal_test_data_table(row_count, results))
+            lines.extend(_format_thermal_test_data_table(row_count, results, steps))
         else:
             eq = _section_sep("=", width, False)
             lines.extend(["", eq, "TEST DATA", dash if dash else ""])
-            hdr = f"{'S':>2}  {'Vol(ml)':>9}  {'dVol':>8}  {'Bulk':>9}  {'Tap':>9}"
+            hdr = f"{'S':>2}  {'Drop Count':>10}  {'Vol(ml)':>9}  {'dVol':>8}  {'Bulk':>9}  {'Tap':>9}"
             lines.append(hdr)
             if dash:
                 lines.append(dash)
             for i in range(row_count):
                 r = results[i] if i < len(results) and isinstance(results[i], dict) else {}
+                cnt = "--"
+                if i < len(steps) and isinstance(steps[i], dict):
+                    cnt = steps[i].get("tapCount", "--")
                 vol = r.get("volumeMl", "__")
                 dvol = r.get("volumeDeltaMl", "__")
                 if dvol not in (None, "", "__"):
@@ -574,17 +880,21 @@ def _append_test_report_details(lines: list, td: Dict[str, Any], report_data: Di
                     tap = _fmt_density_val(tap)
                 sn = i + 1
                 lines.append(
-                    f"{sn:2d}  {str(vol):>9}  {str(dvol):>8}  {str(bulk):>9}  {str(tap):>9}"
+                    f"{sn:2d}  {str(cnt):>10}  {str(vol):>9}  {str(dvol):>8}  {str(bulk):>9}  {str(tap):>9}"
                 )
             lines.append(dash if dash else "")
     elif str(report_data.get("type") or "test").strip().lower() == "test":
         lines.extend(["", "TEST DATA: No test data recorded"])
 
-    stats = report_data.get("statistics") or td.get("statistics") or {}
-    _append_test_statistics_block(lines, stats, width, thermal, status_raw)
+    if str(report_data.get("type") or "test").strip().lower() == "test":
+        _append_derived_test_summary_and_result(lines, derived, width, thermal)
+
+    if thermal:
+        stats = report_data.get("statistics") or td.get("statistics") or {}
+        _append_test_statistics_block(lines, stats, width, thermal, status_raw)
 
 
-def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
+def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH) -> str:
     thermal = width < 70
     sep = _thermal_sep("=", width) if thermal else ("=" * width)
     sep_dash = _thermal_sep("-", width) if thermal else ("-" * width)
@@ -596,23 +906,38 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
     if thermal:
         lines.extend([sep, "RAISE LAB EQUIPMENT", ""])
     else:
-        lines.append(sep)
+        lines.extend([sep, "RAISE LAB EQUIPMENT".center(width), ""])
     lines.append(title if thermal else title.center(width))
     if thermal:
         lines.append("")
     else:
         lines.append(sep)
-    lines.extend(
-        [
-            f"Company: {fs.get('companyName', 'N/A')}",
-            f"Model No: {fs.get('modelNo', 'N/A')}",
-            f"Serial No: {fs.get('serialNo', 'N/A')}",
-            f"Location: {fs.get('companyLocation', fs.get('location', 'N/A'))}",
-            f"Instrument ID: {fs.get('instrumentId', 'N/A')}",
-            f"Last Val: {fs.get('lastValidationDate', 'N/A')}",
-            f"Next Val Due: {fs.get('nextValidationDate', 'N/A')}",
-        ]
-    )
+    if thermal:
+        lines.extend(
+            [
+                f"Company: {fs.get('companyName', 'N/A')}",
+                f"Model No: {fs.get('modelNo', 'N/A')}",
+                f"Serial No: {fs.get('serialNo', 'N/A')}",
+                f"Location: {fs.get('companyLocation', fs.get('location', 'N/A'))}",
+                f"Instrument ID: {fs.get('instrumentId', 'N/A')}",
+                f"Last Val: {fs.get('lastValidationDate', 'N/A')}",
+                f"Next Val Due: {fs.get('nextValidationDate', 'N/A')}",
+            ]
+        )
+    else:
+        _append_two_column_pairs(
+            lines,
+            [
+                ("Company", fs.get("companyName", "N/A")),
+                ("Model No", fs.get("modelNo", "N/A")),
+                ("Serial No", fs.get("serialNo", "N/A")),
+                ("Location", fs.get("companyLocation", fs.get("location", "N/A"))),
+                ("Instrument ID", fs.get("instrumentId", "N/A")),
+                ("Last Val", fs.get("lastValidationDate", "N/A")),
+                ("Next Val Due", fs.get("nextValidationDate", "N/A")),
+            ],
+            width,
+        )
     if not thermal:
         lines.append("")
     if rtype == "validation":
@@ -622,9 +947,37 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
         if not isinstance(recipe, dict):
             recipe = {}
         status_raw = str(td.get("status", "")).lower() if isinstance(td, dict) else ""
-        status_label = "Aborted" if status_raw == "aborted" else "Completed"
-        total_taps = _recipe_total_tap_count(recipe)
-        total_taps_str = str(total_taps) if total_taps is not None else "N/A"
+        approval_st = str(report_data.get("reportApprovalStatus") or "").strip().lower()
+        if approval_st == "pending":
+            status_label = "Not Approved"
+        elif status_raw == "aborted" or approval_st == "aborted":
+            status_label = "Aborted"
+        else:
+            status_label = "Completed"
+        recipe_taps = dict(recipe)
+        if isinstance(td, dict):
+            if not recipe_taps.get("steps") and td.get("steps"):
+                recipe_taps["steps"] = td.get("steps")
+            if recipe_taps.get("customTotalTaps") is None and td.get("customTotalTaps") is not None:
+                recipe_taps["customTotalTaps"] = td.get("customTotalTaps")
+        derived = report_data.get("reportDerived")
+        if not isinstance(derived, dict) or not derived:
+            derived = build_test_report_derived(
+                td if isinstance(td, dict) else {}, recipe, report_data.get("id")
+            )
+        total_drops = performed_total_drops(td if isinstance(td, dict) else {}, recipe_taps)
+        if total_drops is None:
+            total_drops = derived.get("totalDrops")
+        if total_drops is None:
+            total_drops = derived.get("totalTaps")
+        total_taps_str = str(total_drops) if total_drops is not None else "N/A"
+        step_drop_counts = (
+            derived.get("stepDropCounts")
+            or derived.get("stepTapCounts")
+            or completed_step_drop_counts(td if isinstance(td, dict) else {}, recipe_taps)
+        )
+        operator = report_data.get("operatorName") or td.get("operatorName", "--")
+        comments = report_data.get("remarks") or td.get("remarks") or ""
         ts_start = td.get("testStartTime") or report_data.get("createdAt")
         ts_end = (
             td.get("testEndTime")
@@ -633,46 +986,96 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
             or report_data.get("createdAt")
         )
         if thermal:
+            tap_count_lines = []
+            for idx, tc in enumerate(step_drop_counts or []):
+                tap_count_lines.append(f"Drop Count {idx + 1}: {tc}")
             start_date, start_time = _split_ts_date_and_time(ts_start)
             end_date, end_time = _split_ts_date_and_time(ts_end)
-            lines.extend(
+            test_date, test_time = _split_ts_date_and_time(ts_end)
+            info_lines = [
+                "TEST INFORMATION",
+                f"Test No: {derived.get('testNumber', '--')}",
+                f"Product: {recipe.get('productName', td.get('productName', 'N/A'))}",
+                f"Batch: {recipe.get('batchNumber', td.get('batchNumber', 'N/A'))}",
+                f"Operator: {operator}",
+                f"Test Type: {derived.get('testType', '--')}",
+                f"Test Method: {derived.get('testMethod', '--')}",
+                f"Drops/Min: {derived.get('dropsPerMin', '--')}",
+                f"Drop Height: {derived.get('dropHeight', '--')}",
+                f"Total Drops: {total_taps_str}",
+            ]
+            info_lines.extend(tap_count_lines)
+            info_lines.extend(
                 [
-                    "TEST INFORMATION",
-                    f"Product: {recipe.get('productName', td.get('productName', 'N/A'))}",
-                    f"Batch: {recipe.get('batchNumber', td.get('batchNumber', 'N/A'))}",
-                    f"Total Taps: {total_taps_str}",
+                    f"Test Date: {test_date}",
+                    f"Test Time: {test_time}",
                     f"Test Start Date: {start_date}",
                     f"Test Start Time: {start_time}",
                     f"Completed Date: {end_date}",
                     f"Completed Time: {end_time}",
                     f"Test Status: {status_label}",
-                    "",
                 ]
             )
+            if comments not in (None, ""):
+                info_lines.append(f"Comments: {comments}")
+            info_lines.append("")
+            lines.extend(info_lines)
         else:
-            lines.extend(
-                [
-                    f"Product: {recipe.get('productName', td.get('productName', 'N/A'))}",
-                    f"Batch: {recipe.get('batchNumber', td.get('batchNumber', 'N/A'))}",
-                    f"Total Taps: {total_taps_str}",
-                    f"Test Start: {_format_ts_readable(ts_start)}",
-                    f"Completed: {_format_ts_readable(ts_end)}",
-                    f"Test Status: {status_label}",
-                ]
-            )
+            a4_info = [
+                "",
+                "TEST INFORMATION",
+                sep_dash,
+            ]
+            lines.extend(a4_info)
+            info_pairs = [
+                ("Test No", derived.get("testNumber", "--")),
+                ("Product", recipe.get("productName", td.get("productName", "N/A"))),
+                ("Batch", recipe.get("batchNumber", td.get("batchNumber", "N/A"))),
+                ("Operator", operator),
+                ("Test Type", derived.get("testType", "--")),
+                ("Test Method", derived.get("testMethod", "--")),
+                ("Drops/Min", derived.get("dropsPerMin", "--")),
+                ("Drop Height", derived.get("dropHeight", "--")),
+                ("Total Drops", total_taps_str),
+                ("Test Start", _format_ts_readable(ts_start)),
+                ("Completed", _format_ts_readable(ts_end)),
+                ("Test Status", status_label),
+            ]
+            if comments not in (None, ""):
+                info_pairs.append(("Comments", _truncate_with_ellipsis(comments, max(16, width - 20))))
+            _append_two_column_pairs(lines, info_pairs, width)
+            for idx, dc in enumerate(step_drop_counts or []):
+                _append_two_column_pairs(
+                    lines, [(f"Drop Count {idx + 1}", str(dc))], width
+                )
         _append_test_report_details(lines, td if isinstance(td, dict) else {}, report_data, width, thermal)
     if thermal:
         lines.extend(["", "APPROVAL"])
-    lines.extend(
-        [
-            f"Operated by: {report_data.get('operatorName') or td.get('operatorName', '--')}",
-            f"Employee ID: {td.get('employeeId', '--')}",
-            f"Approval Result: {report_data.get('approvalPassFail', '--')}",
-            f"Approved By: {report_data.get('approvedBy', '--')}",
-            f"Approved At: {_format_ts_readable(report_data.get('approvedAt'))}",
-            f"Approval Remarks: {report_data.get('approvalRemarks', '')}",
-        ]
-    )
+    if thermal:
+        lines.extend(
+            [
+                f"Operated by: {report_data.get('operatorName') or td.get('operatorName', '--')}",
+                f"Employee ID: {td.get('employeeId', '--')}",
+                f"Approval Result: {report_data.get('approvalPassFail', '--')}",
+                f"Approved By: {report_data.get('approvedBy', '--')}",
+                f"Approved At: {_format_ts_readable(report_data.get('approvedAt'))}",
+                f"Approval Remarks: {report_data.get('approvalRemarks', '')}",
+            ]
+        )
+    else:
+        lines.extend(["", "APPROVAL", sep_dash])
+        _append_two_column_pairs(
+            lines,
+            [
+                ("Operated by", report_data.get("operatorName") or td.get("operatorName", "--")),
+                ("Employee ID", td.get("employeeId", "--")),
+                ("Approval Result", report_data.get("approvalPassFail", "--")),
+                ("Approved By", report_data.get("approvedBy", "--")),
+                ("Approved At", _format_ts_readable(report_data.get("approvedAt"))),
+                ("Approval Remarks", _truncate_with_ellipsis(report_data.get("approvalRemarks", ""), max(16, width - 20))),
+            ],
+            width,
+        )
     if thermal:
         lines.extend([sep, ""])
         flat: list = []
@@ -683,8 +1086,14 @@ def _format_report_text(report_data: Dict[str, Any], width: int = 70) -> str:
     return "\n".join(_wrap_lines(lines, width))
 
 
-def format_for_a4_printer(report_data: Dict[str, Any]) -> str:
-    return _format_report_text(report_data, width=70)
+def format_for_a4_printer(
+    report_data: Dict[str, Any], *, include_printed_timestamp: bool = True
+) -> str:
+    text = _format_report_text(report_data, width=A4_TEXT_WIDTH).rstrip("\n")
+    if not include_printed_timestamp:
+        return text
+    footer = "\n".join(_thermal_printed_timestamp_lines())
+    return text + "\n\n" + footer
 
 
 def _thermal_printed_timestamp_lines() -> list:
@@ -697,7 +1106,7 @@ def _thermal_printed_timestamp_lines() -> list:
         ptime = payload.get("time") or "--"
     except Exception:
         now = datetime.now()
-        pdate = now.strftime("%d-%m-%Y")
+        pdate = now.strftime("%d/%m/%Y")
         ptime = now.strftime("%H:%M:%S")
     return ["", f"Printed Date: {pdate}", f"Printed Time: {ptime}"]
 
@@ -719,8 +1128,8 @@ def save_report_text_files(report_data: Dict[str, Any], report_id: int, reports_
         reports_dir = pathlib.Path(reports_dir)
         reports_dir.mkdir(parents=True, exist_ok=True)
         text_48 = format_for_thermal_printer(report_data)
-        text_70 = _format_report_text(report_data, width=70).rstrip() + "\r\n\x0c"
-        (reports_dir / f"report_{report_id}_a4.txt").write_text(text_70, encoding="utf-8")
+        text_80 = format_for_a4_printer(report_data).rstrip() + "\r\n\x0c"
+        (reports_dir / f"report_{report_id}_a4.txt").write_text(text_80, encoding="utf-8")
         (reports_dir / f"report_{report_id}_thermal.txt").write_text(text_48, encoding="utf-8")
     except Exception as e:
         _log.warning("save_report_text_files failed: %s", e)
@@ -812,7 +1221,7 @@ def print_thermal_report(report_data: Dict[str, Any], printer_port: Optional[str
         return {"success": False, "error": str(e), "port": port}
 
 
-def _format_recipe_text(recipe_data: Dict[str, Any], width: int = 70) -> str:
+def _format_recipe_text(recipe_data: Dict[str, Any], width: int = A4_TEXT_WIDTH) -> str:
     thermal = width < 70
     sep = _thermal_sep("=", width) if thermal else ("=" * width)
     sep_dash = _thermal_sep("-", width) if thermal else ("-" * width)
@@ -850,7 +1259,7 @@ def print_recipe_a4(recipe_data: Dict[str, Any], printer_port: Optional[str] = N
     if not _port_exists(port):
         return {"success": False, "error": f"A4 printer port not found: {port}", "port": port}
     try:
-        text = _format_recipe_text(recipe_data, width=70).rstrip() + "\r\n\x0c"
+        text = _format_recipe_text(recipe_data, width=A4_TEXT_WIDTH).rstrip() + "\r\n\x0c"
         ser = _open_a4_serial(port, baud)
         try:
             ser.reset_output_buffer()

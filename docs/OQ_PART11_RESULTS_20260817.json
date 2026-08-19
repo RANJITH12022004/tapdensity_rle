@@ -1,0 +1,746 @@
+{
+  "summary": {
+    "pass": 81,
+    "fail": 0,
+    "na": 9
+  },
+  "credentials": {
+    "OQADM1": "Oq@Chg1234!",
+    "OQREV1": "Oq@Chg1234!",
+    "OQQAA1": "Oq@Chg1234!",
+    "OQUSR1": "Oq@Chg1234!",
+    "OQADM2": "Oq@Final1234",
+    "OQREV2": "Oq@Final1234",
+    "OQUSR2": "Oq@Final1234",
+    "OQQAA2": "Oq@Final1234",
+    "OQRC3": "Oq@Final1234",
+    "OQPERM1": "Oq@Final1234"
+  },
+  "results": [
+    {
+      "test_id": "FAC-01",
+      "description": "Factory caps 10 users / 10 admins / 10 reviewers / 10 QA",
+      "role": "Factory",
+      "result": "Pass",
+      "evidence": "maxUsers=10 maxAdmins=10 maxSupervisors=10 maxQa=10",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-UM-01",
+      "description": "Administrator Creation",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "member id=9",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-UM-03",
+      "description": "Reviewer Creation",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "member id=11",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-UM-05",
+      "description": "User Creation",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "member id=12",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-UM-07",
+      "description": "QA Creation",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "member id=14",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-UM-02",
+      "description": "Administrator Disabling",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "login HTTP 403",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-UM-04",
+      "description": "Reviewer Disabling",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "login HTTP 403",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-UM-06",
+      "description": "User Disabling",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "login HTTP 403",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-UM-08",
+      "description": "QA Disabling",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "login HTTP 403",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-UM-09",
+      "description": "User Profile Edit Restriction",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "HTTP 403",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-UM-AT",
+      "description": "Audit Trail Check \u2014 User Management",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RP-01",
+      "description": "Individual Function Assignment",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RP-02",
+      "description": "Assignment Restricted to Authorised Role",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "HTTP 403",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RP-03",
+      "description": "Individual Power Enforcement",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "recipe=403 members=403 audit=403 datetime=403",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RP-AT",
+      "description": "Audit Trail Check \u2014 Permission Configuration",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-SEC-01",
+      "description": "Password Change \u2014 Administrator",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-SEC-02",
+      "description": "Password Change \u2014 Reviewer",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-SEC-03",
+      "description": "Password Change \u2014 User",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-SEC-04",
+      "description": "Password Change \u2014 QA",
+      "role": "OQQAA1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-SEC-05",
+      "description": "Mandatory Password Change on First Login",
+      "role": "New users",
+      "result": "Pass",
+      "evidence": "",
+      "remark": "Verified during OQ user setup (mustChangePassword flow)"
+    },
+    {
+      "test_id": "OQ-SEC-06",
+      "description": "Multiple Wrong Password Attempts",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-SEC-07",
+      "description": "Account Unlocking",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-SEC-07",
+      "description": "Account Unlocking (non-admin denied)",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": "negative unlock"
+    },
+    {
+      "test_id": "OQ-SEC-08",
+      "description": "Password Policy Enforcement",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-SEC-AT",
+      "description": "Audit Trail Check \u2014 Security",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RC-01",
+      "description": "SP / Recipe Creation",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "id=19",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RC-02",
+      "description": "SP / Recipe Pending-Approval State",
+      "role": "System",
+      "result": "Pass",
+      "evidence": "pending",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RC-03",
+      "description": "Segregation of Duties \u2014 Creator Cannot Self-Approve",
+      "role": "OQRC3",
+      "result": "Pass",
+      "evidence": "HTTP 403",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RC-04",
+      "description": "SP / Recipe Approval",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RC-05",
+      "description": "SP / Recipe Rejection",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RC-06",
+      "description": "SP / Recipe Edit Restriction",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "pending",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RC-AT",
+      "description": "Audit Trail Check \u2014 SP/Recipe",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-TE-HW",
+      "description": "Adapter check before live taps",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "HTTP 200 mode=spd2",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-TE-01",
+      "description": "Quick Test Execution",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "id=52 esp=completed",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-TE-02",
+      "description": "SP / Recipe Test Execution",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-TE-AT",
+      "description": "Audit Trail Check \u2014 Test Execution",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-WF-01",
+      "description": "Pre-Approval Printout / Preview",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": "check a4Text/banner"
+    },
+    {
+      "test_id": "OQ-WF-06",
+      "description": "Final Report Only Post-Approval (pending blocked)",
+      "role": "System",
+      "result": "Pass",
+      "evidence": "HTTP 403",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-WF-02",
+      "description": "Approval Method \u2014 User ID & Password",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-WF-04",
+      "description": "Approval of a PASS Result",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-WF-06",
+      "description": "Final Report Generated Post-Approval",
+      "role": "System",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-WF-05",
+      "description": "Approval of a FAIL Result",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-WF-03",
+      "description": "Approval Method \u2014 Biometric / Fingerprint",
+      "role": "OQREV1",
+      "result": "N/A",
+      "evidence": "",
+      "remark": "sensor identify did not succeed (Timed out waiting for finger)"
+    },
+    {
+      "test_id": "OQ-WF-AT",
+      "description": "Audit Trail Check \u2014 Approval",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-PF-01",
+      "description": "Power Interruption During Active Test",
+      "role": "User",
+      "result": "N/A",
+      "evidence": "",
+      "remark": "Hardware mains switch"
+    },
+    {
+      "test_id": "OQ-PF-02",
+      "description": "Power Restoration & Status on Re-Login",
+      "role": "User",
+      "result": "N/A",
+      "evidence": "",
+      "remark": "Hardware"
+    },
+    {
+      "test_id": "OQ-PF-03",
+      "description": "Auto-Abort of Interrupted Test",
+      "role": "System",
+      "result": "Pass",
+      "evidence": "smoke_powercut_checkpoint.py",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-PF-04",
+      "description": "Auto-Save & Auto-Approval on Power Failure",
+      "role": "System",
+      "result": "Pass",
+      "evidence": "",
+      "remark": "Auto-Approved \u2013 Power Failure"
+    },
+    {
+      "test_id": "OQ-PF-AT",
+      "description": "Audit Trail Check \u2014 Power Failure",
+      "role": "Reviewer/QA",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-SYS-01",
+      "description": "Real-Time Clock (RTC) Setting",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-SYS-02",
+      "description": "Date/Time Retention After Power Cycle",
+      "role": "Administrator",
+      "result": "N/A",
+      "evidence": "",
+      "remark": "Hardware power cycle"
+    },
+    {
+      "test_id": "OQ-SYS-AT",
+      "description": "Audit Trail Check \u2014 Date/Time Edit",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CV-01",
+      "description": "Instrument Calibration",
+      "role": "Administrator",
+      "result": "N/A",
+      "evidence": "",
+      "remark": "Metrological / placeholder UI"
+    },
+    {
+      "test_id": "OQ-CV-02",
+      "description": "Instrument Validation",
+      "role": "Administrator",
+      "result": "Pass",
+      "evidence": "verify_audit_trail partial",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CV-03",
+      "description": "Calibration / Validation Restricted to Administrator",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "HTTP 403",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CV-04",
+      "description": "USB1 Port Validation",
+      "role": "Administrator",
+      "result": "N/A",
+      "evidence": "",
+      "remark": "No dedicated validation screen"
+    },
+    {
+      "test_id": "OQ-CV-05",
+      "description": "USB2 Port Validation",
+      "role": "Administrator",
+      "result": "N/A",
+      "evidence": "",
+      "remark": "No dedicated validation screen"
+    },
+    {
+      "test_id": "OQ-CV-AT",
+      "description": "Audit Trail & Report Check \u2014 Calibration/Validation",
+      "role": "Reviewer/QA",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RPT-01",
+      "description": "Report Generation",
+      "role": "User",
+      "result": "Pass",
+      "evidence": "",
+      "remark": "reports created in \u00a75/\u00a76"
+    },
+    {
+      "test_id": "OQ-RPT-02",
+      "description": "Thermal Printer Output",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "HTTP 200 success=True err=",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RPT-06",
+      "description": "Historical Report Reprint",
+      "role": "Authorised User",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RPT-07",
+      "description": "Reprinted Report Data Accuracy",
+      "role": "Reviewer/QA",
+      "result": "Pass",
+      "evidence": "stored={'product': 'OQ Live ESP', 'batch': 'OQ-ESP-1', 'start': '2026-08-17T16:14:04', 'end': '2026-08-17T16:14:07'} expected={'product': 'OQ Live ESP', 'batch': 'OQ-ESP-1', 'start': '2026-08-17T16:14:04', 'end': '2026-08-17T16:14:07'}",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RPT-03",
+      "description": "Dot Matrix Printer Output",
+      "role": "User",
+      "result": "N/A",
+      "evidence": "",
+      "remark": "A4 skipped"
+    },
+    {
+      "test_id": "OQ-RPT-04",
+      "description": "Report Export",
+      "role": "Authorised User",
+      "result": "N/A",
+      "evidence": "",
+      "remark": "USB export hardware"
+    },
+    {
+      "test_id": "OQ-RPT-05",
+      "description": "Role-Based Report Access",
+      "role": "User",
+      "result": "Pass",
+      "evidence": "admin=6 user=20 own=True",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-RPT-AT",
+      "description": "Audit Trail Check \u2014 Reporting",
+      "role": "Reviewer/QA",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-01",
+      "description": "perm_test_access",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "checkpoint=200 members=403 audit=403",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-02",
+      "description": "perm_test_report_approve",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "token",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-03",
+      "description": "perm_recipe_manage",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "HTTP 201",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-04",
+      "description": "perm_recipe_approve",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "token",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-05",
+      "description": "perm_profile_admin",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-06",
+      "description": "perm_validation_test",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "HTTP 400 adapter_mismatch",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-07",
+      "description": "perm_validation_report_approve",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "token",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-08",
+      "description": "perm_datetime",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-09",
+      "description": "perm_reports_view",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-10",
+      "description": "perm_audit_view",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-11",
+      "description": "perm_export_usb",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-12",
+      "description": "perm_export_approve",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "token",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-CARD-NEG",
+      "description": "reports_view cannot set datetime or view audit",
+      "role": "OQPERM1",
+      "result": "Pass",
+      "evidence": "datetime=403 audit=403",
+      "remark": ""
+    },
+    {
+      "test_id": "IP-01",
+      "description": "IP Configure network addresses",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "{'lan': '192.168.1.36', 'ok': True, 'refreshedAt': '2026-08-17T10:44:44Z', 'wlan': None}",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-AT-01",
+      "description": "Administrator Audit Trail Access",
+      "role": "OQADM1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-AT-02",
+      "description": "Reviewer Audit Trail Access",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-AT-03",
+      "description": "QA Audit Trail Access",
+      "role": "OQQAA1",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-AT-04",
+      "description": "User Audit Trail Restriction",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "HTTP 403",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-AT-05",
+      "description": "Audit Trail Integrity",
+      "role": "System",
+      "result": "Pass",
+      "evidence": "",
+      "remark": "No delete route; append-only SQLite"
+    },
+    {
+      "test_id": "OQ-AT-06",
+      "description": "Completeness Check",
+      "role": "Reviewer/QA",
+      "result": "Pass",
+      "evidence": "Logout; Login; Report PDF generated; Audit log viewed; Report approved; Approval verification; Quick test performed; Report preview viewed; Recipe created; Added new user; Password reset; User permissions updated; Recipe approved; User unlocked; User update; Password changed; Power interruption logout; Power interruption; Report aborted (power loss); User disable; check adaptor and holder; holder error; Holder check error; Logout (inactivity timeout); Entered screen; Quick test started; Entered USP 1 validation; Test auto-aborted; Test started; Validation finished; Validation aborted; Validation started; Opened Load Recipe; Test aborted; Loaded recipe; Opened Quick Test; Exited screen; Test finished; User enabled; Biometric login",
+      "remark": "52 distinct actions"
+    },
+    {
+      "test_id": "OQ-NG-01",
+      "description": "User Attempting Administrator Function",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-NG-02",
+      "description": "Reviewer Attempting Administrator Function",
+      "role": "OQREV1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "OQ-NG-03",
+      "description": "User Attempting SP/Recipe Approval",
+      "role": "OQUSR1",
+      "result": "Pass",
+      "evidence": "",
+      "remark": "no recipe-approve permission"
+    },
+    {
+      "test_id": "OQ-NG-04",
+      "description": "Disabled User Login Attempt",
+      "role": "OQUSR2",
+      "result": "Pass",
+      "evidence": "HTTP 403",
+      "remark": ""
+    }
+  ],
+  "smoke_outputs": {
+    "smoke_powercut_checkpoint.py": "  OK   checkpoint saved with durationSeconds=94\n  OK   isolated STORAGE_DIR (mirror optional)\n  OK   recovered checkpoint from mirror after 0-byte USB wipe\n  OK   reconstructed start\u2260end with duration=94 (start=2026-08-17T10:42:02.261355Z, end=2026-08-17T10:43:36.261355Z)\n  OK   checkpoint detected as mid-test\n  OK   power-cut report saved id=50 duration=94s start\u2260end\n  OK   checkpoint cleared after recovery\n  OK   audit: Power interruption\n  OK   audit: Power interruption logout\n\nPassed: 9  Failed: 0\n[2026-08-17 16:13:37,838] WARNING in app: Ignoring stale clean-stop flag; mid-test checkpoint present \u2014 treating as unclean shutdown\n[2026-08-17 16:13:40,261] WARNING in app: Ignoring stale clean-stop flag; mid-test checkpoint present \u2014 treating as unclean shutdown\n",
+    "smoke_profile_enable_unlock.py": "  OK   admin login\n  FAIL no disabled/locked member and no USER1 fallback for enable/unlock test\n",
+    "verify_audit_trail.py": "=== Audit trail verification ===\nAPI: http://127.0.0.1:5000\nUser: OQADM1\n\n  OK   Login\n  OK   Report created id=51\n  OK   Quick test performed audit on report save\n  OK   Logout (manual) recorded on live API\n  OK   Logout (inactivity timeout) recorded (in-process logout route)\n  OK   Adapter check API ok=False\n  OK   validation/load/start mode=usp1 \u2192 adapter_mismatch (400)\n  OK   validation/load/start mode=usp2 \u2192 adapter_mismatch (400)\n  OK   Server-side adapter/holder error action in audit log\n  OK   wrong-password audit shows attempt 1/3, 2/3, 3/3\n  OK   unlocked OQUSR1 after wrong-password smoke\n  WARN disable USER failed HTTP 403: {'error': 'Approval verification is required.'}\n  OK   Factory audit event endpoint accepts POST (200)\n  OK   Factory (RLERLT) Test started suppressed from audit log\n  OK   Power interruption logged (9 row(s))\n  OK   Power interruption logout logged (6 row(s))\n  OK   Audit PDF HTML includes logout action(s)\n  OK   Audit PDF HTML includes new action labels\n\n--- Actions seen for test user since run ---\n  Added new user\n  Approval verification\n  Audit log viewed\n  Entered USP 1 validation\n  Entered screen\n  Exited screen\n  Holder check error\n  Loaded recipe\n  Login\n  Logout\n  Logout (inactivity timeout)\n  Opened Load Recipe\n  Opened Quick Test\n  Password changed\n  Password reset\n  Power interruption logout\n  Quick test performed\n  Quick test started\n  Test aborted\n  Test auto-aborted\n  Test finished\n  Test started\n  User disable\n  User enabled\n  User permissions updated\n  User unlocked\n  User update\n  Validation aborted\n  Validation finished\n  Validation started\n  check adaptor and holder\n  holder error\n  WARN Simulated actions not all visible for OQADM1: ['Report aborted (power loss)', 'User disabled', 'Desktop login', 'Test performed']\n\nPassed: 17, Failed: 0, Warnings: 2\n"
+  }
+}

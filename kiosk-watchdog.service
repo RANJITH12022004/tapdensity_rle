@@ -1,0 +1,7 @@
+[Unit]
+Description=Tap Density kiosk health check (API + display)
+After=kiosk-bridge.service kiosk-display.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/kiosk/scripts/kiosk_watchdog.sh

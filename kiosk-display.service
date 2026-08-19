@@ -1,0 +1,28 @@
+[Unit]
+Description=Tap Density kiosk display (X11 + Chromium on tty2 for RealVNC)
+After=kiosk-bridge.service local-fs.target
+Wants=kiosk-bridge.service
+# tty2 is used for X; conflict with getty@tty2 only — keep tty1 available for emergency terminal
+Conflicts=getty@tty2.service
+
+[Service]
+Type=simple
+User=rle
+Group=rle
+TTYPath=/dev/tty2
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+WorkingDirectory=/home/rle
+
+ExecStartPre=/bin/bash /opt/kiosk/scripts/kiosk_harden_permissions.sh
+ExecStart=/bin/bash /opt/kiosk/scripts/run_kiosk_display.sh
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -8,7 +8,7 @@ Type=simple
 User=pi
 Group=pi
 WorkingDirectory=/opt/kiosk
-ExecStart=/usr/bin/python3 /opt/kiosk/bridge.py
+ExecStart=/opt/kiosk/venv/bin/python3 /opt/kiosk/app.py
 Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1

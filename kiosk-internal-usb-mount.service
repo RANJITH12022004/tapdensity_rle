@@ -1,0 +1,13 @@
+[Unit]
+Description=Mount internal kiosk USB and refresh API storage paths
+After=local-fs.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/kiosk/scripts/kiosk_mount_internal_usb.sh
+ExecStartPost=/bin/bash -c 'if mountpoint -q /media/usb_internal; then systemctl try-restart kiosk-bridge.service; fi'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

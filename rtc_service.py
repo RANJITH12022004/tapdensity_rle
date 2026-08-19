@@ -258,7 +258,7 @@ def get_device_wall_datetime_payload() -> Dict[str, Any]:
         dt = datetime.now()
     return {
         "datetime": dt.strftime("%Y-%m-%dT%H:%M:%S"),
-        "date": dt.strftime("%d-%m-%Y"),
+        "date": dt.strftime("%d/%m/%Y"),
         "time": dt.strftime("%H:%M:%S"),
         "source": source,
     }

@@ -50,22 +50,63 @@ def generate_report(
 
 
 def enrich_factory_settings(factory_settings: Dict[str, Any]) -> Dict[str, Any]:
-    fs_in = factory_settings or {}
-    enriched = {
-        "companyName": fs_in.get("companyName") or "N/A",
-        "modelNo": fs_in.get("modelNo") or "N/A",
-        "serialNo": fs_in.get("serialNo") or "N/A",
-        "companyLocation": fs_in.get("companyLocation") or fs_in.get("location") or "N/A",
-        "instrumentId": fs_in.get("instrumentId") or "N/A",
-        "lastValidationDate": fs_in.get("lastValidationDate") or "N/A",
-        "nextValidationDate": fs_in.get("nextValidationDate") or "N/A",
-    }
+    """Merge display defaults; keep policy fields (auto logout, password reset period, etc.)."""
+    fs_in = dict(factory_settings or {})
+    out = dict(fs_in)
+    out.update(
+        {
+            "companyName": fs_in.get("companyName") or "N/A",
+            "modelNo": fs_in.get("modelNo") or "N/A",
+            "serialNo": fs_in.get("serialNo") or "N/A",
+            "companyLocation": fs_in.get("companyLocation") or fs_in.get("location") or "N/A",
+            "instrumentId": fs_in.get("instrumentId") or "N/A",
+            "lastValidationDate": fs_in.get("lastValidationDate") or "N/A",
+            "nextValidationDate": fs_in.get("nextValidationDate") or "N/A",
+        }
+    )
     dates = _resolve_validation_dates(fs_in)
     if dates.get("lastValidationDate"):
-        enriched["lastValidationDate"] = dates["lastValidationDate"]
+        out["lastValidationDate"] = dates["lastValidationDate"]
     if dates.get("nextValidationDate"):
-        enriched["nextValidationDate"] = dates["nextValidationDate"]
-    return enriched
+        out["nextValidationDate"] = dates["nextValidationDate"]
+    return out
+
+
+def format_duration_hhmmss(seconds_val: Any) -> str:
+    """Format elapsed seconds as HH:MM:SS for reports."""
+    if seconds_val is None:
+        return "--"
+    try:
+        total_s = int(seconds_val)
+    except (TypeError, ValueError):
+        return "--"
+    if total_s < 0:
+        return "--"
+    h, rem = divmod(total_s, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def test_duration_seconds(td: Dict[str, Any]) -> Optional[int]:
+    """Resolve test duration in seconds from stored testData."""
+    if not isinstance(td, dict):
+        return None
+    sec = td.get("durationSeconds")
+    if sec is not None:
+        try:
+            return max(0, int(sec))
+        except (TypeError, ValueError):
+            pass
+    start_raw = td.get("testStartTime")
+    end_raw = td.get("testEndTime")
+    if start_raw and end_raw:
+        try:
+            start = datetime.fromisoformat(str(start_raw).replace("Z", "+00:00"))
+            end = datetime.fromisoformat(str(end_raw).replace("Z", "+00:00"))
+            return max(0, int((end - start).total_seconds()))
+        except Exception:
+            pass
+    return None
 
 
 def _parse_density_number(val: Any) -> Optional[float]:
@@ -119,6 +160,293 @@ def _agg_mean_min_max(values: List[float]) -> Dict[str, float]:
         "mean": round(sum(values) / len(values), 3),
         "min": round(min(values), 3),
         "max": round(max(values), 3),
+    }
+
+
+def _parse_float(val: Any) -> Optional[float]:
+    if val is None or val == "" or val == "--":
+        return None
+    try:
+        return float(str(val).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_derived_number(val: Any, decimals: int = 3) -> str:
+    if val is None:
+        return "--"
+    try:
+        f = float(val)
+        if decimals <= 0:
+            return str(int(round(f)))
+        fmt = f"{{:.{decimals}f}}"
+        s = fmt.format(f)
+        return s.rstrip("0").rstrip(".") if "." in s else s
+    except (TypeError, ValueError):
+        return str(val)
+
+
+def _report_print_timestamp() -> Dict[str, str]:
+    try:
+        import rtc_service
+
+        payload = rtc_service.get_device_wall_datetime_payload()
+        return {
+            "printDate": str(payload.get("date") or "--"),
+            "printTime": str(payload.get("time") or "--"),
+        }
+    except Exception:
+        now = datetime.now()
+        return {
+            "printDate": now.strftime("%d/%m/%Y"),
+            "printTime": now.strftime("%H:%M:%S"),
+        }
+
+
+def _test_type_label(recipe: Dict[str, Any], td: Dict[str, Any]) -> str:
+    recipe = recipe or {}
+    td = td or {}
+    mode = str(recipe.get("uspMode") or td.get("uspMode") or "").strip().upper()
+    if mode == "USP1":
+        return "USP 1"
+    if mode == "USP2":
+        return "USP 2"
+    if mode == "CUSTOM":
+        return "Custom"
+    usp = str(recipe.get("usp") or td.get("usp") or "").strip()
+    if not usp:
+        return "--"
+    u = usp.upper().replace("  ", " ")
+    if u in ("USP1", "USP 1"):
+        return "USP 1"
+    if u in ("USP2", "USP 2"):
+        return "USP 2"
+    if "CUSTOM" in u:
+        return "Custom"
+    return usp
+
+
+def _test_method_label(recipe: Dict[str, Any], td: Dict[str, Any], test_type: str) -> str:
+    recipe = recipe or {}
+    td = td or {}
+    cyl = recipe.get("cylinder") if isinstance(recipe.get("cylinder"), dict) else {}
+    cyl_ml = cyl.get("volume") or cyl.get("volumeMl") or td.get("sampleVolumeMl")
+    parts = [test_type] if test_type and test_type != "--" else []
+    if cyl_ml not in (None, "", "--"):
+        parts.append(f"{cyl_ml} ml cylinder")
+    return ", ".join(parts) if parts else "--"
+
+
+def completed_step_count(td: Dict[str, Any]) -> int:
+    """Number of recipe steps that actually ran (recorded in the report)."""
+    if not isinstance(td, dict):
+        return 0
+    results = td.get("stepResults") or []
+    if isinstance(results, list) and results:
+        return len(results)
+    try:
+        return max(0, int(td.get("completedSteps") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _recipe_steps_for_report(td: Dict[str, Any], recipe: Dict[str, Any]) -> list:
+    steps = recipe.get("steps") if isinstance(recipe, dict) else []
+    if not isinstance(steps, list) or not steps:
+        steps = td.get("steps") if isinstance(td, dict) else []
+    return steps if isinstance(steps, list) else []
+
+
+def performed_total_drops(td: Dict[str, Any], recipe: Dict[str, Any]) -> Optional[int]:
+    """Sum per-step drop counts for completed steps only (not planned recipe total)."""
+    if not isinstance(td, dict):
+        return None
+    n = completed_step_count(td)
+    if n <= 0:
+        return None
+    results = td.get("stepResults") or []
+    if not isinstance(results, list):
+        results = []
+    steps = _recipe_steps_for_report(td, recipe if isinstance(recipe, dict) else {})
+    total = 0
+    found = False
+    for i in range(n):
+        step_taps = None
+        if i < len(steps) and isinstance(steps[i], dict):
+            step_taps = steps[i].get("tapCount")
+        if step_taps in (None, "") and i < len(results) and isinstance(results[i], dict):
+            step_taps = results[i].get("tapCount")
+        try:
+            val = int(step_taps)
+            if val > 0:
+                total += val
+                found = True
+        except (TypeError, ValueError):
+            continue
+    return total if found else None
+
+
+def completed_step_drop_counts(td: Dict[str, Any], recipe: Dict[str, Any]) -> List[Any]:
+    """Per-step drop counts for completed steps only."""
+    n = completed_step_count(td)
+    if n <= 0:
+        return []
+    steps = _recipe_steps_for_report(td, recipe if isinstance(recipe, dict) else {})
+    counts: List[Any] = []
+    results = td.get("stepResults") or []
+    if not isinstance(results, list):
+        results = []
+    for i in range(n):
+        step_taps = None
+        if i < len(steps) and isinstance(steps[i], dict):
+            step_taps = steps[i].get("tapCount")
+        if step_taps in (None, "") and i < len(results) and isinstance(results[i], dict):
+            step_taps = results[i].get("tapCount")
+        if step_taps is not None:
+            counts.append(step_taps)
+    return counts
+
+
+def resolve_initial_volume_ml(td: Dict[str, Any]) -> Optional[float]:
+    """V₀ from weight-entry volume; not the first step reading unless legacy data lacks V₀."""
+    if not isinstance(td, dict):
+        return None
+    initial_vol = _parse_float(td.get("initialVolumeMl"))
+    if initial_vol is not None and initial_vol > 0:
+        return initial_vol
+    results = td.get("stepResults") or []
+    if isinstance(results, list) and results and isinstance(results[0], dict):
+        legacy = _parse_float(results[0].get("volumeMl"))
+        if legacy is not None and legacy > 0:
+            return legacy
+    return None
+
+
+def _drop_height_display(recipe: Dict[str, Any], td: Dict[str, Any]) -> str:
+    recipe = recipe or {}
+    td = td or {}
+    dh = recipe.get("dropHeight")
+    steps = recipe.get("steps") or td.get("steps") or []
+    if dh is None and isinstance(steps, list) and steps and isinstance(steps[0], dict):
+        dh = steps[0].get("dropHeight")
+    if dh is None and isinstance(td, dict):
+        dh = td.get("dropHeight")
+    if dh is None or dh == "":
+        return "--"
+    try:
+        mm = float(dh)
+        return f"{_format_derived_number(mm, 0)} mm +/- 0.2 mm"
+    except (TypeError, ValueError):
+        return str(dh)
+
+
+def build_test_report_derived(
+    td: Optional[Dict[str, Any]],
+    recipe: Optional[Dict[str, Any]] = None,
+    report_id: Any = None,
+) -> Dict[str, Any]:
+    """Classic tap-density report fields (W/V0, W/Vf, readings, test metadata)."""
+    td = td if isinstance(td, dict) else {}
+    recipe = recipe if isinstance(recipe, dict) else {}
+    if not recipe and isinstance(td.get("recipe"), dict):
+        recipe = td.get("recipe") or {}
+
+    results = td.get("stepResults") or []
+    if not isinstance(results, list):
+        results = []
+    steps = recipe.get("steps") or td.get("steps") or []
+    if not isinstance(steps, list):
+        steps = []
+
+    weight = _parse_float(td.get("initialWeightG"))
+    initial_vol = resolve_initial_volume_ml(td)
+    final_vol = None
+    if results:
+        final_vol = _parse_float(results[-1].get("volumeMl") if isinstance(results[-1], dict) else None)
+
+    diff_last_two = None
+    if len(results) >= 2:
+        v1 = _parse_float(results[-2].get("volumeMl") if isinstance(results[-2], dict) else None)
+        v2 = _parse_float(results[-1].get("volumeMl") if isinstance(results[-1], dict) else None)
+        if v1 is not None and v2 is not None:
+            diff_last_two = abs(v1 - v2)
+    elif len(results) == 1 and isinstance(results[0], dict):
+        diff_last_two = _parse_float(results[0].get("volumeDeltaMl"))
+
+    initial_density = None
+    tapped_density = None
+    if weight is not None and initial_vol is not None and initial_vol > 0:
+        initial_density = round(weight / initial_vol, 3)
+    if weight is not None and final_vol is not None and final_vol > 0:
+        tapped_density = round(weight / final_vol, 3)
+
+    compressibility = None
+    hausner = None
+    if initial_vol is not None and final_vol is not None and initial_vol > 0 and final_vol > 0:
+        compressibility = round((1.0 - (final_vol / initial_vol)) * 100.0, 2)
+        hausner = round(initial_vol / final_vol, 3)
+
+    test_type = _test_type_label(recipe, td)
+    test_method = _test_method_label(recipe, td, test_type)
+
+    speed = recipe.get("speed")
+    if speed is None and steps and isinstance(steps[0], dict):
+        speed = steps[0].get("speed")
+
+    total_drops = performed_total_drops(td, recipe)
+    step_drop_counts = completed_step_drop_counts(td, recipe)
+
+    readings: List[Dict[str, Any]] = []
+    for i, row in enumerate(results):
+        if not isinstance(row, dict):
+            continue
+        count = None
+        if i < len(steps) and isinstance(steps[i], dict):
+            count = steps[i].get("tapCount")
+        vol = row.get("volumeMl", "--")
+        dvol = row.get("volumeDeltaMl")
+        if dvol in (None, "", "__"):
+            dvol_str = "--"
+        else:
+            try:
+                dvol_str = f"{float(dvol):.4f}"
+            except (TypeError, ValueError):
+                dvol_str = str(dvol)
+        readings.append(
+            {
+                "step": i + 1,
+                "count": count,
+                "volume": vol,
+                "volumeDiff": dvol_str,
+            }
+        )
+
+    test_no = "--"
+    if report_id is not None:
+        try:
+            test_no = f"{int(report_id):04d}"
+        except (TypeError, ValueError):
+            test_no = str(report_id)
+
+    return {
+        "testNumber": test_no,
+        "testType": test_type,
+        "testMethod": test_method,
+        "dropsPerMin": speed if speed is not None else "--",
+        "dropHeight": _drop_height_display(recipe, td),
+        "totalDrops": total_drops,
+        "totalTaps": total_drops,
+        "stepDropCounts": step_drop_counts,
+        "stepTapCounts": step_drop_counts,
+        "sampleWeightG": weight,
+        "initialVolumeMl": initial_vol,
+        "finalVolumeMl": final_vol,
+        "diffLastTwoVolumesMl": diff_last_two,
+        "initialDensityGPerMl": initial_density,
+        "tappedDensityGPerMl": tapped_density,
+        "compressibilityIndexPct": compressibility,
+        "hausnerRatio": hausner,
+        "readings": readings,
     }
 
 
@@ -190,11 +518,21 @@ def enrich_report_context(report_data: Dict[str, Any]) -> Dict[str, Any]:
     report_data["factorySettings"] = fs
     if str(report_data.get("type") or "").strip().lower() == "test":
         td = report_data.get("testData") if isinstance(report_data.get("testData"), dict) else report_data
+        if isinstance(td, dict):
+            td_remarks = td.get("remarks")
+            if td_remarks not in (None, "") and not report_data.get("remarks"):
+                report_data["remarks"] = td_remarks
         computed = compute_test_report_statistics(td if isinstance(td, dict) else None)
         if computed:
             report_data["statistics"] = computed
             if isinstance(report_data.get("testData"), dict):
                 report_data["testData"]["statistics"] = computed
+        recipe = report_data.get("recipe") if isinstance(report_data.get("recipe"), dict) else {}
+        report_data["reportDerived"] = build_test_report_derived(
+            td if isinstance(td, dict) else {},
+            recipe,
+            report_data.get("id"),
+        )
     return report_data
 
 
@@ -229,24 +567,38 @@ def _add_years(dt: datetime, years: int = 1) -> datetime:
         return dt.replace(month=2, day=28, year=dt.year + int(years or 1))
 
 
-def _validation_dates_from_last(dt: datetime) -> Dict[str, str]:
-    """Last validation date and next due exactly one calendar year later."""
-    next_dt = _add_years(dt, 1)
+def _add_months(dt: datetime, months: int) -> datetime:
+    """Add N months, clamping day to month-end on overflow."""
+    import calendar
+    total_months = dt.month - 1 + int(months)
+    year = dt.year + total_months // 12
+    month = total_months % 12 + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def _validation_dates_from_last(dt: datetime, months: int = None) -> Dict[str, str]:
+    """Last validation date and next due date; months selects 3/6/12 month interval, else 1 year."""
+    if months and months in (3, 6, 12):
+        next_dt = _add_months(dt, months)
+    else:
+        next_dt = _add_years(dt, 1)
     return {
-        "lastValidationDate": dt.strftime("%d-%m-%Y"),
-        "nextValidationDate": next_dt.strftime("%d-%m-%Y"),
+        "lastValidationDate": dt.strftime("%d/%m/%Y"),
+        "nextValidationDate": next_dt.strftime("%d/%m/%Y"),
     }
 
 
 def _resolve_validation_dates(factory_settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-    """Single source for validation dates: latest validation report, else stored last; next always +1 year."""
-    computed = _compute_validation_dates_from_reports()
+    """Single source for validation dates: latest validation report, else stored last; interval from dueIntervalMonths."""
+    fs = factory_settings or {}
+    months = _normalize_due_months(fs.get("dueIntervalMonths"))
+    computed = _compute_validation_dates_from_reports(months=months)
     if computed.get("lastValidationDate"):
         return computed
-    fs = factory_settings or {}
     last_dt = _parse_display_date(fs.get("lastValidationDate"))
     if last_dt:
-        return _validation_dates_from_last(last_dt)
+        return _validation_dates_from_last(last_dt, months=months)
     return {}
 
 
@@ -263,7 +615,57 @@ def sync_factory_validation_dates() -> Dict[str, str]:
     return dates
 
 
-def _compute_validation_dates_from_reports() -> Dict[str, str]:
+def _normalize_due_months(value) -> Optional[int]:
+    try:
+        months = int(value)
+    except (TypeError, ValueError):
+        return None
+    return months if months in (3, 6, 12) else None
+
+
+def _normalize_due_kind(value) -> str:
+    kind = str(value or "").strip().lower()
+    return kind if kind in ("validation", "calibration") else "validation"
+
+
+def apply_pending_validation_due_dates(report: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Persist stashed due dates from an approved PASS validation report."""
+    if not isinstance(report, dict):
+        return {}
+    pending = report.get("pendingValidationDue")
+    if not isinstance(pending, dict):
+        return {}
+    last = str(pending.get("lastValidationDate") or "").strip()
+    nxt = str(pending.get("nextValidationDate") or "").strip()
+    if not last or not nxt:
+        return {}
+    months = _normalize_due_months(pending.get("months"))
+    due_kind = _normalize_due_kind(pending.get("dueKind") or report.get("type"))
+    stored = data_service.get_factory_settings() or {}
+    updated = dict(stored)
+    updated["lastValidationDate"] = last
+    updated["nextValidationDate"] = nxt
+    if months is not None:
+        updated["dueIntervalMonths"] = months
+    updated["dueKind"] = due_kind
+    data_service.save_factory_settings(updated)
+    fs = report.get("factorySettings") if isinstance(report.get("factorySettings"), dict) else {}
+    fs = dict(fs)
+    fs["lastValidationDate"] = last
+    fs["nextValidationDate"] = nxt
+    if months is not None:
+        fs["dueIntervalMonths"] = months
+    fs["dueKind"] = due_kind
+    report["factorySettings"] = fs
+    return {
+        "lastValidationDate": last,
+        "nextValidationDate": nxt,
+        "dueIntervalMonths": months,
+        "dueKind": due_kind,
+    }
+
+
+def _compute_validation_dates_from_reports(months: int = None) -> Dict[str, str]:
     reports = data_service.list_reports("validation")
     latest_dt = None
     for report in reports or []:
@@ -285,7 +687,15 @@ def _compute_validation_dates_from_reports() -> Dict[str, str]:
             latest_dt = dt
     if latest_dt is None:
         return {}
-    return _validation_dates_from_last(latest_dt)
+    return _validation_dates_from_last(latest_dt, months=months)
+
+
+def get_report_a4_text(report: Dict[str, Any]) -> str:
+    """Plain-text A4 layout (same source as print, export PDF, and on-screen preview)."""
+    import print_service
+
+    enriched = enrich_report_context(dict(report or {}))
+    return print_service.format_for_a4_printer(enriched).rstrip("\n")
 
 
 def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
@@ -320,6 +730,12 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
         or (td.get("operatorName") if isinstance(td, dict) else None),
         "employeeId": report.get("employeeId")
         or (td.get("employeeId") if isinstance(td, dict) else None),
+        "reportDerived": report.get("reportDerived")
+        or build_test_report_derived(
+            td if isinstance(td, dict) else {},
+            report.get("recipe") if isinstance(report.get("recipe"), dict) else {},
+            report.get("id"),
+        ),
     }
     if report.get("type") == "validation":
         preview["validationSubtype"] = report.get("validationSubtype")
@@ -333,6 +749,10 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
             runs = td.get("validationRuns")
         if runs:
             preview["validationRuns"] = runs
+    try:
+        preview["a4Text"] = get_report_a4_text(report)
+    except Exception:
+        preview["a4Text"] = ""
     return preview
 
 
@@ -465,160 +885,72 @@ def _validation_details_table_html(preview: Dict[str, Any]) -> str:
     return "".join(rows) if rows else '<tr><td colspan="4">No validation data</td></tr>'
 
 
-def build_report_pdf_html(report: Dict[str, Any]) -> str:
-    """Build a self-contained HTML document for PDF rendering (server-side)."""
-    preview = get_report_preview_data(report)
-    rtype = str(preview.get("type") or "test").strip().lower()
-    td = preview.get("testData") if isinstance(preview.get("testData"), dict) else {}
-    recipe = preview.get("recipe") if isinstance(preview.get("recipe"), dict) else {}
-    fs = preview.get("factorySettings") if isinstance(preview.get("factorySettings"), dict) else {}
-    approval_st = str(preview.get("reportApprovalStatus") or "").strip().lower()
-    is_aborted = (
-        approval_st == "aborted"
-        or str(td.get("status") or "").strip().lower() == "aborted"
-    )
-    is_approved = approval_st == "approved"
-
-    status_raw = str(td.get("status") or "").strip().lower()
-    status_label = "Aborted" if status_raw == "aborted" else "Completed"
-    start_ts = _format_report_ts(td.get("testStartTime") or preview.get("createdAt"))
-    end_ts = _format_report_ts(td.get("testEndTime") or preview.get("completedAt") or preview.get("createdAt"))
-    duration = td.get("durationSeconds")
-    duration_str = "{} s".format(duration) if duration is not None and duration >= 0 else "--"
-
-    remarks = preview.get("remarks") or td.get("remarks") or "N/A"
-    if is_approved:
-        appr_result = preview.get("approvalPassFail") or "--"
-        appr_by = preview.get("approvedBy") or "--"
-        appr_remarks = preview.get("approvalRemarks")
-        appr_remarks_disp = appr_remarks if appr_remarks not in (None, "") else "N/A"
-    else:
-        appr_result = "N/A"
-        appr_by = "N/A"
-        appr_remarks_disp = "N/A"
-
-    if rtype == "validation":
-        val_section = (
-            '<h3>VALIDATION DETAILS</h3>'
-            '<table class="ident"><tbody>{}</tbody></table>'
-        ).format(_validation_details_table_html(preview))
-        test_section = ""
-    else:
-        val_section = ""
-        row_count = _report_step_row_count(td)
-        results = td.get("stepResults") or []
-        step_rows = []
-        if row_count > 0:
-            for i in range(row_count):
-                row = results[i] if i < len(results) and isinstance(results[i], dict) else {}
-                vol = row.get("volumeMl", "__")
-                d_vol = row.get("volumeDeltaMl", "__")
-                bulk = row.get("bulkDensity", "__")
-                tap = row.get("tapDensity", "__")
-                step_rows.append(
-                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-                        i + 1,
-                        _html_esc(vol),
-                        _html_esc(d_vol),
-                        _html_esc(bulk),
-                        _html_esc(tap),
-                    )
-                )
-        else:
-            step_rows.append('<tr><td colspan="5">No test data</td></tr>')
-        test_data_rows = "".join(step_rows)
-        total_taps = _recipe_total_tap_count(recipe)
-        total_taps_str = str(total_taps) if total_taps is not None else "N/A"
-        test_section = (
-            '<h3>TEST INFORMATION</h3>'
-            '<table class="ident">'
-            '<tr><th>Product Name</th><td>{prod}</td><th>Batch No</th><td>{batch}</td></tr>'
-            '<tr><th>Total Taps</th><td>{total_taps}</td><th>Test Start</th><td>{start}</td></tr>'
-            '<tr><th>Completed Date / Time</th><td colspan="3">{end}</td></tr>'
-            '<tr><th>Duration</th><td>{dur}</td><th>Test Status</th><td>{status}</td></tr>'
-            '</table>'
-            '<h3>TEST DATA</h3>'
-            '<table class="data">'
-            '<thead><tr><th>Step</th><th>Vol (ml)</th><th>Δ Vol</th><th>Bulk</th><th>Tap</th></tr></thead>'
-            '<tbody>{steps}</tbody></table>'
-            '<h3>STATISTICS</h3>'
-            '<table class="data">'
-            '<thead><tr><th>Parameter</th><th>Value</th></tr></thead>'
-            '<tbody>{stats}</tbody></table>'
-            '<div class="remarks"><strong>Remarks:</strong> {remarks}</div>'
-        ).format(
-            prod=_html_esc(recipe.get("productName") or td.get("productName")),
-            batch=_html_esc(recipe.get("batchNumber") or td.get("batchNumber")),
-            total_taps=_html_esc(total_taps_str),
-            start=_html_esc(start_ts),
-            end=_html_esc(end_ts),
-            dur=_html_esc(duration_str),
-            status=_html_esc(status_label),
-            steps=test_data_rows,
-            stats=_statistics_table_html(preview, td),
-            remarks=_html_esc(remarks),
-        )
-
-    title = "TAP DENSITY VALIDATION REPORT" if rtype == "validation" else "TAP DENSITY TEST REPORT"
-    if is_aborted:
-        title_note = " (ABORTED)"
-    elif is_approved:
-        title_note = ""
-    else:
-        title_note = ""
-
-    body = (
-        '<div class="doc">'
-        '<h1>{title}{note}</h1>'
-        '<h2>{company}</h2>'
+def _derived_summary_html(derived: Dict[str, Any]) -> str:
+    if not isinstance(derived, dict):
+        return ""
+    total_drops = derived.get("totalDrops")
+    if total_drops is None:
+        total_drops = derived.get("totalTaps")
+    total_taps_str = str(total_drops) if total_drops is not None else "--"
+    return (
+        '<h3>TEST SUMMARY</h3>'
         '<table class="ident">'
-        '<tr><th>Model No</th><td>{model}</td><th>Serial No</th><td>{serial}</td></tr>'
-        '<tr><th>Location</th><td>{loc}</td><th>Instrument ID</th><td>{inst}</td></tr>'
-        '<tr><th>Last Validation</th><td>{lastv}</td><th>Next Validation</th><td>{nextv}</td></tr>'
+        '<tr><th>Sample Weight (g)</th><td>{w}</td><th>Total No. of Drops</th><td>{drops}</td></tr>'
+        '<tr><th>Initial Volume (V₀) (ml)</th><td>{v0}</td><th>Diff. of Last Two Volumes (ml)</th><td>{diff}</td></tr>'
         '</table>'
-        '{val}'
-        '{test}'
-        '<h3>APPROVAL</h3>'
-        '<table class="ident">'
-        '<tr><th>Operated by</th><td>{op}</td><th>Employee ID</th><td>{emp}</td></tr>'
-        '<tr><th>Approval Result</th><td>{appr}</td><th>Approved By</th><td>{by}</td></tr>'
-        '<tr><th>Approval Remarks</th><td colspan="3">{appr_rem}</td></tr>'
-        '</table>'
-        '</div>'
     ).format(
-        title=_html_esc(title),
-        note=title_note,
-        company=_html_esc(fs.get("companyName")),
-        model=_html_esc(fs.get("modelNo")),
-        serial=_html_esc(fs.get("serialNo")),
-        loc=_html_esc(fs.get("companyLocation") or fs.get("location")),
-        inst=_html_esc(fs.get("instrumentId")),
-        lastv=_html_esc(fs.get("lastValidationDate")),
-        nextv=_html_esc(fs.get("nextValidationDate")),
-        val=val_section,
-        test=test_section,
-        op=_html_esc(preview.get("operatorName") or td.get("operatorName")),
-        emp=_html_esc(preview.get("employeeId") or td.get("employeeId")),
-        appr=_html_esc(appr_result),
-        by=_html_esc(appr_by),
-        appr_rem=_html_esc(appr_remarks_disp),
+        w=_html_esc(_format_derived_number(derived.get("sampleWeightG"), 2)),
+        drops=_html_esc(total_taps_str),
+        v0=_html_esc(_format_derived_number(derived.get("initialVolumeMl"), 4)),
+        diff=_html_esc(_format_derived_number(derived.get("diffLastTwoVolumesMl"), 4)),
     )
+
+
+def _derived_test_result_html(derived: Dict[str, Any]) -> str:
+    if not isinstance(derived, dict):
+        return ""
+    return (
+        '<h3>TEST RESULT</h3>'
+        '<table class="ident">'
+        '<tr><th>Final Volume (Vf) (ml)</th><td>{vf}</td>'
+        '<th>Initial Density (W/V₀) (g/mL)</th><td>{id}</td></tr>'
+        '<tr><th>Tapped Density (W/Vf) (g/mL)</th><td>{td}</td>'
+        '<th>Compressibility Index (%)</th><td>{ci}</td></tr>'
+        '<tr><th>Hausner Ratio (V₀/Vf)</th><td colspan="3">{hr}</td></tr>'
+        '</table>'
+    ).format(
+        vf=_html_esc(_format_derived_number(derived.get("finalVolumeMl"), 4)),
+        id=_html_esc(_format_derived_number(derived.get("initialDensityGPerMl"), 3)),
+        td=_html_esc(_format_derived_number(derived.get("tappedDensityGPerMl"), 3)),
+        ci=_html_esc(_format_derived_number(derived.get("compressibilityIndexPct"), 2)),
+        hr=_html_esc(_format_derived_number(derived.get("hausnerRatio"), 3)),
+    )
+
+
+def build_report_pdf_html(report: Dict[str, Any]) -> str:
+    """
+    Build PDF HTML from the A4 text formatter output (====, ----, ****).
+    Printed date/time appears only in the footer (same as dot-matrix A4 print).
+    """
+    import print_service
+
+    enriched = enrich_report_context(dict(report or {}))
+    a4_text = print_service.format_for_a4_printer(enriched).rstrip()
+    escaped = html_module.escape(a4_text)
 
     css = (
-        "body{font-family:Arial,sans-serif;font-size:11pt;color:#000;margin:12px;}"
-        "h1{font-size:14pt;text-align:center;margin:0 0 8px;}"
-        "h2{font-size:12pt;text-align:center;margin:0 0 12px;}"
-        "h3{font-size:11pt;margin:14px 0 6px;border-bottom:1px solid #333;}"
-        "table{width:100%;border-collapse:collapse;margin-bottom:10px;}"
-        "th,td{border:1px solid #333;padding:4px 6px;text-align:left;vertical-align:top;}"
-        "th{background:#e8e8e8;}"
-        ".usp-hdr{background:#e8e8e8;font-weight:bold;}"
-        ".remarks{margin:12px 0;padding:8px;border:1px solid #333;}"
+        "@page{size:A4;margin:10mm;}"
+        "body{margin:0;padding:3mm 0;color:#000;background:#fff;"
+        "font-family:'Courier New',Courier,monospace;font-size:11pt;line-height:1.25;"
+        "text-align:center;box-sizing:border-box;"
+        "-webkit-print-color-adjust:exact;print-color-adjust:exact;}"
+        ".a4-sheet{display:inline-block;max-width:100%;text-align:left;vertical-align:top;}"
+        "pre{margin:0;white-space:pre;tab-size:4;letter-spacing:0;font-size:inherit;line-height:inherit;}"
     )
     return (
         '<!doctype html><html><head><meta charset="utf-8"><title>Report</title>'
-        '<style>{}</style></head><body>{}</body></html>'
-    ).format(css, body)
+        '<style>{}</style></head><body><div class="a4-sheet"><pre>{}</pre></div></body></html>'
+    ).format(css, escaped)
 
 
 def create_pdf_report(report_data: Dict[str, Any], template_type: str = "standard") -> Optional[pathlib.Path]:

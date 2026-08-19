@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 bridge.py - Kiosk entry point for Tap Density. Sets APP_ROOT and runs Flask app.
+Registers the isolated RLE Desktop Client API without modifying app.py routes.
 """
 
 import os
@@ -13,7 +14,15 @@ if "APP_ROOT" not in os.environ:
     else:
         os.environ.setdefault("APP_ROOT", str(_script_dir))
 
+import app as kiosk_app
 from app import app
+
+try:
+    from desktop_api import register as register_desktop_api
+
+    register_desktop_api(app, kiosk_app)
+except Exception as exc:
+    app.logger.warning("Desktop API not loaded: %s", exc)
 
 if __name__ == "__main__":
     host = os.environ.get("FLASK_HOST", "0.0.0.0")

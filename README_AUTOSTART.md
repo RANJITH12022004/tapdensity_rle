@@ -85,10 +85,40 @@ The `start_kiosk.sh` script attempts to start Chromium, but this may require:
 
 For headless operation, you may need to configure X11 forwarding or use a different display method.
 
+### VNC shows "Cannot show desktop"
+
+The kiosk runs Chromium on X display `:0` via `kiosk-display.service`. RealVNC (service mode) must share that same session.
+
+**Cause:** RealVNC on Raspberry Pi OS looks for X on **vt2**. If the kiosk starts X on vt1, VNC connects but cannot show the desktop.
+
+**Fix (included in current install):**
+
+- Kiosk X starts on **vt2** (`/opt/kiosk/scripts/run_kiosk_display.sh`)
+- `/etc/vnc/config.custom` sets `display=:0`
+- `kiosk_vnc_configure.sh` runs from `.xinitrc` to allow local VNC access and reload the VNC service
+
+Re-apply after updates:
+
+```bash
+sudo /opt/kiosk/scripts/install_kiosk_system.sh
+sudo systemctl restart kiosk-display.service
+sudo vncserver-x11 -service -reload
+```
+
+Connect with **RealVNC Viewer** — you should see the same full-screen Chromium kiosk as on the HDMI display.
+
 ## Notes
 
 - The service runs as `root` user. For production, consider creating a dedicated `kiosk` user.
 - Logs are written to `/var/log/kiosk_bridge.log`
 - The service automatically restarts on failure (RestartSec=3)
 - Network target ensures network is available before starting
+
+## Desktop client connectivity
+
+PC clients integrate via the desktop API documented in [docs/DESKTOP_CLIENT.md](docs/DESKTOP_CLIENT.md):
+
+- Base URL: `http://<device-ip>:5000/api/desktop/v1`
+- Device IP: kiosk **Settings → IP Configure**, or `GET /api/system/network-addresses`
+- Auth, report sync, and audit export use the same lockout/audit rules as the kiosk UI
 
