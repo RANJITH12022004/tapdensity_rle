@@ -1429,11 +1429,13 @@ body {
 .settings-grid-container {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
+    grid-auto-rows: auto;
     gap: 12px;
     padding: 20px;
     max-width: 100%;
     margin: 0 auto;
-    align-items: stretch;
+    align-items: start;
+    align-content: start;
     width: 100%;
 }
 
@@ -1450,6 +1452,8 @@ body {
     transition: transform var(--transition-smooth), box-shadow var(--transition-smooth);
     box-shadow: var(--shadow-md);
     min-height: 120px;
+    max-height: 120px;
+    height: auto;
     position: relative;
     overflow: hidden;
     color: white;

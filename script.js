@@ -512,13 +512,22 @@ function closeApprovalVerifyModal() {
 }
 
 function cancelApprovalVerifyModal() {
+    _resolvePendingApprovalVerifyCancelled();
     closeApprovalVerifyModal();
+}
+
+function _resolvePendingApprovalVerifyCancelled() {
     _restoreApprovalVerifyModalOriginalUi();
     if (approvalVerifyResolve) {
         approvalVerifyResolve(null);
         approvalVerifyResolve = null;
     }
     if (approvalVerifyReject) approvalVerifyReject = null;
+    window._recipeSaveInFlight = false;
+    var continueBtn = document.getElementById('create-recipe-continue-btn');
+    if (continueBtn && typeof updateCreateRecipeContinueButton === 'function') {
+        updateCreateRecipeContinueButton();
+    }
 }
 
 function submitApprovalVerifyModal() {
@@ -1619,6 +1628,8 @@ function updateDateTime() {
 
 function showLoginScreen() {
     _auditActivePage = null;
+    var auditBtn = document.querySelector('.reports-filter-audit');
+    if (auditBtn) auditBtn.style.display = '';
     var login = document.getElementById('page-login');
     var app = document.querySelector('.app-container');
     if (app) app.style.display = 'none';
@@ -1737,6 +1748,11 @@ function refreshShellAccessVisibility() {
 }
 
 function goToPage(pageName) {
+    var activePageEl = document.querySelector('.page.active');
+    var activePageId = activePageEl ? activePageEl.id : '';
+    if (activePageId === 'page-approval-verify' && pageName !== 'approval-verify' && approvalVerifyResolve) {
+        _resolvePendingApprovalVerifyCancelled();
+    }
     if (!_suppressTestRunNavGuardOnce && isTestRunActive && typeof isTestRunActive === 'function') {
         if (isTestRunActive() && pageName !== 'test-run') {
             showConfirmModal('Test is running. Do you want to abort and exit?', 'Operation in progress').then(function (ok) {
@@ -2032,6 +2048,9 @@ function goBack() {
         goToPage('calibration-type-select');
     } else if (pageId === 'page-datetime') {
         goToPage('settings');
+    } else if (pageId === 'page-approval-verify') {
+        cancelApprovalVerifyModal();
+        return;
     } else if (pageId === 'page-locked-members' || pageId === 'page-disabled-members') {
         goToPage('manage-members');
     } else if (pageId === 'page-settings' || pageId === 'page-reports' || pageId === 'page-user-profile' || pageId === 'page-manage-recipes') {
@@ -2327,6 +2346,9 @@ function logout() {
         !(typeof isFactorySessionUser === 'function' && isFactorySessionUser());
 
     var doLogout = function () {
+        if (approvalVerifyResolve && typeof _resolvePendingApprovalVerifyCancelled === 'function') {
+            _resolvePendingApprovalVerifyCancelled();
+        }
         abortPendingReportOnLogout().then(function () {
             return stopActiveRunForLogout();
         }).finally(function () {
@@ -2960,7 +2982,7 @@ function _populateAuditFilterDropdowns(userEl, actionEl, fullList) {
         if (a && actions.indexOf(a) === -1) actions.push(a);
     });
     var coreActions = [
-        'Login', 'Logout', 'Logout (inactivity timeout)', 'User logged in',
+        'Login', 'Login failed', 'Logout', 'Logout (inactivity timeout)', 'User logged in',
         'Entered screen', 'Exited screen',
         'Opened Quick Test', 'Opened Load Recipe', 'Opened Manage Recipe', 'Loaded recipe',
         'Opened disabled recipes',

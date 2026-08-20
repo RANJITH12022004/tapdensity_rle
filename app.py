@@ -3382,7 +3382,7 @@ def login():
             remaining = max(0, maximum - fa)
             details = _wrong_password_audit_details(updated, username, fa, maximum)
             _audit_event(
-                action="Login",
+                action="Login failed",
                 outcome="denied",
                 entity_type="session",
                 entity_name="password",
