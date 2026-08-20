@@ -9,6 +9,7 @@ import data_service
 import rbac_service
 
 from desktop_api import auth_store
+from desktop_api import recipes_compat
 from desktop_api.desktop_helpers import display_role_label, legacy_audit
 
 
@@ -25,26 +26,8 @@ def _utc_now_iso(kiosk):
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _stamp_recipe_actor(user, processed, is_create=False):
-    un = _norm_username((user or {}).get("username") or (user or {}).get("name"))
-    if is_create and not processed.get("createdByUsername"):
-        processed["createdByUsername"] = un
-    processed["lastEditedByUsername"] = un
-
-
-def _recipe_self_approve_blocked(user, recipe, verified_username):
-    role = str((user or {}).get("role") or "").strip().lower()
-    if role == "factory":
-        return False
-    creator = _norm_username(
-        (recipe or {}).get("lastEditedByUsername") or (recipe or {}).get("createdByUsername")
-    )
-    return bool(creator) and creator == _norm_username(verified_username)
-
-
 def _apply_recipe_approval_for_desktop_creator(user, processed, kiosk):
     role = str((user or {}).get("role") or "").strip().lower()
-    _stamp_recipe_actor(user, processed, is_create=not processed.get("id"))
     if role != "factory":
         processed["recipeApprovalStatus"] = "pending"
         for k in (
@@ -80,8 +63,6 @@ def _apply_recipe_approval_verify_token(processed, remarks, kiosk):
     verified_name = (verified.get("name") or verified.get("username") or "—").strip()
     verified_role = (verified.get("role") or "").strip()
     verified_username = _norm_username(verified.get("username"))
-    if _recipe_self_approve_blocked({}, processed, verified_username):
-        return "Creator cannot approve their own recipe.", False
     by_line = verified_name
     if verified_role:
         by_line = "{} ({})".format(verified_name, display_role_label(verified_role))
@@ -105,7 +86,7 @@ def register_recipes_routes(bp, kiosk):
             status = str(request.args.get("status") or "active").strip().lower()
             if status not in ("active", "disabled", "all"):
                 status = "active"
-            recipes = data_service.list_recipes(status=status)
+            recipes = recipes_compat.list_recipes(status=status)
             return jsonify({"recipes": recipes}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -123,8 +104,7 @@ def register_recipes_routes(bp, kiosk):
             remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
             tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks, kiosk)
             if tok_err:
-                code = 403 if "cannot approve their own recipe" in str(tok_err).lower() else 401
-                return jsonify({"error": tok_err}), code
+                return jsonify({"error": tok_err}), 401
             recipe_id = data_service.save_recipe(processed)
             if audit_created:
                 audit_created(processed, recipe_id)
@@ -148,7 +128,7 @@ def register_recipes_routes(bp, kiosk):
     def desktop_recipes_get(user, recipe_id):
         try:
             include_disabled = str(request.args.get("includeDisabled") or "").strip().lower() in ("1", "true", "yes")
-            recipe = data_service.get_recipe(recipe_id, include_disabled=include_disabled)
+            recipe = recipes_compat.get_recipe(recipe_id, include_disabled=include_disabled)
             if recipe:
                 return jsonify({"recipe": recipe}), 200
             return jsonify({"error": "Recipe not found"}), 404
@@ -161,7 +141,7 @@ def register_recipes_routes(bp, kiosk):
         try:
             recipe_data = request.get_json(force=True, silent=True) or {}
             recipe_data["id"] = recipe_id
-            before_recipe = data_service.get_recipe(recipe_id)
+            before_recipe = recipes_compat.get_recipe(recipe_id)
             if not before_recipe:
                 return jsonify({"error": "Recipe not found"}), 404
             validation_result = calculation_service.validate_recipe(recipe_data)
@@ -172,8 +152,7 @@ def register_recipes_routes(bp, kiosk):
             remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
             tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks, kiosk)
             if tok_err:
-                code = 403 if "cannot approve their own recipe" in str(tok_err).lower() else 401
-                return jsonify({"error": tok_err}), code
+                return jsonify({"error": tok_err}), 401
             data_service.save_recipe(processed)
             if audit_edited:
                 audit_edited(before_recipe, processed, recipe_id)
@@ -196,8 +175,8 @@ def register_recipes_routes(bp, kiosk):
     @auth_store.require_any_internal(["recipe-delete", "disable-recipes", "recipe-manage"])
     def desktop_recipes_delete(user, recipe_id):
         try:
-            existing = data_service.get_recipe(recipe_id, include_disabled=True)
-            updated = data_service.disable_recipe(
+            existing = recipes_compat.get_recipe(recipe_id, include_disabled=True)
+            updated = recipes_compat.disable_recipe(
                 recipe_id,
                 disabled_by=(user.get("name") or user.get("username") or "--"),
                 disabled_by_username=(user.get("username") or "--"),
@@ -219,7 +198,7 @@ def register_recipes_routes(bp, kiosk):
     @auth_store.require_any_internal(["recipe-delete", "disable-recipes", "recipe-manage"])
     def desktop_recipes_enable(user, recipe_id):
         try:
-            updated = data_service.enable_recipe(recipe_id)
+            updated = recipes_compat.enable_recipe(recipe_id)
             if updated:
                 rlabel = updated.get("productName") or updated.get("name") or ""
                 details = "Recipe id {}".format(recipe_id)
@@ -241,12 +220,10 @@ def register_recipes_routes(bp, kiosk):
             body = request.get_json(force=True, silent=True) or {}
             remarks = (body.get("remarks") or "").strip()
             approver_name = (body.get("approverName") or "").strip()
-            recipe = data_service.get_recipe(recipe_id)
+            recipe = recipes_compat.get_recipe(recipe_id)
             if not recipe:
                 return jsonify({"ok": False, "error": "Recipe not found"}), 404
             verified_username = _norm_username(verified.get("username"))
-            if _recipe_self_approve_blocked(user, recipe, verified_username):
-                return jsonify({"ok": False, "error": "Creator cannot approve their own recipe."}), 403
             st = recipe.get("recipeApprovalStatus")
             if st == "approved":
                 existing_approver = _norm_username(recipe.get("recipeApprovedByUsername"))
@@ -281,51 +258,6 @@ def register_recipes_routes(bp, kiosk):
                 kiosk,
                 {"username": v_audit_user, "role": v_audit_role},
                 "Recipe approved",
-                rdetail,
-            )
-            return jsonify({"ok": True, "recipe": recipe}), 200
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 500
-
-    @bp.route("/recipes/<int:recipe_id>/reject", methods=["POST"])
-    @auth_store.require_auth
-    def desktop_recipes_reject(user, recipe_id):
-        try:
-            verified, verify_err = auth_store.consume_approval_verify_token("recipe")
-            if verify_err:
-                return jsonify({"ok": False, "error": verify_err}), 401
-            body = request.get_json(force=True, silent=True) or {}
-            remarks = (body.get("remarks") or "").strip()
-            recipe = data_service.get_recipe(recipe_id)
-            if not recipe:
-                return jsonify({"ok": False, "error": "Recipe not found"}), 404
-            verified_username = _norm_username(verified.get("username"))
-            if _recipe_self_approve_blocked(user, recipe, verified_username):
-                return jsonify({"ok": False, "error": "Creator cannot reject their own recipe."}), 403
-            st = recipe.get("recipeApprovalStatus")
-            if st not in (None, "pending"):
-                return jsonify({"ok": False, "error": "Invalid approval state"}), 400
-            if st is None:
-                return jsonify({"ok": False, "error": "Legacy recipe does not require approval"}), 400
-            verified_name = (verified.get("name") or verified.get("username") or "—").strip()
-            verified_role = (verified.get("role") or "").strip()
-            by_line = verified_name
-            if verified_role:
-                by_line = "{} ({})".format(verified_name, display_role_label(verified_role))
-            recipe["recipeApprovalStatus"] = "rejected"
-            recipe["recipeRejectedAt"] = _utc_now_iso(kiosk)
-            recipe["recipeRejectedBy"] = by_line
-            recipe["recipeRejectedByUsername"] = verified_username
-            recipe["recipeApprovalRemarks"] = remarks
-            data_service.save_recipe(recipe)
-            rname = (recipe.get("productName") or recipe.get("name") or "").strip()
-            rdetail = "Recipe id {} | rejected by {}".format(recipe_id, verified_name)
-            if rname:
-                rdetail = "{} | recipe: {}".format(rdetail, rname)
-            legacy_audit(
-                kiosk,
-                {"username": verified.get("username") or verified_username, "role": verified_role or "--"},
-                "Recipe rejected",
                 rdetail,
             )
             return jsonify({"ok": True, "recipe": recipe}), 200

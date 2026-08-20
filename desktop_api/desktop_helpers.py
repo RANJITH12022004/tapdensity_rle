@@ -9,6 +9,7 @@ import data_service
 import rbac_service
 
 from desktop_api.auth_store import desktop_signature
+from desktop_api import rbac_compat
 
 
 def display_role_label(role_str):
@@ -111,16 +112,11 @@ def _changed_fields(before_obj, after_obj):
 
 
 def audit_event(kiosk, user, **kwargs):
-    """Structured audit with desktop user as actor (does not use kiosk session)."""
-    fn = getattr(kiosk, "_audit_event", None)
-    if fn:
-        sig = kwargs.get("signature") or desktop_signature(user)
-        kwargs["signature"] = sig
-        return fn(**kwargs)
-
+    """Structured audit attributed to the desktop Bearer user (not kiosk touchscreen session)."""
     audit_time = _audit_time_fields(kiosk)
     u = (user or {}).get("username") or (user or {}).get("name") or "--"
     r = (user or {}).get("role") or "--"
+    sig = kwargs.get("signature") or desktop_signature(user)
     before_clean = _sanitize_audit_payload(kwargs.get("before"))
     after_clean = _sanitize_audit_payload(kwargs.get("after"))
     audit_service.log_structured_event(
@@ -137,9 +133,9 @@ def audit_event(kiosk, user, **kwargs):
         session_user=u,
         session_role=r,
         target_user=kwargs.get("target_user") or "",
-        signature_mode=(kwargs.get("signature") or {}).get("mode") or "desktop",
-        signature_user=(kwargs.get("signature") or {}).get("username") or u,
-        signature_role=(kwargs.get("signature") or {}).get("role") or r,
+        signature_mode=(sig or {}).get("mode") or "desktop",
+        signature_user=(sig or {}).get("username") or u,
+        signature_role=(sig or {}).get("role") or r,
         changed_fields=_changed_fields(
             before_clean if isinstance(before_clean, dict) else {},
             after_clean if isinstance(after_clean, dict) else {},
@@ -154,7 +150,7 @@ def audit_event(kiosk, user, **kwargs):
 
 
 def audit_member_permissions_if_changed(kiosk, user, before_member, after_member, *, member_id):
-    payload = rbac_service.build_permission_change_audit(
+    payload = rbac_compat.build_permission_change_audit(
         before_member,
         after_member,
         target_username=str(

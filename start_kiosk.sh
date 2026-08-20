@@ -21,7 +21,7 @@ if [ -d "$INTERNAL_USB_PATH" ]; then
 fi
 
 # Start Flask backend (app.py)
-nohup env APP_ROOT="$APP_ROOT" PYTHONUNBUFFERED=1 "$PYTHON" "$APP_ROOT/app.py" >> "$LOG" 2>&1 &
+nohup env APP_ROOT="$APP_ROOT" PYTHONUNBUFFERED=1 "$PYTHON" "$APP_ROOT/bridge.py" >> "$LOG" 2>&1 &
 
 # Give backend a moment to start
 sleep 2

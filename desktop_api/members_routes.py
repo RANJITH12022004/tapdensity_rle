@@ -8,6 +8,7 @@ import data_service
 import rbac_service
 
 from desktop_api import auth_store
+from desktop_api import rbac_compat
 from desktop_api.desktop_helpers import (
     audit_event,
     audit_member_permissions_if_changed,
@@ -494,35 +495,18 @@ def register_members_routes(bp, kiosk):
                 signature={"mode": method, "username": vname, "role": verifier_role},
                 extra={"purpose": purpose, "method": method},
             )
-            payload_out = {
-                "ok": True,
-                "token": token,
-                "expiresInSec": auth_store.APPROVAL_VERIFY_TTL_SECONDS,
-                "verifier": {
-                    "username": token_payload.get("username"),
-                    "name": token_payload.get("name"),
-                    "role": token_payload.get("role"),
-                },
-            }
-            if purpose in ("report", "validation"):
-                raw_rid = payload.get("reportId")
-                if raw_rid is None:
-                    raw_rid = payload.get("report_id")
-                pf = (payload.get("passFail") or payload.get("pass_fail") or "").strip().upper()
-                remarks = (payload.get("remarks") or "").strip()
-                apply_fn = getattr(kiosk, "_apply_pending_report_approval", None)
-                if apply_fn and raw_rid not in (None, "") and pf in ("PASS", "FAIL"):
-                    try:
-                        rid = int(raw_rid)
-                    except (TypeError, ValueError):
-                        return jsonify({"ok": False, "error": "reportId must be an integer"}), 400
-                    report, err, code, pdf_ok = apply_fn(rid, verifier, pf, remarks)
-                    if err:
-                        return jsonify({"ok": False, "error": err, "token": token}), code
-                    payload_out["approved"] = True
-                    payload_out["pdfGenerated"] = bool(pdf_ok)
-                    payload_out["report"] = report
-            return jsonify(payload_out), 200
+            return jsonify(
+                {
+                    "ok": True,
+                    "token": token,
+                    "expiresInSec": auth_store.APPROVAL_VERIFY_TTL_SECONDS,
+                    "verifier": {
+                        "username": token_payload.get("username"),
+                        "name": token_payload.get("name"),
+                        "role": token_payload.get("role"),
+                    },
+                }
+            ), 200
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -534,7 +518,7 @@ def register_members_routes(bp, kiosk):
             cards.append(
                 {
                     "key": key,
-                    "label": rbac_service.PERMISSION_CARD_LABELS.get(key, key),
+                    "label": rbac_compat.permission_card_labels().get(key, key),
                     "internalKeys": list(rbac_service.PERM_CARD_EXPAND.get(key, [])),
                 }
             )

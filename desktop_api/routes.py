@@ -20,6 +20,7 @@ import pdf_generator
 import rbac_service
 
 from desktop_api import auth_store
+from desktop_api.desktop_helpers import audit_event, legacy_audit
 from desktop_api.members_routes import register_members_routes
 from desktop_api.recipes_routes import register_recipes_routes
 
@@ -39,6 +40,26 @@ def _filter_range(filters: dict) -> dict:
         except (TypeError, ValueError):
             out[key] = value
     return out
+
+
+def _build_audit_html(kiosk, entries, filters, factory, user):
+    """Call product `_build_audit_trail_html` with optional export_meta (TD only)."""
+    import inspect
+
+    build = getattr(kiosk, "_build_audit_trail_html", None)
+    if not build:
+        raise RuntimeError("Kiosk app is missing _build_audit_trail_html")
+    export_meta = {"exported_by": user, "approved_by": user}
+    try:
+        params = inspect.signature(build).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "export_meta" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return build(entries, filters, factory, export_meta=export_meta)
+    try:
+        return build(entries, filters, factory, export_meta)
+    except TypeError:
+        return build(entries, filters, factory)
 
 
 def _send_temp(path, download_name, mimetype):
@@ -100,69 +121,70 @@ def _collect_ipv4_addresses():
                 proc = subprocess.run(ip_cmd, capture_output=True, text=True, timeout=10)
                 if proc.returncode != 0:
                     continue
-                source = " ".join(ip_cmd)
-                for line in (proc.stdout or "").splitlines():
-                    parts = line.split()
-                    for part in parts:
-                        if "/" in part and re.match(r"^\d+\.\d+\.\d+\.\d+/\d+$", part):
-                            add_ip(part.split("/")[0])
-                if found:
+                matches = re.findall(r"\binet (\d+\.\d+\.\d+\.\d+)/", proc.stdout or "")
+                if matches:
+                    source = " ".join(ip_cmd)
+                    for ip in matches:
+                        add_ip(ip)
                     break
             except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
                 continue
 
-    return found, source
-
-
-def _wrong_password_audit_details(member, username, attempt, maximum):
-    member = member or {}
-    attempted_username = str(member.get("username") or username or "").strip() or "--"
-    attempted_name = str(member.get("name") or "").strip() or "--"
-    detail = "User {} ({}) entered the wrong password - attempt {}/{}".format(
-        attempted_username,
-        attempted_name,
-        attempt,
-        maximum,
-    )
-    if int(attempt) >= int(maximum):
-        detail += "; account locked"
-    return detail
-
-
-def _locked_login_audit_details(member, username):
-    member = member or {}
-    attempted_username = str(member.get("username") or username or "").strip() or "--"
-    attempted_name = str(member.get("name") or "").strip() or "--"
-    return "Locked account {} ({}) tried to log in".format(attempted_username, attempted_name)
-
-
-def _disabled_login_audit_details(member, username):
-    member = member or {}
-    attempted_username = str(member.get("username") or username or "").strip() or "--"
-    attempted_name = str(member.get("name") or "").strip() or "--"
-    return "Disabled account {} ({}) tried to log in".format(attempted_username, attempted_name)
+    return {"addresses": found, "source": source}
 
 
 def create_blueprint(kiosk):
     """Build blueprint; kiosk is the loaded app module for shared PDF/audit helpers."""
     bp = Blueprint("rle_desktop_api", __name__, url_prefix="/api/desktop/v1")
 
-    audit_event = getattr(kiosk, "_audit_event", None)
-    audit_log = getattr(kiosk, "_audit", None)
-
-    def log_audit(user, action, details, **kwargs):
-        if audit_event:
+    def log_major(user, action, details, **kwargs):
+        """Write a machine-style major audit row attributed to the desktop user."""
+        try:
             audit_event(
+                kiosk,
+                user or {},
                 action=action,
-                outcome=kwargs.get("outcome", "success"),
-                entity_type=kwargs.get("entity_type", "desktop"),
-                entity_name=kwargs.get("entity_name", "desktop"),
                 details=details,
-                target_user=kwargs.get("target_user") or (user.get("username") if user else None),
-                extra=kwargs.get("extra"),
+                outcome=kwargs.get("outcome") or "success",
+                entity_type=kwargs.get("entity_type") or "desktop",
+                entity_id=kwargs.get("entity_id"),
+                entity_name=kwargs.get("entity_name") or "desktop-client",
+                target_user=kwargs.get("target_user") or "",
+                event_type=kwargs.get("event_type") or "compliance",
+                reason=kwargs.get("reason") or "",
             )
-        elif audit_log and user:
-            audit_log(user.get("username") or user.get("name"), user.get("role"), action, details)
+        except Exception:
+            # Fall back to legacy helper if structured write fails.
+            try:
+                legacy_audit(kiosk, user or {}, action, details)
+            except Exception:
+                pass
+
+    def _desktop_app_name(factory):
+        """Product-agnostic display name for multi-machine desktop clients."""
+        env_name = (os.environ.get("DESKTOP_APP_NAME") or "").strip()
+        if env_name:
+            return env_name
+        try:
+            name_file = pathlib.Path(os.environ.get("APP_ROOT") or "/opt/kiosk") / "desktop_app_name"
+            if name_file.is_file():
+                file_name = name_file.read_text(encoding="utf-8").strip()
+                if file_name:
+                    return file_name
+        except OSError:
+            pass
+        for key in (
+            "appName",
+            "productName",
+            "instrumentName",
+            "companyName",
+            "company",
+            "instrument",
+        ):
+            value = str((factory or {}).get(key) or "").strip()
+            if value:
+                return value
+        return "RLE Kiosk"
 
     @bp.route("/health", methods=["GET"])
     def desktop_health():
@@ -173,7 +195,7 @@ def create_blueprint(kiosk):
         return jsonify({
             "ok": True,
             "status": "ok",
-            "app": "Tap Density",
+            "app": _desktop_app_name(factory),
             "model": factory.get("modelNo") or factory.get("model") or "",
             "serial": factory.get("serialNo") or factory.get("serial") or "",
             "time": datetime.now().isoformat(),
@@ -183,91 +205,67 @@ def create_blueprint(kiosk):
     def desktop_auth_login():
         try:
             credentials = request.get_json(force=True, silent=True) or {}
-            username = str(credentials.get("username") or "").strip()
+            username = " ".join(str(credentials.get("username") or "").split())
             password = credentials.get("password") if isinstance(credentials.get("password"), str) else str(credentials.get("password") or "")
             if not username:
                 return jsonify({"error": "Username is required."}), 400
-
-            if username.upper() == data_service.FACTORY_USERNAME.upper():
-                user = data_service.authenticate_user(username, password)
-                if user:
-                    data_service.record_successful_login(username)
-                    token, safe_user = auth_store.issue_token(user)
-                    log_audit(safe_user, "Desktop login", "Desktop user logged in: {}".format(username))
-                    return jsonify({"success": True, "token": token, "user": safe_user}), 200
-                log_audit(
-                    None,
-                    "Desktop login",
-                    "User {} (Factory) entered the wrong password; attempt not counted for the factory account".format(
-                        username or data_service.FACTORY_USERNAME
-                    ),
-                    outcome="denied",
-                    target_user=username or data_service.FACTORY_USERNAME,
-                )
-                return jsonify({"error": "Invalid username or password."}), 401
-
             member = data_service.get_member_by_username(username)
             if member:
                 status = str(member.get("status") or "active").strip().lower()
-                if status == "locked":
-                    log_audit(
-                        None,
-                        "Desktop login",
-                        _locked_login_audit_details(member, username),
-                        outcome="denied",
-                        target_user=username,
-                    )
-                    return jsonify({"error": "Account locked. Contact admin."}), 403
                 if status == "disabled":
-                    log_audit(
-                        None,
-                        "Desktop login",
-                        _disabled_login_audit_details(member, username),
-                        outcome="denied",
-                        target_user=username,
-                    )
                     return jsonify({"error": "Account disabled by admin."}), 403
-
             user = data_service.authenticate_user(username, password)
             if not user:
-                updated = data_service.record_failed_login(username)
-                if updated:
-                    status = str(updated.get("status") or "").strip().lower()
-                    try:
-                        fa = int(updated.get("failedAttempts") or 0)
-                    except (TypeError, ValueError):
-                        fa = 0
-                    maximum = data_service.MAX_FAILED_LOGIN_ATTEMPTS
-                    remaining = max(0, maximum - fa)
-                    details = _wrong_password_audit_details(updated, username, fa, maximum)
-                    log_audit(
-                        None,
-                        "Desktop login",
-                        details,
-                        outcome="denied",
-                        target_user=updated.get("username") or username,
-                        extra={
-                            "failedAttempts": fa,
-                            "maximumAttempts": maximum,
-                            "remainingAttempts": remaining,
-                        },
-                    )
-                    if status == "locked":
-                        return jsonify({"error": "Account locked. Contact admin.", "remainingAttempts": 0}), 403
-                    return jsonify({"error": "Invalid username or password.", "remainingAttempts": remaining}), 401
-                return jsonify({"error": "Invalid username or password."}), 401
-
-            member = data_service.get_member_by_username(username)
-            if member:
-                if bool(member.get("mustChangePassword")):
-                    return jsonify({"error": "Password change required before login.", "passwordChangeRequired": True}), 403
-                expiry = data_service.get_member_password_expiry_state(member)
-                if bool(expiry.get("expired")):
-                    return jsonify({"error": "Password expired. Reset required.", "passwordExpired": True, "expiry": expiry}), 403
-
+                try:
+                    members = data_service.list_members() or []
+                except Exception:
+                    members = []
+                if not members:
+                    return jsonify({
+                        "error": "No member accounts are configured on this machine (members list is empty). Factory login still works; restore members or create users on the kiosk.",
+                        "membersEmpty": True,
+                    }), 401
+                log_major(
+                    {"username": username, "role": "--"},
+                    "Login",
+                    "Desktop client | Wrong password | User ID entered: {}".format(username),
+                    outcome="denied",
+                    entity_type="session",
+                    entity_name="password",
+                    target_user=username,
+                )
+                body = {"error": "Invalid username or password."}
+                return jsonify(body), 401
+            if username.upper() != data_service.FACTORY_USERNAME.upper():
+                member = data_service.get_member_by_username(username)
+                if member:
+                    expiry = data_service.get_member_password_expiry_state(member)
+                    if bool(expiry.get("expired")):
+                        log_major(
+                            {"username": username, "role": member.get("role") or "--"},
+                            "Login",
+                            "Desktop client | Password expired. Reset required. | User ID entered: {}".format(username),
+                            outcome="denied",
+                            entity_type="session",
+                            entity_name="password",
+                            target_user=username,
+                        )
+                        return jsonify({"error": "Password expired. Reset required.", "passwordExpired": True, "expiry": expiry}), 403
             data_service.record_successful_login(username)
+            member_after = data_service.get_member_by_username(username)
+            if member_after and str(member_after.get("status") or "").strip().lower() == "locked":
+                member_after["status"] = "active"
+                member_after["failedAttempts"] = 0
+                data_service._save_member_record(member_after)
             token, safe_user = auth_store.issue_token(user)
-            log_audit(safe_user, "Desktop login", "Desktop user logged in: {}".format(username))
+            log_major(
+                safe_user,
+                "Login",
+                "Desktop client | User logged in: {}".format(username),
+                entity_type="session",
+                entity_name="desktop-client",
+                target_user=username,
+            )
             return jsonify({"success": True, "token": token, "user": safe_user}), 200
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -280,8 +278,16 @@ def create_blueprint(kiosk):
     @bp.route("/auth/logout", methods=["POST"])
     @auth_store.require_auth
     def desktop_auth_logout(user):
+        uname = user.get("username") or user.get("name") or "--"
         auth_store.revoke_token(auth_store.token_from_request())
-        log_audit(user, "Desktop logout", "Desktop user logged out: {}".format(user.get("username") or user.get("name") or "--"))
+        log_major(
+            user,
+            "Logout",
+            "Desktop client | User logged out: {}".format(uname),
+            entity_type="session",
+            entity_name="desktop-client",
+            target_user=uname,
+        )
         return jsonify({"success": True}), 200
 
     @bp.route("/reports", methods=["GET"])
@@ -305,9 +311,27 @@ def create_blueprint(kiosk):
             return jsonify({"error": "Report not found"}), 404
         if not kiosk._report_pdf_status_allowed(report):
             return jsonify({"error": "PDF is available only after the report is approved or marked aborted."}), 403
-        if not kiosk._generate_report_pdf_file(report_id, write_audit=True):
-            return jsonify({"error": "PDF generation failed"}), 500
         path = kiosk._report_pdf_path(report_id)
+        # Prefer cached PDF — regenerating every download stalls bulk ZIP/sync.
+        if not (path.exists() and path.stat().st_size > 0):
+            if not kiosk._generate_report_pdf_file(report_id, write_audit=True):
+                return jsonify({"error": "PDF generation failed"}), 500
+        purpose = str(request.args.get("purpose") or request.args.get("source") or "download").strip().lower()
+        if purpose not in ("view", "download", "sync", "zip"):
+            purpose = "download"
+        uname = user.get("username") or user.get("name") or "--"
+        role = user.get("role") or "--"
+        log_major(
+            user,
+            "Reports exported",
+            "Exported 1 report via desktop client ({}) | report-{}.pdf | exported by {} ({})".format(
+                purpose, report_id, uname, role
+            ),
+            entity_type="report",
+            entity_id=report_id,
+            entity_name="report-{}".format(report_id),
+            target_user=uname,
+        )
         return send_file(path, mimetype="application/pdf", as_attachment=False, download_name="report-{}.pdf".format(report_id))
 
     @bp.route("/reports/download", methods=["POST"])
@@ -322,67 +346,134 @@ def create_blueprint(kiosk):
                     wanted.append(int(rid))
                 except (TypeError, ValueError):
                     pass
+            reports = [data_service.get_report(rid) for rid in wanted]
+            reports = [r for r in reports if r]
         else:
-            wanted = [int(r.get("id")) for r in data_service.list_reports("all") if r.get("id") is not None]
-        fd, tmp_path = tempfile.mkstemp(suffix=".zip")
-        os.close(fd)
-        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for rid in wanted:
-                if kiosk._generate_report_pdf_file(rid, write_audit=False):
-                    pdf_path = kiosk._report_pdf_path(rid)
-                    if pdf_path.exists():
-                        zf.write(pdf_path, arcname="report-{}.pdf".format(rid))
-        return _send_temp(tmp_path, "tap-density-reports.zip", "application/zip")
+            filter_type = str(payload.get("type") or "all").strip().lower()
+            reports = data_service.list_reports(filter_type if filter_type in ("test", "validation") else "all")
+        if not reports:
+            return jsonify({"error": "No reports found"}), 404
+        tmp = pathlib.Path(tempfile.NamedTemporaryFile(delete=False, suffix=".zip").name)
+        try:
+            added = 0
+            skipped = 0
+            # STORED: PDFs are already compressed; regenerating every file made bulk ZIP hang.
+            with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_STORED) as zf:
+                for report in reports:
+                    rid = int(report.get("id"))
+                    if not kiosk._report_pdf_status_allowed(report):
+                        skipped += 1
+                        continue
+                    pdf = kiosk._report_pdf_path(rid)
+                    if not (pdf.exists() and pdf.stat().st_size > 0):
+                        kiosk._generate_report_pdf_file(rid, write_audit=False)
+                    if pdf.exists() and pdf.stat().st_size > 0:
+                        zf.write(pdf, "reports/report-{}.pdf".format(rid))
+                        added += 1
+                    else:
+                        skipped += 1
+            if added <= 0:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return jsonify({
+                    "error": "No PDF files could be added to the ZIP. Reports must be approved or aborted before download.",
+                    "skipped": skipped,
+                }), 400
+            uname = user.get("username") or user.get("name") or "--"
+            role = user.get("role") or "--"
+            log_major(
+                user,
+                "Reports exported",
+                "Exported {} report{} via desktop client (ZIP) | exported by {} ({}){}".format(
+                    added,
+                    "" if added == 1 else "s",
+                    uname,
+                    role,
+                    " | skipped {}".format(skipped) if skipped else "",
+                ),
+                entity_type="report",
+                entity_name="reports-zip",
+                target_user=uname,
+            )
+            return _send_temp(tmp, "reports-download.zip", "application/zip")
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     @bp.route("/audit", methods=["GET"])
     @auth_store.require_internal("audit-view")
     def desktop_audit(user):
-        filters = _filter_range(request.args.to_dict(flat=True))
-        entries = audit_service.list_entries(filters)
+        filters = _filter_range(dict(request.args))
+        entries = kiosk._prepare_audit_entries_for_display(audit_service.list_entries(filters))
         return jsonify({"entries": entries}), 200
 
     @bp.route("/audit/download", methods=["POST"])
     @auth_store.require_internal("audit-view")
     def desktop_audit_download(user):
         payload = request.get_json(force=True, silent=True) or {}
-        filters = _filter_range(payload)
-        entries = audit_service.list_entries(filters)
-        pdf_bytes = pdf_generator.generate_audit_trail_pdf(entries)
-        fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
-        os.close(fd)
-        pathlib.Path(tmp_path).write_bytes(pdf_bytes)
-        log_audit(user, "Desktop audit export", "Desktop audit trail downloaded ({} rows)".format(len(entries)))
-        return _send_temp(tmp_path, "audit-trail.pdf", "application/pdf")
+        filters = _filter_range(payload.get("filters") or payload)
+        entries = kiosk._prepare_audit_entries_for_display(audit_service.list_entries(filters))
+        factory = data_service.get_factory_settings() or {}
+        # Chunk large trails so Chromium can render stably, then merge into one PDF.
+        chunk_size = 350
+        html_chunks = []
+        if not entries:
+            html_chunks.append(_build_audit_html(kiosk, [], filters, factory, user))
+        else:
+            total = len(entries)
+            for start in range(0, total, chunk_size):
+                chunk = entries[start : start + chunk_size]
+                html_chunks.append(_build_audit_html(kiosk, chunk, filters, factory, user))
+        tmp = pathlib.Path(tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name)
+        try:
+            # Large exports can take several minutes on Pi hardware.
+            per_chunk_timeout = 240.0 if len(html_chunks) > 1 else 180.0
+            pdf_generator.render_html_chunks_to_pdf(
+                html_chunks,
+                tmp,
+                timeout_sec=per_chunk_timeout,
+            )
+            uname = user.get("username") or user.get("name") or "--"
+            role = user.get("role") or "--"
+            log_major(
+                user,
+                "Audit trail exported",
+                "Desktop client | entries {} | exported by {} ({})".format(len(entries), uname, role),
+                entity_type="audit",
+                entity_name="audit-download",
+                target_user=uname,
+            )
+            return _send_temp(tmp, "audit-download.pdf", "application/pdf")
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     @bp.route("/network/ips", methods=["GET"])
     @auth_store.require_auth
     def desktop_network_ips(user):
-        addresses, source = _collect_ipv4_addresses()
-        return jsonify({"ok": True, "addresses": addresses, "source": source or "unknown"}), 200
+        payload = _collect_ipv4_addresses()
+        return jsonify({
+            "ok": True,
+            "addresses": payload.get("addresses") or [],
+            "source": payload.get("source") or "",
+        }), 200
 
     @bp.route("/factory-settings", methods=["GET"])
-    @auth_store.require_auth
+    @auth_store.require_any_internal(["recipe-list", "recipe-manage", "recipe-edit", "quick-test", "recipe-test"])
     def desktop_factory_settings(user):
-        settings = data_service.get_factory_settings() or {}
+        try:
+            settings = getattr(kiosk, "report_service").enrich_factory_settings(data_service.get_factory_settings() or {})
+        except Exception:
+            settings = data_service.get_factory_settings() or {}
         return jsonify({"settings": settings}), 200
-
-    @bp.route("/backup/download", methods=["POST"])
-    @auth_store.require_internal("factory-settings")
-    def desktop_backup_download(user):
-        paths = kiosk._desktop_zip_paths()
-        fd, tmp_path = tempfile.mkstemp(suffix=".zip")
-        os.close(fd)
-        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for label, path in paths.items():
-                p = pathlib.Path(path)
-                if p.is_file():
-                    zf.write(p, arcname="{}/{}".format(label, p.name))
-                elif p.is_dir():
-                    for child in p.rglob("*"):
-                        if child.is_file():
-                            zf.write(child, arcname="{}/{}".format(label, child.relative_to(p)))
-        log_audit(user, "Desktop backup", "Desktop backup downloaded")
-        return _send_temp(tmp_path, "tap-density-backup.zip", "application/zip")
 
     register_members_routes(bp, kiosk)
     register_recipes_routes(bp, kiosk)

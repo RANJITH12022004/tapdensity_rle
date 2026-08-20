@@ -13,6 +13,8 @@ from flask import jsonify, request
 import data_service
 import rbac_service
 
+from desktop_api import rbac_compat
+
 DESKTOP_TOKEN_TTL_SECONDS = int(os.environ.get("DESKTOP_TOKEN_TTL_SECONDS", str(8 * 60 * 60)))
 APPROVAL_VERIFY_TTL_SECONDS = int(os.environ.get("APPROVAL_VERIFY_TTL_SECONDS", "180"))
 EMBED_TICKET_TTL_SECONDS = int(os.environ.get("DESKTOP_EMBED_TICKET_TTL_SECONDS", str(30 * 60)))
@@ -36,8 +38,11 @@ def token_from_request() -> str:
 
 def user_snapshot(user: dict) -> dict:
     safe = data_service.sanitize_member_for_client(user) or dict(user or {})
-    permissions = sorted(rbac_service.member_expanded_internal_keys(safe))
-    cards = rbac_service.permission_allow_cards(safe)
+    try:
+        permissions = sorted(rbac_service.member_expanded_internal_keys(safe))
+    except Exception:
+        permissions = []
+    cards = rbac_compat.permission_allow_cards(safe)
     return {
         **safe,
         "permissions": sorted(set(permissions + cards)),
