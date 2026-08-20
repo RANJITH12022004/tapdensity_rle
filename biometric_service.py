@@ -128,10 +128,21 @@ def _open_serial():
     return _ser
 
 
-def _exec(cmd_payload, timeout_sec=2.0):
+def _close_serial():
+    global _ser
+    try:
+        if _ser and getattr(_ser, "is_open", False):
+            _ser.close()
+    except Exception:
+        pass
+    _ser = None
+
+
+def _exec_once(cmd_payload, timeout_sec=2.0):
     with _lock:
         ser = _open_serial()
         ser.reset_input_buffer()
+        ser.reset_output_buffer()
         packet = _build_packet(cmd_payload)
         ser.write(packet)
         ser.flush()
@@ -142,6 +153,23 @@ def _exec(cmd_payload, timeout_sec=2.0):
     if code != _CONFIRM_OK:
         return {"ok": False, "error": _confirm_msg(code), "code": code}
     return {"ok": True, "code": code, "payload": payload}
+
+
+def _exec(cmd_payload, timeout_sec=2.0):
+    try:
+        return _exec_once(cmd_payload, timeout_sec=timeout_sec)
+    except Exception as exc:
+        if _logger:
+            _logger.warning("[BIOMETRIC] command failed, reopening sensor and retrying: %s", exc)
+        with _lock:
+            _close_serial()
+        time.sleep(0.1)
+        try:
+            return _exec_once(cmd_payload, timeout_sec=timeout_sec)
+        except Exception as retry_exc:
+            if _logger:
+                _logger.warning("[BIOMETRIC] retry failed: %s", retry_exc)
+            return {"ok": False, "error": str(retry_exc), "code": None}
 
 
 def _confirm_msg(code):

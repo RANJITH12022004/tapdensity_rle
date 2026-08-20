@@ -2942,25 +2942,25 @@ def delete_member(member_id):
         }
         before_member = dict(member)
         template_id = member.get("fingerprintTemplateId")
+        template_delete_error = ""
         if template_id is not None:
             deleted = biometric_service.delete_template(template_id)
             if not deleted.get("ok"):
                 _audit_event(
                     action="User disable",
-                    outcome="failed",
+                    outcome="warning",
                     entity_type="member",
                     entity_id=member_id,
                     entity_name=member.get("username") or member.get("name") or "",
-                    details=deleted.get("error") or "Failed to delete fingerprint template from sensor",
+                    details="Biometric template unlink fallback: {}".format(
+                        deleted.get("error") or "Failed to delete fingerprint template from sensor"
+                    ),
                     target_user=member.get("username") or "",
                     before=before_member,
                     signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
                     extra={"templateId": template_id},
                 )
-                return jsonify({
-                    "error": deleted.get("error") or "Failed to delete fingerprint template from sensor",
-                    "templateId": int(template_id)
-                }), 400
+                template_delete_error = deleted.get("error") or "Failed to delete fingerprint template from sensor"
             data_service.clear_member_biometric(member_id)
         member = data_service.disable_member(member_id)
         detail = _member_status_change_audit_detail("disabled", member, actor)
@@ -2977,6 +2977,7 @@ def delete_member(member_id):
             signature=sig,
             extra={
                 "templateIdFreed": template_id,
+                "templateDeleteError": template_delete_error,
                 "disabledMemberUsername": target_username,
                 "disabledMemberName": target_name,
                 "disabledByUsername": disabler_username,

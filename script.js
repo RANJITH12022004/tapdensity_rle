@@ -695,6 +695,7 @@ function openAdminApprovalVerifyModal(options) {
         if (els.subtitleEl) els.subtitleEl.textContent = opts.subtitleText || 'Enter admin credentials to continue.';
         if (els.usernameLabelEl) els.usernameLabelEl.textContent = 'Admin username';
         if (els.usernameEl) els.usernameEl.setAttribute('placeholder', 'Enter admin username');
+        window._adminApprovalVerifyPurpose = opts.purpose || 'user_admin';
 
         _setApprovalVerifyModalButtonHandlers(submitAdminApprovalVerifyModal, cancelAdminApprovalVerifyModal);
 
@@ -727,7 +728,12 @@ function submitAdminApprovalVerifyModal() {
 
     apiRequest(API_BASE + '/api/data/auth/approval-verify', {
         method: 'POST',
-        body: { method: 'credentials', username: username, password: password, purpose: 'recipe' }
+        body: {
+            method: 'credentials',
+            username: username,
+            password: password,
+            purpose: window._adminApprovalVerifyPurpose || 'user_admin'
+        }
     }).then(function (data) {
         if (!data || !data.ok || !data.token) {
             els.errEl.textContent = (data && data.error) ? String(data.error) : 'Verification failed.';
@@ -741,7 +747,7 @@ function submitAdminApprovalVerifyModal() {
             adminApprovalVerifyResolve({
                 token: String(data.token),
                 username: _normUserKey(data.verifier && data.verifier.username),
-                role: role
+                role: _normUserKey(data.verifier && data.verifier.role)
             });
             adminApprovalVerifyResolve = null;
         }
@@ -8554,15 +8560,24 @@ function disableMember(id) {
     }
     showConfirmModal('Are you sure you want to disable this member?', 'Disable Member').then(function (ok) {
         if (!ok) return;
-        return apiRequest(API_BASE + '/api/data/members/' + id, { method: 'DELETE' })
-            .then(function () {
-                showAppModal('Member disabled successfully.', 'Disable Member');
-                loadMembersAndRender();
-            })
-            .catch(function (err) {
-                console.error('Failed to disable member', err);
-                showAppModal('Failed to disable member: ' + (err && err.message ? err.message : 'Unknown error'), 'Members');
+        return openAdminApprovalVerifyModal({
+            purpose: 'user_admin',
+            titleText: 'Profile management approval',
+            subtitleText: 'Enter Factory or profile-management credentials to disable this member.'
+        }).then(function (verified) {
+            if (!verified || !verified.token) return;
+            return apiRequest(API_BASE + '/api/data/members/' + id, {
+                method: 'DELETE',
+                headers: { 'X-Approval-Verify-Token': verified.token }
             });
+        }).then(function (data) {
+            if (!data) return;
+            showAppModal('Member disabled successfully.', 'Disable Member');
+            loadMembersAndRender();
+        }).catch(function (err) {
+            console.error('Failed to disable member', err);
+            showAppModal('Failed to disable member: ' + (err && err.message ? err.message : 'Unknown error'), 'Members');
+        });
     });
 }
 
