@@ -4120,8 +4120,7 @@ function loadReports(filterType) {
                     if (!name) name = 'Validation - ' + (r.validationSubtype === 'load' ? 'USP 2' : 'USP 1');
                 }
                 if (!name) name = (r.recipe && r.recipe.productName) || 'Report ' + (r.id || (i + 1));
-                var created = r.createdAt || r.created || '';
-                if (created && created.length > 10) created = created.slice(0, 10) + ' ' + created.slice(11, 19);
+                var created = formatReportDate(r.createdAt || r.created || '');
                 row.innerHTML = '<td>' + (i + 1) + '</td><td>' + name + '</td><td>' + created + '</td><td><button class="reports-open-btn" onclick="openReportPreview(' + (r.id || 0) + ')">Open</button></td>';
                 tbody.appendChild(row);
             });

@@ -764,19 +764,24 @@ def _html_esc(value: Any) -> str:
 
 
 def _format_report_ts(value: Any) -> str:
-    s = str(value or "").strip()
+    """Format report timestamps in local wall clock (UTC Z converted to device TZ)."""
+    if value is None:
+        return "--"
+    if isinstance(value, datetime):
+        dt = value.astimezone() if value.tzinfo is not None else value
+        return dt.strftime("%d/%m/%Y %H:%M:%S")
+    s = str(value).strip()
     if not s:
         return "--"
     try:
-        clean = s.replace("Z", "").strip()
-        if "+" in clean:
-            clean = clean.split("+", 1)[0].strip()
-        if clean.count("-") > 2:
-            clean = clean.rsplit("-", 1)[0].strip()
-        dt = datetime.fromisoformat(clean)
+        if s[-1:] in ("Z", "z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone()
         return dt.strftime("%d/%m/%Y %H:%M:%S")
     except Exception:
-        return s
+        return str(value)
 
 
 def _report_step_row_count(td: Dict[str, Any]) -> int:
