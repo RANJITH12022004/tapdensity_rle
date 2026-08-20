@@ -3610,6 +3610,14 @@ def _schedule_bridge_restart_after_logout() -> None:
         app.logger.exception("Failed to schedule bridge restart after logout")
 
 
+def _restart_bridge_after_logout_enabled() -> bool:
+    """Opt-in kill/restart only; default off to avoid transient API outages on login screen."""
+    raw = app.config.get("RESTART_BRIDGE_AFTER_LOGOUT", False)
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return bool(raw)
+
+
 @app.route("/api/data/auth/logout", methods=["POST"])
 def logout():
     try:
@@ -3664,7 +3672,7 @@ def logout():
         data_service.touch_app_clean_stop_flag()
         data_service.delete_session_power_audit_pending()
         data_service.clear_current_user()
-        if reason in ("user", "inactivity"):
+        if reason in ("user", "inactivity") and _restart_bridge_after_logout_enabled():
             _schedule_bridge_restart_after_logout()
         return jsonify({"success": True}), 200
     except Exception as e:
