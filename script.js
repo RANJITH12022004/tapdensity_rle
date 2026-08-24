@@ -516,6 +516,25 @@ function cancelApprovalVerifyModal() {
     closeApprovalVerifyModal();
 }
 
+/** Finish verification before navigating away. goToPage() otherwise treats leave as cancel and drops the token. */
+function _completeApprovalVerifySuccess(token) {
+    _restoreApprovalVerifyModalOriginalUi();
+    var resolve = approvalVerifyResolve;
+    approvalVerifyResolve = null;
+    approvalVerifyReject = null;
+    closeApprovalVerifyModal();
+    if (resolve) resolve(token);
+}
+
+function _completeAdminApprovalVerifySuccess(payload) {
+    _restoreApprovalVerifyModalOriginalUi();
+    var resolve = adminApprovalVerifyResolve;
+    adminApprovalVerifyResolve = null;
+    adminApprovalVerifyReject = null;
+    closeApprovalVerifyModal();
+    if (resolve) resolve(payload);
+}
+
 function _resolvePendingApprovalVerifyCancelled() {
     _restoreApprovalVerifyModalOriginalUi();
     if (approvalVerifyResolve) {
@@ -554,13 +573,7 @@ function submitApprovalVerifyModal() {
             }
             return;
         }
-        closeApprovalVerifyModal();
-        _restoreApprovalVerifyModalOriginalUi();
-        if (approvalVerifyResolve) {
-            approvalVerifyResolve(String(data.token));
-            approvalVerifyResolve = null;
-        }
-        if (approvalVerifyReject) approvalVerifyReject = null;
+        _completeApprovalVerifySuccess(String(data.token));
     }).catch(function (err) {
         if (errEl) {
             errEl.textContent = 'Verification failed: ' + (err && err.message ? err.message : 'Error');
@@ -595,13 +608,7 @@ function submitApprovalVerifyBiometricModal() {
             }
             return;
         }
-        closeApprovalVerifyModal();
-        _restoreApprovalVerifyModalOriginalUi();
-        if (approvalVerifyResolve) {
-            approvalVerifyResolve(String(result.token));
-            approvalVerifyResolve = null;
-        }
-        if (approvalVerifyReject) approvalVerifyReject = null;
+        _completeApprovalVerifySuccess(String(result.token));
     });
 }
 
@@ -741,17 +748,11 @@ function submitAdminApprovalVerifyModal() {
             return;
         }
 
-        closeApprovalVerifyModal();
-        _restoreApprovalVerifyModalOriginalUi();
-        if (adminApprovalVerifyResolve) {
-            adminApprovalVerifyResolve({
-                token: String(data.token),
-                username: _normUserKey(data.verifier && data.verifier.username),
-                role: _normUserKey(data.verifier && data.verifier.role)
-            });
-            adminApprovalVerifyResolve = null;
-        }
-        if (adminApprovalVerifyReject) adminApprovalVerifyReject = null;
+        _completeAdminApprovalVerifySuccess({
+            token: String(data.token),
+            username: _normUserKey(data.verifier && data.verifier.username),
+            role: _normUserKey(data.verifier && data.verifier.role)
+        });
     }).catch(function (err) {
         els.errEl.textContent = 'Verification failed: ' + (err && err.message ? err.message : 'Error');
         els.errEl.style.display = 'block';
@@ -1339,6 +1340,7 @@ var PAGE_TITLES = {
     'factory-settings': 'Factory Settings',
     'reports': 'Reports',
     'report-preview': 'Report Preview',
+    'approval-verify': 'Approval required',
     'user-profile': 'User Profile',
     'view-recipes': 'View Recipe',
     'recipe-print-preview': 'Recipe Print',
@@ -1785,7 +1787,8 @@ function goToPage(pageName) {
         return;
     }
     _suppressValidationNavGuardOnce = false;
-    if (pageName !== 'report-preview' && typeof isReportPreviewLockedForCurrentUser === 'function' &&
+    if (pageName !== 'report-preview' && pageName !== 'approval-verify' &&
+        typeof isReportPreviewLockedForCurrentUser === 'function' &&
         isReportPreviewLockedForCurrentUser(window._lastReportPreview)) {
         showAppModal('This report is awaiting approval. You must stay on the report screen until a reviewer approves it.', 'Report');
         var active = document.querySelector('.page.active');
