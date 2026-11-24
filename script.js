@@ -9470,6 +9470,144 @@ function _clearAddMemberForm() {
     _addMemberFeatureOverrides = { allow: [], deny: [] };
 }
 
+
+function initializeDatetime() {
+    var dateInput = document.getElementById('edit-date');
+    var timeInput = document.getElementById('edit-time');
+    if (!dateInput || !timeInput) return;
+    function applyToInputs(now) {
+        if (!dateInput.value) {
+            var day = String(now.getDate()).padStart(2, '0');
+            var month = String(now.getMonth() + 1).padStart(2, '0');
+            var year = now.getFullYear();
+            dateInput.value = day + '-' + month + '-' + year;
+        }
+        if (!timeInput.value) {
+            var hours = String(now.getHours()).padStart(2, '0');
+            var minutes = String(now.getMinutes()).padStart(2, '0');
+            timeInput.value = hours + ':' + minutes;
+        }
+    }
+    fetchDateTimeFromBackend().then(function (data) {
+        var now = null;
+        if (data && data.datetime) {
+            var wall = parseWallDatetimeIso(data.datetime);
+            if (wall) {
+                now = new Date(wall.y, wall.mo - 1, wall.d, wall.h, wall.mi, wall.sec);
+            }
+        }
+        if (!now || isNaN(now.getTime())) {
+            if (data && data.date && data.time) {
+                var parts = (data.date || '').split('-');
+                var tparts = (data.time || '').split(':');
+                if (parts.length >= 3 && tparts.length >= 2) {
+                    var d = parseInt(parts[0], 10);
+                    var m = parseInt(parts[1], 10) - 1;
+                    var y = parseInt(parts[2], 10);
+                    var h = parseInt(tparts[0], 10) || 0;
+                    var min = parseInt(tparts[1], 10) || 0;
+                    now = new Date(y, m, d, h, min, 0);
+                }
+            }
+        }
+        if (!now || isNaN(now.getTime())) now = new Date();
+        applyToInputs(now);
+    }).catch(function () {
+        applyToInputs(new Date());
+    });
+}
+
+function openDatePickerForEditDate() {
+    var textInput = document.getElementById('edit-date');
+    var hiddenInput = document.getElementById('edit-date-picker-hidden');
+    if (!textInput || !hiddenInput) return;
+    var val = (textInput.value || '').trim();
+    if (val) {
+        var parts = val.split('-');
+        if (parts.length === 3) {
+            var d = parseInt(parts[0], 10);
+            var m = parseInt(parts[1], 10);
+            var y = parseInt(parts[2], 10);
+            if (!isNaN(d) && !isNaN(m) && !isNaN(y) && d >= 1 && d <= 31 && m >= 1 && m <= 12 && y >= 2000 && y <= 2100) {
+                hiddenInput.value = y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+            }
+        }
+    }
+    if (!hiddenInput.value) {
+        var now = new Date();
+        hiddenInput.value = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    }
+    function onDateChange() {
+        var v = hiddenInput.value;
+        if (!v) return;
+        var ymd = v.split('-');
+        if (ymd.length >= 3) {
+            textInput.value = String(parseInt(ymd[2], 10)).padStart(2, '0') + '-' + String(parseInt(ymd[1], 10)).padStart(2, '0') + '-' + ymd[0];
+        }
+        hiddenInput.removeEventListener('change', onDateChange);
+    }
+    hiddenInput.addEventListener('change', onDateChange);
+    hiddenInput.focus();
+    if (typeof hiddenInput.showPicker === 'function') {
+        try { hiddenInput.showPicker(); } catch (e) { hiddenInput.click(); }
+    } else {
+        hiddenInput.click();
+    }
+}
+
+function applyDateTime() {
+    var dateVal = (document.getElementById('edit-date').value || '').trim();
+    var timeVal = (document.getElementById('edit-time').value || '').trim();
+    if (!dateVal || !timeVal) {
+        showAppModal('Please enter both date and time.', 'Error');
+        return;
+    }
+    var dateParts = dateVal.split('-').map(Number);
+    if (dateParts.length !== 3) {
+        showAppModal('Enter date as DD-MM-YYYY.', 'Error');
+        return;
+    }
+    var day = dateParts[0];
+    var month = dateParts[1];
+    var year = dateParts[2];
+    var timeParts = timeVal.split(':');
+    var hours = parseInt(timeParts[0], 10);
+    var minutes = timeParts.length >= 2 ? parseInt(timeParts[1], 10) : 0;
+    if (isNaN(hours)) hours = 0;
+    if (isNaN(minutes)) minutes = 0;
+    hours = Math.max(0, Math.min(23, hours));
+    minutes = Math.max(0, Math.min(59, minutes));
+    var pad = function (n) { return String(n).padStart(2, '0'); };
+    var dtStr = year + '-' + pad(month) + '-' + pad(day) + 'T' + pad(hours) + ':' + pad(minutes) + ':00';
+    apiRequest((API_BASE || '') + '/api/set_datetime', {
+        method: 'POST',
+        body: { datetime: dtStr }
+    }).then(function (data) {
+        if (data && data.datetime) {
+            var parts = parseWallDatetimeIso(data.datetime);
+            if (parts) {
+                _wallClockAnchor = { parts: parts, at: Date.now() };
+                tickWallClockFromAnchor();
+            }
+        }
+        updateDateTime();
+        showAppModal('Date and time updated.', 'Success', function () {
+            goBack();
+        });
+    }).catch(function (err) {
+        var msg = (err && err.message) ? err.message : 'Network error';
+        showAppModal('Failed to update date and time: ' + msg, 'Error');
+    });
+}
+
+function openDatePicker(inputId) {
+    var el = document.getElementById(inputId);
+    if (el) {
+        el.focus();
+        try { el.showPicker && el.showPicker(); } catch (e) {}
+    }
+}
+
 function attachKeyboardToInputs() {
     if (typeof window.openOSKForInput !== 'function') return;
     var selectors = [
