@@ -260,6 +260,77 @@ def _audit_member_permissions_if_changed(before_member, after_member, *, member_
     )
 
 
+_APP_PERMISSION_CARD_LABELS = getattr(rbac_service, "PERMISSION_CARD_LABELS", {}) or {}
+
+
+def _member_permission_card_set(member: dict) -> set:
+    raw = (member or {}).get("featureOverrides") or {}
+    allow = raw.get("allow") if isinstance(raw, dict) else []
+    if not isinstance(allow, list):
+        return set()
+    valid_cards = set(rbac_service.PERMISSION_CARD_KEYS)
+    return {str(k or "").strip() for k in allow if str(k or "").strip() in valid_cards}
+
+
+def _permission_card_labels(keys) -> list:
+    ordered = []
+    for key in rbac_service.PERMISSION_CARD_KEYS:
+        if key in keys:
+            ordered.append(_APP_PERMISSION_CARD_LABELS.get(key, key))
+    return ordered
+
+
+def _member_permission_initial_detail(member: dict, username: str, role: str = "") -> str:
+    parts = [
+        "Added new user: {} ({})".format(
+            username or "--",
+            _display_role_label(role) if role else "—",
+        )
+    ]
+    labels = _permission_card_labels(_member_permission_card_set(member))
+    if labels:
+        parts.append("Permissions granted: {}".format(", ".join(labels)))
+    return " | ".join(parts)
+
+
+def _member_permission_change_detail(before_member: dict, after_member: dict, username: str) -> str:
+    before_cards = _member_permission_card_set(before_member)
+    after_cards = _member_permission_card_set(after_member)
+    enabled = after_cards - before_cards
+    disabled = before_cards - after_cards
+    if not enabled and not disabled:
+        return ""
+    parts = ["Profile updated for {}".format(username or "--")]
+    enabled_labels = _permission_card_labels(enabled)
+    disabled_labels = _permission_card_labels(disabled)
+    if enabled_labels:
+        parts.append("Permissions granted: {}".format(", ".join(enabled_labels)))
+    if disabled_labels:
+        parts.append("Permissions revoked: {}".format(", ".join(disabled_labels)))
+    return " | ".join(parts)
+
+
+def _member_profile_change_detail(before_member: dict, after_member: dict, username: str) -> str:
+    labels = {
+        "name": "Full name",
+        "username": "User ID",
+        "role": "Role",
+        "status": "Status",
+    }
+    changed = []
+    for key, label in labels.items():
+        before_val = str((before_member or {}).get(key) or "").strip()
+        after_val = str((after_member or {}).get(key) or "").strip()
+        if key == "role":
+            before_val = _display_role_label(before_val)
+            after_val = _display_role_label(after_val)
+        if before_val != after_val:
+            changed.append("{}: {} -> {}".format(label, before_val or "--", after_val or "--"))
+    if not changed:
+        return ""
+    return "Profile updated for {} | {}".format(username or "--", " | ".join(changed))
+
+
 def _audit_event(
     *,
     action,
@@ -1126,14 +1197,13 @@ def _check_report_approved_for_print_export(report=None, report_id=None, report_
 
 
 def _display_role_label(role_str):
-    """User-facing role in approval lines (stored role Supervisor → Reviewer)."""
+    """Map legacy Supervisor→Reviewer; pass through User Group names unchanged."""
     r = str(role_str or "").strip()
     if not r:
-        return r
+        return "--"
     if r.lower() == "supervisor":
         return "Reviewer"
     return r
-
 
 def _rbac_member_from_session():
     """Member record (with normalized permissions) for RBAC, or factory stub user."""
@@ -1225,8 +1295,14 @@ def _require_user_manage_or_self(member_id: int):
 
 
 def _self_profile_payload_from_request(existing: dict, payload: dict) -> dict:
-    """Self-service profile: only display name and password may change."""
+    """Self-service profile: name, optional password, and permission cards. User ID/role locked."""
     out = dict(existing)
+    out["username"] = existing.get("username")
+    out["role"] = existing.get("role")
+    if "status" in existing:
+        out["status"] = existing.get("status")
+    if "failedAttempts" in existing:
+        out["failedAttempts"] = existing.get("failedAttempts")
     if "name" in payload:
         name = str(payload.get("name") or "").strip()
         if name:
@@ -1237,14 +1313,17 @@ def _self_profile_payload_from_request(existing: dict, payload: dict) -> dict:
         if pwd_err:
             raise ValueError(pwd_err)
         out["password"] = str(new_pwd)
+    if "featureOverrides" in payload and isinstance(payload.get("featureOverrides"), dict):
+        allow = payload.get("featureOverrides", {}).get("allow") or []
+        if not isinstance(allow, list):
+            allow = []
+        out["featureOverrides"] = {"allow": [str(k) for k in allow if k], "deny": []}
     return out
 
 
 def _self_payload_tries_permission_change(payload: dict) -> bool:
     if not isinstance(payload, dict):
         return False
-    if "featureOverrides" in payload:
-        return True
     if "role" in payload and str(payload.get("role") or "").strip():
         return True
     return False
@@ -2796,12 +2875,11 @@ def create_member():
             entity_type="member",
             entity_id=member_id,
             entity_name=uname,
-            details="Added new user: {} ({})".format(uname, _display_role_label(urole) if urole else "—"),
+            details=_member_permission_initial_detail(created, uname, urole),
             target_user=uname,
             after=data_service.sanitize_member_for_client(created) or created,
             signature=sig,
         )
-        _audit_member_permissions_if_changed(None, created, member_id=member_id, signature=sig)
         safe = data_service.sanitize_member_for_client(created) or dict(created)
         return jsonify({"id": member_id, "member": safe}), 201
     except ValueError as e:
@@ -2861,7 +2939,9 @@ def update_member(member_id):
         member_data["id"] = member_id
         cur = data_service.get_current_user() or {}
         acting_id = cur.get("id")
-        password_changed = "password" in member_data and member_data.get("password") not in (None, "")
+        old_password = str((before_member or {}).get("password") or "")
+        new_password = str(member_data.get("password") or "")
+        password_changed = "password" in member_data and new_password not in ("", old_password)
         data_service.save_member(member_data, acting_user_id=acting_id)
         updated = data_service.get_member(member_id) or dict(member_data)
         sig = {
@@ -2870,7 +2950,10 @@ def update_member(member_id):
             "role": (cur.get("role") or "").strip() or "--",
         }
         uname = updated.get("username") or updated.get("name") or ""
-        if password_changed:
+        permission_detail = _member_permission_change_detail(before_member, updated, uname)
+        profile_detail = _member_profile_change_detail(before_member, updated, uname)
+        profile_or_perms_changed = bool(permission_detail or profile_detail)
+        if password_changed and not profile_or_perms_changed:
             _audit_event(
                 action="Password changed",
                 outcome="success",
@@ -2881,21 +2964,27 @@ def update_member(member_id):
                 target_user=uname,
                 signature=sig,
             )
-        _audit_member_permissions_if_changed(
-            before_member, updated, member_id=member_id, signature=sig
-        )
-        _audit_event(
-            action="User update",
-            outcome="success",
-            entity_type="member",
-            entity_id=member_id,
-            entity_name=uname,
-            details="Member updated",
-            target_user=uname,
-            before=data_service.sanitize_member_for_client(before_member) if before_member else None,
-            after=data_service.sanitize_member_for_client(updated) or updated,
-            signature=sig,
-        )
+        elif profile_or_perms_changed:
+            parts = []
+            if profile_detail:
+                parts.append(profile_detail)
+            if permission_detail:
+                parts.append(permission_detail)
+            if password_changed:
+                parts.append("Password also changed")
+            update_details = " | ".join(parts) if parts else "Profile updated for {}".format(uname or "--")
+            _audit_event(
+                action="Profile updated",
+                outcome="success",
+                entity_type="member",
+                entity_id=member_id,
+                entity_name=uname,
+                details=update_details,
+                target_user=uname,
+                before=data_service.sanitize_member_for_client(before_member) if before_member else None,
+                after=data_service.sanitize_member_for_client(updated) or updated,
+                signature=sig,
+            )
         safe = data_service.sanitize_member_for_client(updated) or dict(updated)
         return jsonify({"id": member_id, "member": safe}), 200
     except ValueError as e:
@@ -3029,6 +3118,59 @@ def unlock_member_route(member_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/data/members/<int:member_id>/reset-password", methods=["POST"])
+def reset_member_password_route(member_id):
+    """Admin unlock follow-up: set a new password without requiring the old one."""
+    if not (_session_has_internal("user-unlock") or _session_has_internal("user-manage")):
+        return jsonify({"error": "Forbidden. Password reset requires unlock or profile management permission."}), 403
+    try:
+        before_member = data_service.get_member(member_id)
+        if not before_member:
+            return jsonify({"error": "Member not found"}), 404
+        payload = request.get_json(force=True, silent=True) or {}
+        new_pwd = str(payload.get("password") or payload.get("newPassword") or "").strip()
+        confirm = str(payload.get("confirmPassword") or "").strip()
+        if not new_pwd:
+            return jsonify({"error": "New password is required."}), 400
+        if confirm and confirm != new_pwd:
+            return jsonify({"error": "Password and Confirm Password do not match."}), 400
+        pwd_err = _password_strength_error(new_pwd)
+        if pwd_err:
+            return jsonify({"error": pwd_err}), 400
+        update = dict(before_member)
+        update["id"] = member_id
+        update["password"] = new_pwd
+        update["mustChangePassword"] = False
+        update["failedAttempts"] = 0
+        update["status"] = "active"
+        cur = data_service.get_current_user() or {}
+        data_service.save_member(update, acting_user_id=cur.get("id"))
+        updated = data_service.get_member(member_id) or update
+        uname = updated.get("username") or updated.get("name") or ""
+        sig = {
+            "mode": "session",
+            "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+            "role": (cur.get("role") or "").strip() or "--",
+        }
+        _audit_event(
+            action="Password reset",
+            outcome="success",
+            entity_type="member",
+            entity_id=member_id,
+            entity_name=uname,
+            details="Password reset for {} by {}".format(uname, sig.get("username") or "--"),
+            target_user=uname,
+            signature=sig,
+        )
+        safe = data_service.sanitize_member_for_client(updated) or dict(updated)
+        return jsonify({"success": True, "member": safe}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error resetting member password")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/data/members/<int:member_id>/enable", methods=["POST"])
 def enable_member_route(member_id):
     if not _session_has_internal("user-enable"):
@@ -3063,6 +3205,148 @@ def enable_member_route(member_id):
     except Exception as e:
         app.logger.exception("Error enabling member")
         return jsonify({"error": str(e)}), 500
+
+
+# =================== DATA: USER GROUPS ==========================
+
+
+@app.route("/api/data/user-groups", methods=["GET"])
+def get_user_groups():
+    try:
+        err = _require_auth()
+        if err:
+            return err
+        status = (request.args.get("status") or "active").strip().lower()
+        groups = data_service.list_user_groups(status=status)
+        return jsonify({"groups": groups}), 200
+    except Exception as e:
+        app.logger.exception("Error listing user groups")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/user-groups", methods=["POST"])
+def create_user_group():
+    try:
+        gate = _require_session_internal("user-manage", "Forbidden. You do not have permission to manage user groups.")
+        if gate:
+            return gate
+        payload = request.get_json(force=True, silent=True) or {}
+        group_id = data_service.save_user_group(payload)
+        groups = data_service.list_user_groups(status="all")
+        created = next((g for g in groups if int(g.get("id") or 0) == int(group_id)), None)
+        cur = data_service.get_current_user() or {}
+        _audit_event(
+            action="User group created",
+            outcome="success",
+            entity_type="user_group",
+            entity_id=group_id,
+            entity_name=(created or {}).get("name") or "",
+            details="User group created: {}".format((created or {}).get("name") or group_id),
+            signature={
+                "mode": "session",
+                "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+                "role": (cur.get("role") or "").strip() or "--",
+            },
+        )
+        return jsonify({"id": group_id, "group": created}), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error creating user group")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/user-groups/<int:group_id>", methods=["PUT"])
+def update_user_group(group_id):
+    try:
+        gate = _require_session_internal("user-manage", "Forbidden. You do not have permission to manage user groups.")
+        if gate:
+            return gate
+        payload = request.get_json(force=True, silent=True) or {}
+        payload["id"] = group_id
+        data_service.save_user_group(payload)
+        groups = data_service.list_user_groups(status="all")
+        updated = next((g for g in groups if int(g.get("id") or 0) == int(group_id)), None)
+        cur = data_service.get_current_user() or {}
+        _audit_event(
+            action="User group updated",
+            outcome="success",
+            entity_type="user_group",
+            entity_id=group_id,
+            entity_name=(updated or {}).get("name") or "",
+            details="User group updated: {}".format((updated or {}).get("name") or group_id),
+            signature={
+                "mode": "session",
+                "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+                "role": (cur.get("role") or "").strip() or "--",
+            },
+        )
+        return jsonify({"id": group_id, "group": updated}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error updating user group")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/user-groups/<int:group_id>", methods=["DELETE"])
+def delete_user_group(group_id):
+    try:
+        gate = _require_session_internal("user-manage", "Forbidden. You do not have permission to manage user groups.")
+        if gate:
+            return gate
+        disabled = data_service.disable_user_group(group_id)
+        cur = data_service.get_current_user() or {}
+        _audit_event(
+            action="User group disabled",
+            outcome="success",
+            entity_type="user_group",
+            entity_id=group_id,
+            entity_name=(disabled or {}).get("name") or "",
+            details="User group disabled: {}".format((disabled or {}).get("name") or group_id),
+            signature={
+                "mode": "session",
+                "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+                "role": (cur.get("role") or "").strip() or "--",
+            },
+        )
+        return jsonify({"success": True, "group": disabled}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error disabling user group")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/user-groups/<int:group_id>/enable", methods=["POST"])
+def enable_user_group_route(group_id):
+    try:
+        gate = _require_session_internal("user-manage", "Forbidden. You do not have permission to manage user groups.")
+        if gate:
+            return gate
+        enabled = data_service.enable_user_group(group_id)
+        cur = data_service.get_current_user() or {}
+        _audit_event(
+            action="User group enabled",
+            outcome="success",
+            entity_type="user_group",
+            entity_id=group_id,
+            entity_name=(enabled or {}).get("name") or "",
+            details="User group enabled: {}".format((enabled or {}).get("name") or group_id),
+            signature={
+                "mode": "session",
+                "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+                "role": (cur.get("role") or "").strip() or "--",
+            },
+        )
+        return jsonify({"success": True, "group": enabled}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error enabling user group")
+        return jsonify({"error": str(e)}), 500
+
+
 
 
 # =================== DATA: FACTORY SETTINGS ==========================
@@ -5815,12 +6099,16 @@ def biometric_enroll_capture():
         if step not in (1, 2):
             return jsonify({"ok": False, "error": "step must be 1 or 2"}), 400
         member = data_service.get_member_by_username(username)
-        if not member:
+        draft_enroll = bool(payload.get("draftEnroll")) and not member
+        if not member and not draft_enroll:
             return jsonify({"ok": False, "error": "Member not found for the provided username"}), 404
-        status = str(member.get("status") or "active").strip().lower()
-        if status != "active":
-            return jsonify({"ok": False, "error": "Member account is not active"}), 403
-        before_member = dict(member)
+        if member:
+            status = str(member.get("status") or "active").strip().lower()
+            if status != "active":
+                return jsonify({"ok": False, "error": "Member account is not active"}), 403
+            before_member = dict(member)
+        else:
+            before_member = {}
         timeout_sec = float(payload.get("captureTimeoutSec") or BIOMETRIC_ENROLL_TIMEOUT_SEC)
 
         if step == 1:
@@ -5859,18 +6147,35 @@ def biometric_enroll_capture():
         finalized = biometric_service.finalize_enroll(template_id)
         _clear_enroll_session(username)
         if not finalized.get("ok"):
-            _audit_event(
-                action="Biometric enroll",
-                outcome="failed",
-                entity_type="member",
-                entity_id=member.get("id"),
-                entity_name=username,
-                details=finalized.get("error") or "Unknown error",
-                target_user=username,
-                before=before_member,
-                extra={"templateId": template_id},
-            )
+            if member:
+                _audit_event(
+                    action="Biometric enroll",
+                    outcome="failed",
+                    entity_type="member",
+                    entity_id=member.get("id"),
+                    entity_name=username,
+                    details=finalized.get("error") or "Unknown error",
+                    target_user=username,
+                    before=before_member,
+                    extra={"templateId": template_id},
+                )
             return jsonify(finalized), 400
+
+        if draft_enroll or not member:
+            _set_enroll_session(username, {
+                "templateId": template_id,
+                "pendingLink": True,
+                "draftEnroll": True,
+                "finishedAt": int(time.time()),
+            })
+            return jsonify({
+                "ok": True,
+                "step": 2,
+                "templateId": template_id,
+                "linked": False,
+                "pendingLink": True,
+                "message": "Fingerprint captured. Complete profile save to link it.",
+            }), 200
 
         previous_owner = data_service.get_member_by_fingerprint_template(template_id)
         if previous_owner and previous_owner.get("id") != member.get("id"):
@@ -5914,8 +6219,26 @@ def biometric_enroll_cancel():
         payload = request.get_json(force=True, silent=True) or {}
         username = str(payload.get("username") or "").strip()
         if username:
+            session = _get_enroll_session(username)
+            tid = session.get("templateId")
+            if session.get("pendingLink") or session.get("draftEnroll"):
+                try:
+                    if tid is not None:
+                        biometric_service.delete_template(int(tid))
+                except Exception:
+                    pass
             _clear_enroll_session(username)
-        return jsonify({"ok": True}), 200
+        try:
+            if hasattr(biometric_service, "request_cancel"):
+                biometric_service.request_cancel()
+        except Exception:
+            pass
+        try:
+            if hasattr(biometric_service, "cancel_and_idle"):
+                biometric_service.cancel_and_idle()
+        except Exception:
+            pass
+        return jsonify({"ok": True, "cancelled": True}), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

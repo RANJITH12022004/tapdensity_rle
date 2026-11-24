@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# CFR-PLATFORM-HONOR-STORAGE
+# When the platform selector already set storage paths, do not fall back to
+# Hardness /media/usb_internal/storage or SD-card APP_ROOT/storage.
+set -euo pipefail
+APP_ROOT="${APP_ROOT:-/opt/tapdensity}"
+PYTHON="${PYTHON:-$APP_ROOT/venv/bin/python3}"
+if [ -n "${STORAGE_DIR:-}" ] && [ -n "${REPORTS_DIR:-}" ] && [ -n "${AUDIT_DB_DIR:-}" ]; then
+  cd "$APP_ROOT"
+  mkdir -p "$STORAGE_DIR" "$REPORTS_DIR" "$AUDIT_DB_DIR" 2>/dev/null || true
+  export APP_ROOT PYTHONUNBUFFERED=1
+  export FLASK_HOST="${FLASK_HOST:-0.0.0.0}"
+  echo "run_kiosk_app: using selector storage at $STORAGE_DIR" >&2
+  exec "$PYTHON" "$APP_ROOT/bridge.py"
+fi
 # Launcher used by kiosk-bridge.service to start the Tap Density Flask backend.
 # Mirrors the manual flow in /opt/kiosk/start_kiosk.sh (backend only; no Chromium).
 

@@ -771,6 +771,9 @@ body {
     align-items: center;
     justify-content: center;
     color: white;
+    flex: 1 1 240px;
+    max-width: 280px;
+    min-width: 200px;
 }
 
 .test-card:nth-child(1) {
@@ -1451,12 +1454,12 @@ body {
     cursor: pointer;
     transition: transform var(--transition-smooth), box-shadow var(--transition-smooth);
     box-shadow: var(--shadow-md);
-    min-height: 120px;
-    max-height: 120px;
+    min-height: 148px;
     height: auto;
     position: relative;
     overflow: hidden;
     color: white;
+    box-sizing: border-box;
 }
 
 .settings-card::before {
@@ -1559,6 +1562,20 @@ body {
     background: linear-gradient(135deg, #9ca3af, #4b5563);
 }
 
+
+.settings-user-groups {
+    background: linear-gradient(135deg, #6366f1, #4f46e5) !important;
+    color: #fff !important;
+}
+.settings-user-groups:hover {
+    background: linear-gradient(135deg, #818cf8, #6366f1) !important;
+}
+.settings-user-groups .settings-icon,
+.settings-user-groups .settings-icon svg,
+.settings-user-groups h3 {
+    color: #fff !important;
+}
+
 .settings-card p {
     color: rgba(255, 255, 255, 0.9);
     font-size: 13px;
@@ -1632,6 +1649,7 @@ body {
     width: 100%;
     max-width: none;
     min-height: 220px;
+    height: auto;
     padding: 28px 26px;
     gap: 14px;
 }
@@ -5456,4 +5474,11 @@ input[type="number"] {
 .btn-refresh-ip-configure:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+}
+
+.permission-card.is-locked {
+    cursor: default;
+}
+.permission-card.is-locked:not(.is-selected) {
+    opacity: 0.45;
 }

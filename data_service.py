@@ -373,6 +373,124 @@ def enable_recipe(recipe_id: int):
     return None
 
 
+def _load_user_groups_raw() -> list:
+    path = _get_storage_path("userGroups.json")
+    data = _load_json_file(path, default={"groups": []})
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        groups = data.get("groups")
+        return groups if isinstance(groups, list) else []
+    return []
+
+
+def _save_user_groups_raw(groups: list) -> None:
+    path = _get_storage_path("userGroups.json")
+    _save_json_file(path, {"groups": groups if isinstance(groups, list) else []})
+
+
+def list_user_groups(status: str = "active") -> list:
+    groups = _load_user_groups_raw()
+    want = str(status or "active").strip().lower()
+    out = []
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        st = str(g.get("status") or "active").strip().lower()
+        if want == "all" or st == want:
+            out.append(g)
+    return out
+
+
+def save_user_group(group_data: Dict[str, Any]) -> int:
+    groups = _load_user_groups_raw()
+    name = str((group_data or {}).get("name") or "").strip()
+    if not name:
+        raise ValueError("Group name is required.")
+    allow = (group_data or {}).get("allow") or []
+    if not isinstance(allow, list) or not allow:
+        raise ValueError("Select at least one permission for the group.")
+    allow_clean = [str(k).strip() for k in allow if str(k).strip()]
+    group_id = (group_data or {}).get("id")
+    now = datetime.utcnow().isoformat() + "Z"
+    if group_id is not None:
+        for i, g in enumerate(groups):
+            if int(g.get("id") or 0) == int(group_id):
+                updated = dict(g)
+                updated["name"] = name
+                updated["allow"] = allow_clean
+                updated["status"] = str(g.get("status") or "active")
+                updated["updatedAt"] = now
+                groups[i] = updated
+                _save_user_groups_raw(groups)
+                return int(group_id)
+        raise ValueError("Group not found")
+    if group_id is None:
+        active_count = 0
+        for g in groups:
+            if str(g.get("status") or "active").strip().lower() == "active":
+                active_count += 1
+        if active_count >= 10:
+            raise ValueError("Maximum of 10 profile power groups allowed.")
+    next_id = 1
+    for g in groups:
+        try:
+            next_id = max(next_id, int(g.get("id") or 0) + 1)
+        except (TypeError, ValueError):
+            pass
+    groups.append({
+        "id": next_id,
+        "name": name,
+        "allow": allow_clean,
+        "status": "active",
+        "createdAt": now,
+        "updatedAt": now,
+    })
+    _save_user_groups_raw(groups)
+    return next_id
+
+
+def disable_user_group(group_id: int) -> Dict[str, Any]:
+    groups = _load_user_groups_raw()
+    for i, g in enumerate(groups):
+        if int(g.get("id") or 0) == int(group_id):
+            updated = dict(g)
+            updated["status"] = "disabled"
+            updated["updatedAt"] = datetime.utcnow().isoformat() + "Z"
+            groups[i] = updated
+            _save_user_groups_raw(groups)
+            return updated
+    raise ValueError("Group not found")
+
+
+def enable_user_group(group_id: int) -> Dict[str, Any]:
+    """Re-enable a disabled user group. Caps active groups at 10."""
+    groups = _load_user_groups_raw()
+    target = None
+    target_idx = None
+    active_count = 0
+    for i, g in enumerate(groups):
+        st = str(g.get("status") or "active").strip().lower()
+        if st == "active":
+            active_count += 1
+        if int(g.get("id") or 0) == int(group_id):
+            target = g
+            target_idx = i
+    if target is None:
+        raise ValueError("Group not found")
+    if str(target.get("status") or "active").strip().lower() == "active":
+        return dict(target)
+    if active_count >= 10:
+        raise ValueError("Maximum of 10 profile power groups allowed.")
+    updated = dict(target)
+    updated["status"] = "active"
+    updated["updatedAt"] = datetime.utcnow().isoformat() + "Z"
+    groups[target_idx] = updated
+    _save_user_groups_raw(groups)
+    return updated
+
+
+
 # =================== REPORT OPERATIONS ==========================
 
 
@@ -662,50 +780,61 @@ def count_active_supervisor_members() -> int:
 
 
 def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], existing_member: Optional[Dict] = None):
-    """Check factory limits for users, admins, supervisors, and QA. Raise ValueError if exceeded."""
+    """Check factory headcount limits. Role-specific caps only for legacy fixed roles."""
+    LEGACY_FIXED_ROLES_FOR_CAPS = {"admin", "supervisor", "qa", "user", "reviewer", "operator"}
     fs = get_factory_settings()
     max_users = int(fs.get("maxUsers") or 10)
     max_admins = int(fs.get("maxAdmins") or 2)
     max_supervisors = int(fs.get("maxSupervisors") or 3)
     max_qa = int(fs.get("maxQa") or 3)
 
-    def count_role(ms: List, r: str) -> int:
-        return sum(1 for m in ms if str(m.get("role", "")).strip().lower() == r)
+    def _is_active(m):
+        return str(m.get("status") or "active").strip().lower() != "disabled"
 
-    new_role = str(member_data.get("role", "User")).strip().lower()
-    users = count_role(members, "user")
+    def count_role(ms: List, r: str) -> int:
+        return sum(1 for m in ms if _is_active(m) and str(m.get("role", "")).strip().lower() == r)
+
+    active_members = [m for m in members if _is_active(m)]
+    total = len(active_members)
+    if existing_member and _is_active(existing_member):
+        # Replacing an existing active member does not increase headcount.
+        pass
+    else:
+        total += 1
+    if total > max_users:
+        raise ValueError("Your limit for users reached. Contact support for upgrade.")
+
+    new_role = str(member_data.get("role", "") or "").strip().lower()
+    if new_role not in LEGACY_FIXED_ROLES_FOR_CAPS:
+        # User Group names are not Admin/QA/Supervisor/User — skip legacy role caps.
+        return
+
     admins = count_role(members, "admin")
     supervisors = count_role(members, "supervisor")
     qa = count_role(members, "qa")
 
     if existing_member:
         old_role = str(existing_member.get("role", "")).strip().lower()
-        if old_role == "user":
-            users -= 1
-        elif old_role == "admin":
+        if old_role == "admin":
             admins -= 1
         elif old_role == "supervisor":
             supervisors -= 1
         elif old_role == "qa":
             qa -= 1
 
-    if new_role == "user":
-        users += 1
-    elif new_role == "admin":
+    if new_role == "admin":
         admins += 1
     elif new_role == "supervisor":
         supervisors += 1
     elif new_role == "qa":
         qa += 1
 
-    if users > max_users:
-        raise ValueError("Your limit for users reached. Contact support for upgrade.")
     if admins > max_admins:
         raise ValueError("Your limit for admins reached. Contact support for upgrade.")
     if supervisors > max_supervisors:
         raise ValueError("Your limit for reviewers reached. Contact support for upgrade.")
     if qa > max_qa:
-        raise ValueError("Your limit for QA profiles reached. Contact support for upgrade.")
+        raise ValueError("Your limit for QA reached. Contact support for upgrade.")
 
 
 def _member_username_key(member: Dict[str, Any]) -> str:
@@ -1237,6 +1366,17 @@ def factory_reset() -> Dict[str, Any]:
             except Exception:
                 pass
     clear_current_user()
+    ug_path = _get_storage_path("userGroups.json")
+    try:
+        _save_json_file(ug_path, [])
+    except Exception:
+        pass
+    try:
+        ug_bak = ug_path.with_suffix(ug_path.suffix + ".bak")
+        if ug_bak.exists():
+            ug_bak.unlink()
+    except Exception:
+        pass
     delete_session_power_audit_pending()
     clean_flag = _get_storage_path(_APP_CLEAN_STOP_FLAG)
     if clean_flag.exists():

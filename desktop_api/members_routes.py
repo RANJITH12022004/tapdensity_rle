@@ -11,7 +11,6 @@ from desktop_api import auth_store
 from desktop_api import rbac_compat
 from desktop_api.desktop_helpers import (
     audit_event,
-    audit_member_permissions_if_changed,
     can_assign_feature_overrides,
     display_role_label,
     password_strength_error,
@@ -36,47 +35,9 @@ def register_members_routes(bp, kiosk):
     @bp.route("/members", methods=["POST"])
     @auth_store.require_internal("user-add")
     def desktop_members_create(user):
-        try:
-            member_data = request.get_json(force=True, silent=True) or {}
-            if payload_has_protected_feature_overrides(member_data):
-                return jsonify({"error": "Protected features cannot be overridden."}), 400
-            if data_service.has_non_empty_feature_overrides(member_data) and not can_assign_feature_overrides(user):
-                return jsonify({"error": "Forbidden. Only Factory/Admin can assign feature overrides."}), 403
-            pwd = str(member_data.get("password") or "").strip()
-            if not pwd:
-                return jsonify({"error": "Password is required when adding a user."}), 400
-            pwd_err = password_strength_error(pwd)
-            if pwd_err:
-                return jsonify({"error": pwd_err}), 400
-            member_data["password"] = pwd
-            member_id = data_service.save_member(member_data)
-            prepare_desktop_created_member(member_id, pwd)
-            created = data_service.get_member(member_id) or dict(member_data)
-            sig = auth_store.desktop_signature(user)
-            uname = created.get("username") or created.get("name") or ""
-            urole = created.get("role") or ""
-            audit_event(
-                kiosk,
-                user,
-                action="Added new user",
-                outcome="success",
-                entity_type="member",
-                entity_id=member_id,
-                entity_name=uname,
-                details="Added new user: {} ({})".format(
-                    uname, display_role_label(urole) if urole else "—"
-                ),
-                target_user=uname,
-                after=data_service.sanitize_member_for_client(created) or created,
-                signature=sig,
-            )
-            audit_member_permissions_if_changed(kiosk, user, None, created, member_id=member_id)
-            safe = data_service.sanitize_member_for_client(created) or dict(created)
-            return jsonify({"id": member_id, "member": safe}), 201
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "error": "Profile creation is not allowed from the desktop client. Create users on the machine kiosk."
+        }), 403
 
     @bp.route("/members/<int:member_id>", methods=["GET"])
     @auth_store.require_auth
@@ -123,12 +84,24 @@ def register_members_routes(bp, kiosk):
                 return jsonify({"error": "Forbidden. Only Factory/Admin can assign feature overrides."}), 403
             member_data["id"] = member_id
             acting_id = user.get("id")
-            password_changed = "password" in member_data and member_data.get("password") not in (None, "")
+            old_password = str((before_member or {}).get("password") or "")
+            new_password = str(member_data.get("password") or "")
+            password_changed = "password" in member_data and new_password not in ("", old_password)
             data_service.save_member(member_data, acting_user_id=acting_id)
             updated = data_service.get_member(member_id) or dict(member_data)
             sig = auth_store.desktop_signature(user)
             uname = updated.get("username") or updated.get("name") or ""
-            if password_changed:
+            perm_payload = rbac_compat.build_permission_change_audit(
+                before_member,
+                updated,
+                target_username=uname,
+            )
+            name_before = str((before_member or {}).get("name") or "").strip()
+            name_after = str((updated or {}).get("name") or "").strip()
+            role_before = str((before_member or {}).get("role") or "").strip()
+            role_after = str((updated or {}).get("role") or "").strip()
+            profile_changed = (name_before != name_after) or (role_before != role_after) or bool(perm_payload)
+            if password_changed and not profile_changed:
                 audit_event(
                     kiosk,
                     user,
@@ -141,23 +114,35 @@ def register_members_routes(bp, kiosk):
                     target_user=uname,
                     signature=sig,
                 )
-            audit_member_permissions_if_changed(
-                kiosk, user, before_member, updated, member_id=member_id
-            )
-            audit_event(
-                kiosk,
-                user,
-                action="User update",
-                outcome="success",
-                entity_type="member",
-                entity_id=member_id,
-                entity_name=uname,
-                details="Member updated",
-                target_user=uname,
-                before=data_service.sanitize_member_for_client(before_member) if before_member else None,
-                after=data_service.sanitize_member_for_client(updated) or updated,
-                signature=sig,
-            )
+            elif profile_changed or password_changed:
+                parts = ["Profile edited for {}".format(uname or "--")]
+                if name_before != name_after:
+                    parts.append("Full name: {} -> {}".format(name_before or "--", name_after or "--"))
+                if role_before != role_after:
+                    parts.append(
+                        "Role: {} -> {}".format(
+                            display_role_label(role_before),
+                            display_role_label(role_after),
+                        )
+                    )
+                if perm_payload and perm_payload.get("details"):
+                    parts.append(str(perm_payload.get("details")))
+                if password_changed:
+                    parts.append("Password changed")
+                audit_event(
+                    kiosk,
+                    user,
+                    action="Profile edited",
+                    outcome="success",
+                    entity_type="member",
+                    entity_id=member_id,
+                    entity_name=uname,
+                    details=" | ".join(parts),
+                    target_user=uname,
+                    before=data_service.sanitize_member_for_client(before_member) if before_member else None,
+                    after=data_service.sanitize_member_for_client(updated) or updated,
+                    signature=sig,
+                )
             safe = data_service.sanitize_member_for_client(updated) or dict(updated)
             return jsonify({"id": member_id, "member": safe}), 200
         except ValueError as e:
@@ -353,8 +338,9 @@ def register_members_routes(bp, kiosk):
                 return jsonify({"error": str(e)}), 400
             name_in = "name" in payload and str(payload.get("name") or "").strip()
             pwd_in = "password" in payload and str(payload.get("password") or "").strip()
-            if not name_in and not pwd_in:
-                return jsonify({"error": "Provide a name and/or new password to save."}), 400
+            overrides_in = isinstance(payload.get("featureOverrides"), dict)
+            if not name_in and not pwd_in and not overrides_in:
+                return jsonify({"error": "Provide a name, new password, and/or permission changes to save."}), 400
             password_changed = pwd_in
             data_service.save_member(member_data, acting_user_id=user.get("id"))
             updated = data_service.get_member(member_id) or member_data
@@ -373,6 +359,30 @@ def register_members_routes(bp, kiosk):
                     target_user=uname,
                     signature=sig,
                 )
+            details = "Profile updated (self)"
+            try:
+                from desktop_api.desktop_helpers import member_permission_change_detail
+            except Exception:
+                member_permission_change_detail = None
+            if overrides_in and callable(globals().get("member_permission_change_detail")):
+                pass
+            # Prefer local helper if members_routes already imports permission detail helpers
+            try:
+                before_allow = ((before_member.get("featureOverrides") or {}).get("allow") or [])
+                after_allow = ((updated.get("featureOverrides") or {}).get("allow") or [])
+                before_set = set(str(x) for x in before_allow if x)
+                after_set = set(str(x) for x in after_allow if x)
+                granted = sorted(after_set - before_set)
+                revoked = sorted(before_set - after_set)
+                bits = []
+                if granted:
+                    bits.append("Permissions granted: " + ", ".join(granted))
+                if revoked:
+                    bits.append("Permissions revoked: " + ", ".join(revoked))
+                if bits:
+                    details = "Profile updated (self) | " + " | ".join(bits)
+            except Exception:
+                pass
             audit_event(
                 kiosk,
                 user,
@@ -381,7 +391,7 @@ def register_members_routes(bp, kiosk):
                 entity_type="member",
                 entity_id=member_id,
                 entity_name=uname,
-                details="Profile updated (self)",
+                details=details,
                 target_user=uname,
                 before=data_service.sanitize_member_for_client(before_member),
                 after=data_service.sanitize_member_for_client(updated) or updated,

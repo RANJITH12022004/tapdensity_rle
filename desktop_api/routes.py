@@ -321,12 +321,18 @@ def create_blueprint(kiosk):
             purpose = "download"
         uname = user.get("username") or user.get("name") or "--"
         role = user.get("role") or "--"
+        if purpose == "view":
+            action = "Report previewed"
+            details = "Previewed via desktop client | report-{}.pdf | by {} ({})".format(report_id, uname, role)
+        else:
+            action = "Report downloaded"
+            details = "Downloaded via desktop client ({}) | report-{}.pdf | by {} ({})".format(
+                purpose, report_id, uname, role
+            )
         log_major(
             user,
-            "Reports exported",
-            "Exported 1 report via desktop client ({}) | report-{}.pdf | exported by {} ({})".format(
-                purpose, report_id, uname, role
-            ),
+            action,
+            details,
             entity_type="report",
             entity_id=report_id,
             entity_name="report-{}".format(report_id),
@@ -385,8 +391,8 @@ def create_blueprint(kiosk):
             role = user.get("role") or "--"
             log_major(
                 user,
-                "Reports exported",
-                "Exported {} report{} via desktop client (ZIP) | exported by {} ({}){}".format(
+                "Report downloaded",
+                "Downloaded {} report{} via desktop client (ZIP) | by {} ({}){}".format(
                     added,
                     "" if added == 1 else "s",
                     uname,
@@ -442,8 +448,8 @@ def create_blueprint(kiosk):
             role = user.get("role") or "--"
             log_major(
                 user,
-                "Audit trail exported",
-                "Desktop client | entries {} | exported by {} ({})".format(len(entries), uname, role),
+                "Audit trail downloaded",
+                "Downloaded via desktop client | entries {} | by {} ({})".format(len(entries), uname, role),
                 entity_type="audit",
                 entity_name="audit-download",
                 target_user=uname,

@@ -13,15 +13,14 @@ from desktop_api import rbac_compat
 
 
 def display_role_label(role_str):
-    role = str(role_str or "").strip().lower()
-    labels = {
-        "factory": "Factory",
-        "admin": "Admin",
-        "supervisor": "Supervisor",
-        "operator": "Operator",
-        "qa": "QA",
-    }
-    return labels.get(role, role_str or "—")
+    raw = str(role_str or "").strip()
+    role = raw.lower()
+    if role == "supervisor":
+        return "Reviewer"
+    if role == "factory":
+        return "Factory"
+    # User Group names and other roles pass through unchanged.
+    return raw or "—"
 
 
 def password_strength_error(password: str) -> str:
@@ -40,7 +39,14 @@ def password_strength_error(password: str) -> str:
 
 
 def self_profile_payload_from_request(existing: dict, payload: dict) -> dict:
+    """Self-service profile: name, optional password, and permission cards. User ID/role locked."""
     out = dict(existing)
+    out["username"] = existing.get("username")
+    out["role"] = existing.get("role")
+    if "status" in existing:
+        out["status"] = existing.get("status")
+    if "failedAttempts" in existing:
+        out["failedAttempts"] = existing.get("failedAttempts")
     if "name" in payload:
         name = str(payload.get("name") or "").strip()
         if name:
@@ -51,6 +57,11 @@ def self_profile_payload_from_request(existing: dict, payload: dict) -> dict:
         if pwd_err:
             raise ValueError(pwd_err)
         out["password"] = str(new_pwd)
+    if "featureOverrides" in payload and isinstance(payload.get("featureOverrides"), dict):
+        allow = payload.get("featureOverrides", {}).get("allow") or []
+        if not isinstance(allow, list):
+            allow = []
+        out["featureOverrides"] = {"allow": [str(k) for k in allow if k], "deny": []}
     return out
 
 
