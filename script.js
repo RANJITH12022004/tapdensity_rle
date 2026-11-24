@@ -9509,18 +9509,74 @@ function attachKeyboardToInputs() {
     });
 }
 
-function initKioskDomReady() {
-    bindTestRunDecimalInputs();
-    attachKeyboardToInputs();
-    refreshFactoryPolicyFromServer();
-    scheduleFactoryPolicyRefreshRetries();
+function refreshFactoryPolicyFromServer() {
+    return apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
+        var settings = _factorySettingsFromApiResult(result);
+        _persistFactorySettingsCache(settings);
+        _applyFactoryPolicyFromSettings(settings);
+        updateLoginFactorySettingsDisplay(settings);
+        return settings;
+    }).catch(function () {
+        try {
+            var stored = localStorage.getItem('factorySettings');
+            var settings = stored ? JSON.parse(stored) : {};
+            _applyFactoryPolicyFromSettings(settings);
+            updateLoginFactorySettingsDisplay(settings);
+            return settings;
+        } catch (e) {
+            _applyFactoryPolicyFromSettings({});
+            updateLoginFactorySettingsDisplay({});
+            return {};
+        }
+    });
+}
 
+function scheduleFactoryPolicyRefreshRetries() {
+    if (_factoryPolicyRetryTimer != null) return;
+    var attempts = 0;
+    var maxAttempts = 24;
+    _factoryPolicyRetryTimer = setInterval(function () {
+        attempts++;
+        var onLogin = document.getElementById('page-login');
+        var loginVisible = onLogin && onLogin.style.display !== 'none';
+        if (!loginVisible && window.currentUser) {
+            clearInterval(_factoryPolicyRetryTimer);
+            _factoryPolicyRetryTimer = null;
+            return;
+        }
+        refreshFactoryPolicyFromServer().then(function (settings) {
+            var mins = settings && settings.autoLogoutMinutes != null ? parseInt(settings.autoLogoutMinutes, 10) : 0;
+            var days = settings && settings.passwordResetPeriodDays != null ? parseInt(settings.passwordResetPeriodDays, 10) : 0;
+            if ((!isNaN(mins) && mins > 0) || (!isNaN(days) && days > 0) || attempts >= maxAttempts) {
+                clearInterval(_factoryPolicyRetryTimer);
+                _factoryPolicyRetryTimer = null;
+            }
+        });
+        if (attempts >= maxAttempts) {
+            clearInterval(_factoryPolicyRetryTimer);
+            _factoryPolicyRetryTimer = null;
+        }
+    }, 5000);
+}
+
+function initKioskDomReady() {
     document.querySelectorAll('.nav-item[data-page]').forEach(function (btn) {
+        if (btn._sidebarNavBound) return;
+        btn._sidebarNavBound = true;
         btn.addEventListener('click', function () {
             var page = btn.getAttribute('data-page');
-            if (page) goToPage(page);
+            if (page && typeof goToPage === 'function') goToPage(page);
         });
     });
+    try {
+        if (typeof bindTestRunDecimalInputs === 'function') bindTestRunDecimalInputs();
+        if (typeof attachKeyboardToInputs === 'function') attachKeyboardToInputs();
+        if (typeof refreshFactoryPolicyFromServer === 'function') refreshFactoryPolicyFromServer();
+        if (typeof scheduleFactoryPolicyRefreshRetries === 'function') scheduleFactoryPolicyRefreshRetries();
+    } catch (e) {
+        console.error('Kiosk shell init (partial):', e);
+    }
+
 
     var originalGoToPage = goToPage;
     goToPage = function (pageName) {
@@ -9560,6 +9616,7 @@ function initKioskDomReady() {
     if (typeof applyQuickUspModeToSpeedHeight === 'function') applyQuickUspModeToSpeedHeight();
     if (typeof updateCreateRecipeContinueButton === 'function') updateCreateRecipeContinueButton();
 }
+
 
 function resetKioskSessionAndShowLoginOnDomReady() {
     try { localStorage.removeItem('currentUser'); } catch (e) {}
